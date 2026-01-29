@@ -6,8 +6,8 @@
   "author": "Lucas <lucas.soares02@hotmail.com>",
   "main": "index.js",
   "scripts": {
-    "dev": "nodemon server.js",
-    "start": "node server.js"
+    "dev": "nodemon index.js",
+    "start": "node index.js"
   },
   "keywords": [],
   "license": "ISC",
