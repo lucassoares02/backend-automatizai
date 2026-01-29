@@ -21,16 +21,16 @@ exports.createUser = async (req, res) => {
   try {
     const result = await userService.createUser(name, email, password, active);
 
-    const html = templateHtml;
-    const replaceHtml = html.replaceAll("@name", name).replaceAll("@email", email).replaceAll("@link", link);
+    // const html = templateHtml;
+    // const replaceHtml = html.replaceAll("@name", name).replaceAll("@email", email).replaceAll("@link", link);
 
-    await sendEmailSmtp(
-      `"Fornecees" <${process.env.MAIL_FROM}>`,
-      email,
-      "Cadastro de Usuário",
-      "Seu cadastro foi realizado com sucesso",
-      replaceHtml
-    );
+    // await sendEmailSmtp(
+    //   `"Fornecees" <${process.env.MAIL_FROM}>`,
+    //   email,
+    //   "Cadastro de Usuário",
+    //   "Seu cadastro foi realizado com sucesso",
+    //   replaceHtml
+    // );
 
     res.status(201).json(result);
   } catch (err) {

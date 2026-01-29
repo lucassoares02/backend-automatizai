@@ -1,6 +1,8 @@
 const pool = require("../db");
 const { hashPassword } = require("../helpers/hash");
 const axios = require("axios");
+const base = require("../templates/base.json");
+
 /**
  * Get All users
  */
@@ -46,80 +48,14 @@ const createCompanies = async (data) => {
     [user, company.id, type],
   );
 
+  const title_flow = `${company.id} - ${name}`;
+
   // 3. Monta o payload do workflow do n8n
-  const workflowPayload = {
-    name: `${company.id} - ${name}`, // nome do workflow
-    nodes: [
-      {
-        parameters: {},
-        type: "n8n-nodes-base.manualTrigger",
-        typeVersion: 1,
-        position: [-384, -112],
-        id: "ec9b39d0-2bc1-44e0-bd90-5fd383d23efb",
-        name: "When clicking ‘Execute workflow’",
-      },
-      {
-        parameters: {
-          assignments: {
-            assignments: [
-              {
-                id: "896af41c-e900-4ff8-ac4c-b969f2e42383",
-                name: "company",
-                value: `${company.id} - ${name}`,
-                type: "string",
-              },
-            ],
-          },
-          options: {},
-        },
-        type: "n8n-nodes-base.set",
-        typeVersion: 3.4,
-        position: [-176, -112],
-        id: "23c1bcfb-ead4-40c5-83f3-057eef2470f6",
-        name: "Edit Fields",
-      },
-    ],
-    connections: {
-      [name]: {
-        main: [
-          [
-            {
-              node: name,
-              type: "main",
-              index: 0,
-            },
-          ],
-        ],
-      },
-    },
-    settings: {
-      saveExecutionProgress: true,
-      saveManualExecutions: true,
-      saveDataErrorExecution: "all",
-      saveDataSuccessExecution: "all",
-      executionTimeout: 3600,
-      errorWorkflow: "VzqKEW0ShTXA5vPj",
-      timezone: "America/New_York",
-      executionOrder: "v1",
-      callerPolicy: "workflowsFromSameOwner",
-      callerIds: "14, 18, 23",
-      timeSavedPerExecution: 1,
-      availableInMCP: false,
-    },
-    staticData: {
-      lastId: 1,
-    },
-    shared: [
-      {
-        role: "workflow:owner",
-        workflowId: "2tUt1wbLX592XDdX",
-        projectId: "2tUt1wbLX592XDdX",
-        project: {
-          name: name, // substituído
-        },
-      },
-    ],
-  };
+  const workflowPayload = base;
+  workflowPayload["name"] = title_flow;
+  workflowPayload["nodes"][2]["parameters"]["url"] = `https://backend-automatizai.onrender.com/api/companies/${company.id}`;
+
+  console.log("Payload do workflow:", JSON.stringify(workflowPayload, null, 2));
 
   // 4. Envia para o n8n
   await axios.post(`${process.env.URL_N8N}workflows`, workflowPayload, {
