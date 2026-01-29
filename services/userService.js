@@ -21,9 +21,7 @@ const validateLogin = async (email, password) => {
 
 const getAllUsers = async () => {
   // const result = await pool.query('SELECT * FROM users');
-  const result = await pool.query(
-    `SELECT u.*, string_agg(a.id::text, ' | ' ORDER BY a.id) AS associates FROM users u LEFT JOIN user_associate ua ON ua.user_id = u.id LEFT JOIN associates a ON a.id = ua.associate_id GROUP BY u.id`
-  );
+  const result = await pool.query(`SELECT * from users ORDER BY id DESC`);
   return result.rows;
 };
 
