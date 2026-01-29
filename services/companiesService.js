@@ -6,10 +6,7 @@ const find = async (id) => {
 };
 
 const findId = async (id, company) => {
-  const result = await pool.query(
-    "select c.*, uc.relation_type from companies c join user_companies uc on uc.company_id = c.id where uc.user_id = $1 and uc.company_id = $2",
-    [id, company],
-  );
+  const result = await pool.query("select c.* from companies c where c.id = $1", [company]);
   return result.rows || null;
 };
 
