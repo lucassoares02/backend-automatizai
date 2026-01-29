@@ -16,8 +16,8 @@ const routes = require("./src/routes");
 
 const corsOptions = {
   origin: `${process.env.ORIGIN}`,
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  // methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type, Authorization"],
 };
 
 app.use(cors(corsOptions));
