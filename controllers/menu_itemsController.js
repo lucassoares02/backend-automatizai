@@ -32,6 +32,24 @@ const find = async (req, res) => {
 };
 
 /**
+ * Get MenuItems by Company ID
+ */
+const findByCompany = async (req, res) => {
+  const { id } = req.params;
+  if (!id || isNaN(id)) {
+    return res.status(400).json({ error: "Invalid ID" });
+  }
+  try {
+    const item = await service.findByCompany(id);
+    if (!item) return res.status(404).json({ error: "MenuItems not found" });
+    return res.status(200).json(item);
+  } catch (error) {
+    console.error("Error fetching MenuItems by ID:", error);
+    return res.status(500).json({ error: "Failed to fetch MenuItems" });
+  }
+};
+
+/**
  * Create new MenuItems
  */
 const create = async (req, res) => {
@@ -52,8 +70,8 @@ const create = async (req, res) => {
  * Update MenuItems
  */
 const update = async (req, res) => {
-  const { id } = req.params;
   const menu_items = req.body;
+  const { id } = menu_items;
   if (!id || isNaN(id)) {
     return res.status(400).json({ error: "Invalid ID" });
   }
@@ -85,4 +103,4 @@ const remove = async (req, res) => {
   }
 };
 
-module.exports = { findAll, find, create, update, remove };
+module.exports = { findAll, find, findByCompany, create, update, remove };

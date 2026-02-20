@@ -13,22 +13,27 @@ const find = async (id) => {
   return result.rows[0] || null;
 };
 
+const findByCompany = async (id) => {
+  const result = await pool.query("SELECT * FROM menu_items WHERE company_id = $1 order by id desc", [id]);
+  return result.rows || null;
+};
+
 const create = async (data) => {
   // espera um objeto com propriedades em camelCase (ex: { someField: 'x' })
-  const { id, companyId, categoryId, name, description, price, available } = data;
+  const { company_id, category_id, name, description, price, available } = data;
   const result = await pool.query(
-    "INSERT INTO menu_items (id, company_id, category_id, name, description, price, available) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *",
-    [id, companyId, categoryId, name, description, price, available]
+    "INSERT INTO menu_items ( company_id, category_id, name, description, price, available) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
+    [company_id, category_id, name, description, price, available],
   );
   return result.rows[0];
 };
 
 const update = async (data) => {
   // espera um objeto com propriedades em camelCase + id
-  const { id, companyId, categoryId, name, description, price, available } = data;
+  const { id, company_id, category_id, name, description, price, available } = data;
   const result = await pool.query(
     "UPDATE menu_items SET id = $1, company_id = $2, category_id = $3, name = $4, description = $5, price = $6, available = $7 WHERE id = $8 RETURNING *",
-    [id, companyId, categoryId, name, description, price, available, id]
+    [id, company_id, category_id, name, description, price, available, id],
   );
   return result.rows[0];
 };
@@ -38,4 +43,4 @@ const remove = async (id) => {
   return result.rows[0];
 };
 
-module.exports = { findAll, find, create, update, remove };
+module.exports = { findAll, find, findByCompany, create, update, remove };
