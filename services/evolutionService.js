@@ -47,7 +47,7 @@ const updateInstance = async (instanceName) => {
   const bodyWebHook = JSON.stringify({
     webhook: {
       enabled: true,
-      webhookBase64: true,
+      base64: true,
       url: `${n8nUrlWebhook}${instanceName}`,
       events: ["MESSAGES_UPSERT"],
     },

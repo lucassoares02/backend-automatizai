@@ -15,12 +15,17 @@ const duplicate = async (instance, company) => {
 
   const workflow = await response.json();
 
+  // export workflow to file json
+  // fs.writeFileSync(`./${instance}.json`, JSON.stringify(workflow, null, 2));
+
   // alterar nodes
   const nodes = replaceCompanyId(workflow.nodes, company);
 
+  const updatedNodes = replaceWebhookId(nodes, instance);
+
   const newWorkflow = {
     name: instance,
-    nodes,
+    nodes: updatedNodes,
     connections: workflow.connections,
     settings: {},
   };
@@ -34,12 +39,49 @@ const duplicate = async (instance, company) => {
     body: JSON.stringify(newWorkflow),
   });
 
-  if (!create.ok) {
-    throw new Error(await create.text());
+  const workflowCreated = await create.json();
+
+  console.log(workflowCreated.id);
+
+  const publish = await fetch(`${n8nUrl}workflows/${workflowCreated.id}/activate`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-N8N-API-KEY": token,
+    },
+  });
+
+  if (!publish.ok) {
+    throw new Error(await publish.text());
   }
 
-  return await create.json();
+  return await publish.json();
 };
+
+const replaceWebhookId = (nodes, instance) => {
+  const oldId = "d5c1216d-4d32-406a-afde-ddc5ca51b40d";
+  const otherId = "4f9d86ae-04c0-49ca-a77c-a38f5a345aad";
+
+  // Função recursiva para percorrer objetos e substituir strings
+  const traverse = (obj) => {
+    if (typeof obj === "string") {
+      // Substitui todas as ocorrências (caso apareça mais de uma vez no mesmo campo)
+      return obj.replaceAll(oldId, instance).replaceAll(otherId, instance);
+    } else if (Array.isArray(obj)) {
+      return obj.map((item) => traverse(item));
+    } else if (obj && typeof obj === "object") {
+      const newObj = {};
+      for (const [key, value] of Object.entries(obj)) {
+        newObj[key] = traverse(value);
+      }
+      return newObj;
+    }
+    return obj;
+  };
+
+  return nodes.map((node) => traverse(node));
+};
+
 const sanitizeWorkflow = (workflow, instance) => {
   const nodes = workflow.nodes.map((node) => {
     const cleanNode = {
