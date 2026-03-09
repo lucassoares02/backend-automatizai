@@ -1,4 +1,5 @@
 const evolutionUrl = process.env.EVOLUTION_API_URL;
+const n8nUrlWebhook = process.env.URL_N8N.replace("/api/v1/", "/webhook/");
 
 const create = async (instanceName, integration, qrcode) => {
   console.log(instanceName, integration, qrcode);
@@ -47,7 +48,7 @@ const updateInstance = async (instanceName) => {
     webhook: {
       enabled: true,
       webhookBase64: true,
-      url: `${process.env.URL_N8N}/webhook/${instanceName}`,
+      url: `${n8nUrlWebhook}${instanceName}`,
       events: ["MESSAGES_UPSERT"],
     },
   });
