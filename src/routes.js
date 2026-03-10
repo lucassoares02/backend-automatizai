@@ -14,6 +14,7 @@ const companiessss = require("../controllers/companiessssController");
 const company = require("../controllers/company_address_Controller");
 const payment_methods = require("../controllers/payment_methodsController");
 const connections = require("../controllers/connectionsController");
+const additional_info = require("../controllers/additional_infoController");
 
 router.get("/", (req, res) => {
   res.send("API is running 🚀");
@@ -88,5 +89,13 @@ router.get("/connections/:id", connections.find);
 router.post("/connections", connections.create);
 router.patch("/connections/:id", connections.update);
 router.delete("/connections/:id/:instance", connections.remove);
+router.post("/search-address", connections.searchAddress);
+
+//additional_info
+router.get("/additional_info/company/:id", additional_info.findAll);
+router.get("/additional_info/:id", additional_info.find);
+router.post("/additional_info", additional_info.create);
+router.patch("/additional_info/:id", additional_info.update);
+router.delete("/additional_info/:id", additional_info.remove);
 
 module.exports = router;

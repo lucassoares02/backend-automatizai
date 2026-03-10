@@ -1,6 +1,7 @@
 const service = require("../services/connectionsService");
 const evolution = require("../services/evolutionService");
 const n8n = require("../services/n8nService");
+const googleService = require("../services/googleService");
 
 /**
  * Get all Connections
@@ -111,4 +112,20 @@ const remove = async (req, res) => {
   }
 };
 
-module.exports = { findAll, find, create, update, remove };
+const searchAddress = async (req, res) => {
+  const { logradouro, cidade, estado } = req.body;
+
+  if (!logradouro || !cidade || !estado) {
+    return res.status(400).json({ error: "Missing required query parameters" });
+  }
+
+  try {
+    const addressData = await googleService.buscarEndereco(logradouro, cidade, estado);
+    return res.status(200).json(addressData);
+  } catch (error) {
+    console.error("Error searching address:", error);
+    return res.status(500).json({ error: "Failed to search address" });
+  }
+};
+
+module.exports = { findAll, find, create, update, remove, searchAddress };
