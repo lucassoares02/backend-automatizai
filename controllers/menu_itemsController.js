@@ -1,4 +1,15 @@
 const service = require("../services/menu_itemsService");
+const minio = require("./minioController");
+const multer = require("multer");
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const allowed = ["image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"];
+    allowed.includes(file.mimetype) ? cb(null, true) : cb(new Error("Tipo de arquivo não suportado"));
+  },
+});
 
 /**
  * Get all MenuItems
@@ -103,4 +114,23 @@ const remove = async (req, res) => {
   }
 };
 
-module.exports = { findAll, find, findByCompany, create, update, remove };
+/**
+ * Upload image to MinIO and return the public URL
+ */
+const uploadImage = async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Nenhuma imagem enviada" });
+
+  const { buffer, originalname, mimetype } = req.file;
+  const ext = originalname.split(".").pop().toLowerCase();
+  const filename = `menu_items/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
+
+  try {
+    const { url } = await minio.uploadFile(buffer, filename, mimetype);
+    return res.status(200).json({ success: true, url });
+  } catch (error) {
+    console.error("Error uploading menu item image:", error);
+    return res.status(500).json({ error: "Falha ao fazer upload da imagem" });
+  }
+};
+
+module.exports = { findAll, find, findByCompany, create, update, remove, uploadImage, upload };

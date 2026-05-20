@@ -1,87 +1,88 @@
 const evolutionUrl = process.env.EVOLUTION_API_URL;
-const n8nUrlWebhook = process.env.URL_N8N.replace("/api/v1/", "/webhook/");
+
+// Safely build the N8N webhook base URL from the API URL
+const _buildN8nWebhookUrl = () => {
+  const base = process.env.URL_N8N || "";
+  if (base.includes("/api/v1/")) {
+    return base.replace("/api/v1/", "/webhook/");
+  }
+  // Fallback: append /webhook/ to origin
+  try {
+    const u = new URL(base);
+    return `${u.origin}/webhook/`;
+  } catch {
+    return base;
+  }
+};
+const n8nUrlWebhook = _buildN8nWebhookUrl();
+
+const FETCH_TIMEOUT_MS = 15000;
+
+const _fetcher = (url, options = {}) =>
+  fetch(url, { ...options, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
 
 const create = async (instanceName, integration, qrcode) => {
-  console.log(instanceName, integration, qrcode);
-
-  const tes = JSON.stringify({
-    instanceName: instanceName,
-    integration: integration,
-    qrcode: qrcode,
-  });
-
-  console.log(tes);
-
-  const response = await fetch(`${evolutionUrl}/instance/create`, {
+  const response = await _fetcher(`${evolutionUrl}/instance/create`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       apikey: process.env.TOKEN_EVOLUTION,
     },
-    body: JSON.stringify({
-      instanceName: instanceName,
-      integration: integration,
-      qrcode: qrcode,
-    }),
+    body: JSON.stringify({ instanceName, integration, qrcode }),
   });
 
   const text = await response.text();
-  console.log("STATUS:", response.status);
-  console.log("BODY:", text);
-
   if (!response.ok) {
-    throw new Error(text);
+    throw new Error(`Evolution create failed [${response.status}]: ${text}`);
   }
-
   return JSON.parse(text);
 };
 
 const updateInstance = async (instanceName) => {
   const bodyWebSocket = JSON.stringify({
-    instanceName: instanceName,
+    instanceName,
     websocket: {
       enabled: true,
       events: ["APPLICATION_STARTUP", "CONNECTION_UPDATE", "QRCODE_UPDATED"],
     },
   });
+
   const bodyWebHook = JSON.stringify({
     webhook: {
       enabled: true,
       base64: true,
-      url: `${n8nUrlWebhook}${instanceName}`,
-      events: ["MESSAGES_UPSERT"],
+      url: `${process.env.API_BASE_URL}/api/connections/webhook`,
+      events: ["MESSAGES_UPSERT", "CONNECTION_UPDATE"],
     },
   });
 
-  const responseWebSocket = await fetch(`${evolutionUrl}/websocket/set/${instanceName}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: process.env.TOKEN_EVOLUTION,
-    },
-    body: bodyWebSocket,
-  });
+  const [wsRes, whRes] = await Promise.all([
+    _fetcher(`${evolutionUrl}/websocket/set/${instanceName}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", apikey: process.env.TOKEN_EVOLUTION },
+      body: bodyWebSocket,
+    }),
+    _fetcher(`${evolutionUrl}/webhook/set/${instanceName}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", apikey: process.env.TOKEN_EVOLUTION },
+      body: bodyWebHook,
+    }),
+  ]);
 
-  const responseWebHook = await fetch(`${evolutionUrl}/webhook/set/${instanceName}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: process.env.TOKEN_EVOLUTION,
-    },
-    body: bodyWebHook,
-  });
-
-  const text = await responseWebHook.text();
-
-  if (!responseWebHook.ok) {
-    throw new Error(text);
+  if (!wsRes.ok) {
+    const t = await wsRes.text();
+    throw new Error(`Evolution websocket/set failed [${wsRes.status}]: ${t}`);
+  }
+  if (!whRes.ok) {
+    const t = await whRes.text();
+    throw new Error(`Evolution webhook/set failed [${whRes.status}]: ${t}`);
   }
 
-  return JSON.parse('{"message": "success"}');
+  return { message: "success" };
 };
 
-const getInstance = async () => {
-  const response = await fetch(`${evolutionUrl}/instance/fetchInstances`, {
+const getQrCode = async (instanceName) => {
+  const response = await _fetcher(`${evolutionUrl}/instance/connect/${instanceName}`, {
     method: "GET",
     headers: {
       "Content-Type": "application/json",
@@ -90,19 +91,15 @@ const getInstance = async () => {
   });
 
   const text = await response.text();
-  console.log("STATUS:", response.status);
-  console.log("BODY:", text);
-
   if (!response.ok) {
-    throw new Error(text);
+    throw new Error(`Evolution connect failed [${response.status}]: ${text}`);
   }
-
   return JSON.parse(text);
 };
 
-const deleteInstance = async (instanceName) => {
-  const response = await fetch(`${evolutionUrl}/instance/delete/${instanceName}`, {
-    method: "DELETE",
+const testConnection = async (instanceName) => {
+  const response = await _fetcher(`${evolutionUrl}/instance/connectionState/${instanceName}`, {
+    method: "GET",
     headers: {
       "Content-Type": "application/json",
       apikey: process.env.TOKEN_EVOLUTION,
@@ -110,14 +107,49 @@ const deleteInstance = async (instanceName) => {
   });
 
   const text = await response.text();
-  console.log("STATUS:", response.status);
-  console.log("BODY:", text);
-
   if (!response.ok) {
-    throw new Error(text);
+    throw new Error(`Evolution connectionState failed [${response.status}]: ${text}`);
   }
-
   return JSON.parse(text);
 };
 
-module.exports = { create, updateInstance, getInstance, deleteInstance };
+const getInstance = async () => {
+  const response = await _fetcher(`${evolutionUrl}/instance/fetchInstances`, {
+    method: "GET",
+    headers: { "Content-Type": "application/json", apikey: process.env.TOKEN_EVOLUTION },
+  });
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`Evolution fetchInstances failed [${response.status}]: ${text}`);
+  }
+  return JSON.parse(text);
+};
+
+const deleteInstance = async (instanceName) => {
+  const response = await _fetcher(`${evolutionUrl}/instance/delete/${instanceName}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json", apikey: process.env.TOKEN_EVOLUTION },
+  });
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`Evolution deleteInstance failed [${response.status}]: ${text}`);
+  }
+  return JSON.parse(text);
+};
+
+const forwardToN8n = async (instanceName, body) => {
+  const url = `${n8nUrlWebhook}${instanceName}`;
+  const res = await _fetcher(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: typeof body === "string" ? body : JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`N8N forward failed [${res.status}]: ${t}`);
+  }
+};
+
+module.exports = { create, updateInstance, getQrCode, testConnection, getInstance, deleteInstance, forwardToN8n };

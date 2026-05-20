@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const user = require("../controllers/userController");
 const login = require("../controllers/loginController");
+const googleAuth = require("../controllers/googleAuthController");
 const authMiddleware = require("../src/middlewares/middleware");
 const mailer = require("../controllers/maillerController");
 const register = require("../controllers/registerController");
@@ -15,12 +16,19 @@ const company = require("../controllers/company_address_Controller");
 const payment_methods = require("../controllers/payment_methodsController");
 const connections = require("../controllers/connectionsController");
 const additional_info = require("../controllers/additional_infoController");
+const orders = require("../controllers/ordersController");
+const clients = require("../controllers/clientsController");
+const publicCtrl = require("../controllers/publicController");
+const dashboard = require("../controllers/dashboardController");
+const address = require("../controllers/addressController");
+const promotions = require("../controllers/promotionsController");
 
 router.get("/", (req, res) => {
   res.send("API is running 🚀");
 });
 
 router.post("/signin", login.signin);
+router.post("/auth/google", googleAuth.googleSignIn);
 
 // USER
 router.get("/users", authMiddleware, user.getAllUsers);
@@ -59,8 +67,9 @@ router.delete("/menu_categories/:id", menu_categories.remove);
 
 //menu_items
 router.get("/menu_items", menu_items.findAll);
-router.get("/menu_items/:id", menu_items.find);
 router.get("/menu_items/company/:id", menu_items.findByCompany);
+router.get("/menu_items/:id", menu_items.find);
+router.post("/menu_items/upload-image", authMiddleware, menu_items.upload.single("image"), menu_items.uploadImage);
 router.post("/menu_items", menu_items.create);
 router.patch("/menu_items", menu_items.update);
 router.delete("/menu_items/:id", menu_items.remove);
@@ -71,6 +80,7 @@ router.patch("/company/address", company.update);
 //companiessss
 router.get("/companiessss", companiessss.findAll);
 router.get("/companiessss/:id", companiessss.find);
+router.post("/companiessss/upload-image", authMiddleware, companiessss.upload.single("image"), companiessss.uploadImage);
 router.post("/companiessss", companiessss.create);
 router.patch("/companiessss", companiessss.update);
 router.delete("/companiessss/:id", companiessss.remove);
@@ -84,11 +94,15 @@ router.patch("/payment_methods/:id", payment_methods.update);
 router.delete("/payment_methods/:id", payment_methods.remove);
 
 //connections
-router.get("/connections/all/:company", connections.findAll);
-router.get("/connections/:id", connections.find);
-router.post("/connections", connections.create);
-router.patch("/connections/:id", connections.update);
-router.delete("/connections/:id/:instance", connections.remove);
+router.post("/connections/webhook", connections.webhook); // no auth — called by Evolution API
+router.get("/connections/all/:company", authMiddleware, connections.findAll);
+router.get("/connections/qrcode/:instance", authMiddleware, connections.getQrCode);
+router.get("/connections/test/:instance", authMiddleware, connections.testConnection);
+router.get("/connections/status/:instance", authMiddleware, connections.getStatus);
+router.get("/connections/:id", authMiddleware, connections.find);
+router.post("/connections", authMiddleware, connections.create);
+router.patch("/connections/:id", authMiddleware, connections.update);
+router.delete("/connections/:id/:instance", authMiddleware, connections.remove);
 router.post("/search-address", connections.searchAddress);
 
 //additional_info
@@ -97,5 +111,45 @@ router.get("/additional_info/:id", additional_info.find);
 router.post("/additional_info", additional_info.create);
 router.patch("/additional_info/:id", additional_info.update);
 router.delete("/additional_info/:id", additional_info.remove);
+
+//clients
+router.get("/clients/company/:id/summary", authMiddleware, clients.getSummary);
+router.get("/clients/company/:id", authMiddleware, clients.findAllWithStats);
+router.get("/clients/:id/details", authMiddleware, clients.getDetails);
+router.get("/clients/:id", authMiddleware, clients.find);
+router.post("/clients", authMiddleware, clients.create);
+router.patch("/clients/:id", authMiddleware, clients.update);
+router.delete("/clients/:id", authMiddleware, clients.remove);
+
+//orders
+router.get("/orders/company/:id", authMiddleware, orders.findByCompany);
+router.get("/orders/today/:id", authMiddleware, orders.findTodayByCompany);
+router.get("/orders/summary/:id", authMiddleware, orders.summarize);
+router.get("/orders/:id", authMiddleware, orders.find);
+router.post("/orders", authMiddleware, orders.create);
+router.patch("/orders/:id/status", authMiddleware, orders.updateStatus);
+router.delete("/orders/:id", authMiddleware, orders.remove);
+
+//dashboard (aggregated executive view)
+router.get("/dashboard/:companyId", authMiddleware, dashboard.getDashboard);
+
+// promotions / combos
+router.get("/promotions/company/:companyId", authMiddleware, promotions.findByCompany);
+router.post("/promotions", authMiddleware, promotions.create);
+router.patch("/promotions/:id", authMiddleware, promotions.update);
+router.patch("/promotions/:id/status", authMiddleware, promotions.toggleStatus);
+router.delete("/promotions/:id", authMiddleware, promotions.remove);
+
+// address (Google Places autocomplete/details — public, no token needed)
+router.get("/address/autocomplete", address.autocomplete);
+router.get("/address/details/:placeId", address.details);
+
+// public ordering (no auth)
+router.get("/public/company/:companyId", publicCtrl.getCompanyMenu);
+router.get("/public/delivery-fee", publicCtrl.calculateDeliveryFee);
+router.get("/public/client", publicCtrl.findClientByPhone);
+router.post("/public/clients", publicCtrl.createClient);
+router.patch("/public/clients/:id", publicCtrl.updateClient);
+router.post("/public/orders", publicCtrl.createOrder);
 
 module.exports = router;

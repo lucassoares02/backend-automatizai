@@ -29,11 +29,16 @@ const create = async (data) => {
 };
 
 const update = async (data) => {
-  // espera um objeto com propriedades em camelCase + id
-  const { id, companyId, type, label, description, active, createdAt, updatedAt } = data;
+  const { id, label, description, active } = data;
   const result = await pool.query(
-    "UPDATE payment_methods SET id = $1, company_id = $2, type = $3, label = $4, description = $5, active = $6, created_at = $7, updated_at = $8 WHERE id = $9 RETURNING *",
-    [id, companyId, type, label, description, active, createdAt, updatedAt, id],
+    `UPDATE payment_methods
+     SET label       = COALESCE($2, label),
+         description = COALESCE($3, description),
+         active      = COALESCE($4, active),
+         updated_at  = NOW()
+     WHERE id = $1
+     RETURNING *`,
+    [id, label ?? null, description ?? null, active ?? null],
   );
   return result.rows[0];
 };

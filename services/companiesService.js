@@ -1,12 +1,59 @@
 const pool = require("../db");
 
 const find = async (id) => {
-  const result = await pool.query("select c.* from companies c join user_companies uc on uc.company_id = c.id where uc.user_id = $1", [id]);
+  const result = await pool.query(
+    `SELECT
+       c.*,
+       cp.max_distance_meters_delivery,
+       cp.kilometer_price,
+       cp.max_distance_meters_free_delivery,
+       cp.min_price_order,
+       cp.min_tax_delivery
+     FROM companies c
+     JOIN user_companies uc ON uc.company_id = c.id
+     LEFT JOIN LATERAL (
+       SELECT
+         max_distance_meters_delivery,
+         kilometer_price,
+         max_distance_meters_free_delivery,
+         min_price_order,
+         min_tax_delivery
+       FROM company_preferences
+       WHERE company_id = c.id
+       ORDER BY id DESC
+       LIMIT 1
+     ) cp ON true
+     WHERE uc.user_id = $1`,
+    [id],
+  );
   return result.rows || null;
 };
 
 const findId = async (id, company) => {
-  const result = await pool.query("select c.* from companies c where c.id = $1", [company]);
+  const result = await pool.query(
+    `SELECT
+       c.*,
+       cp.max_distance_meters_delivery,
+       cp.kilometer_price,
+       cp.max_distance_meters_free_delivery,
+       cp.min_price_order,
+       cp.min_tax_delivery
+     FROM companies c
+     LEFT JOIN LATERAL (
+       SELECT
+         max_distance_meters_delivery,
+         kilometer_price,
+         max_distance_meters_free_delivery,
+         min_price_order,
+         min_tax_delivery
+       FROM company_preferences
+       WHERE company_id = c.id
+       ORDER BY id DESC
+       LIMIT 1
+     ) cp ON true
+     WHERE c.id = $1`,
+    [company],
+  );
   return result.rows || null;
 };
 

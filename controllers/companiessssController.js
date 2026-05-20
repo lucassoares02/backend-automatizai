@@ -1,4 +1,15 @@
+const multer = require("multer");
 const service = require("../services/companiessssService");
+const minio = require("./minioController");
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_, file, cb) => {
+    const allowed = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
+    cb(null, allowed.includes(file.mimetype));
+  },
+});
 
 /**
  * Get all Companiessss
@@ -86,4 +97,19 @@ const remove = async (req, res) => {
   }
 };
 
-module.exports = { findAll, find, create, update, remove };
+const uploadImage = async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Nenhuma imagem enviada" });
+  const { buffer, originalname, mimetype } = req.file;
+  const folder = req.query.type === "banner" ? "banners" : "logos";
+  const ext = originalname.split(".").pop().toLowerCase();
+  const filename = `companies/${folder}/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
+  try {
+    const { url } = await minio.uploadFile(buffer, filename, mimetype);
+    return res.status(200).json({ success: true, url });
+  } catch (error) {
+    console.error("Error uploading company image:", error);
+    return res.status(500).json({ error: "Falha ao fazer upload da imagem" });
+  }
+};
+
+module.exports = { findAll, find, create, update, remove, uploadImage, upload };

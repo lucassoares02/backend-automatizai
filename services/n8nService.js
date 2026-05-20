@@ -1,27 +1,64 @@
 const n8nUrl = process.env.URL_N8N;
 const token = process.env.TOKEN_N8N;
-const fs = require("fs");
+
+const _headers = {
+  "Content-Type": "application/json",
+  "X-N8N-API-KEY": token,
+};
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Find an N8N workflow by exact name. Returns the workflow object or null.
+ */
+const findWorkflowByName = async (name) => {
+  // N8N v1 API supports ?name= filter
+  const url = `${n8nUrl}workflows?name=${encodeURIComponent(name)}&limit=10`;
+  const res = await fetch(url, { headers: _headers });
+  if (!res.ok) return null;
+  const body = await res.json();
+  const list = body?.data ?? body; // v1 wraps in { data: [...] }
+  if (!Array.isArray(list)) return null;
+  return list.find((w) => w.name === name) ?? null;
+};
+
+/**
+ * Deactivate an N8N workflow (frees its webhooks).
+ */
+const deactivateWorkflow = async (id) => {
+  const res = await fetch(`${n8nUrl}workflows/${id}/deactivate`, {
+    method: "POST",
+    headers: _headers,
+  });
+  // 200 or 404 are both acceptable here
+  return res.ok || res.status === 404;
+};
+
+/**
+ * Delete an N8N workflow by id.
+ */
+const deleteWorkflow = async (id) => {
+  const res = await fetch(`${n8nUrl}workflows/${id}`, {
+    method: "DELETE",
+    headers: _headers,
+  });
+  return res.ok || res.status === 404;
+};
+
+// ─── Main export ──────────────────────────────────────────────────────────────
 
 const duplicate = async (instance, company) => {
-  const response = await fetch(`${n8nUrl}workflows/sBNtd2jZC8s9YQPO`, {
-    headers: {
-      "X-N8N-API-KEY": token,
-    },
+  // 1. Fetch the template workflow
+  const templateRes = await fetch(`${n8nUrl}workflows/sBNtd2jZC8s9YQPO`, {
+    headers: _headers,
   });
-
-  if (!response.ok) {
-    throw new Error(await response.text());
+  if (!templateRes.ok) {
+    throw new Error(`N8N template fetch failed [${templateRes.status}]: ${await templateRes.text()}`);
   }
+  const workflow = await templateRes.json();
 
-  const workflow = await response.json();
-
-  // export workflow to file json
-  // fs.writeFileSync(`./${instance}.json`, JSON.stringify(workflow, null, 2));
-
-  // alterar nodes
-  const nodes = replaceCompanyId(workflow.nodes, company);
-
-  const updatedNodes = replaceWebhookId(nodes, instance);
+  // 2. Adapt nodes for this instance/company
+  const updatedNodes = replaceWebhookId(replaceCompanyId(workflow.nodes, company), instance);
 
   const newWorkflow = {
     name: instance,
@@ -30,96 +67,64 @@ const duplicate = async (instance, company) => {
     settings: {},
   };
 
-  const create = await fetch(`${n8nUrl}workflows`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-N8N-API-KEY": token,
-    },
-    body: JSON.stringify(newWorkflow),
-  });
-
-  const workflowCreated = await create.json();
-
-  console.log(workflowCreated.id);
-
-  const publish = await fetch(`${n8nUrl}workflows/${workflowCreated.id}/activate`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-N8N-API-KEY": token,
-    },
-  });
-
-  if (!publish.ok) {
-    throw new Error(await publish.text());
+  // 3. Remove any existing workflow with the same name to avoid webhook conflicts
+  const existing = await findWorkflowByName(instance);
+  if (existing) {
+    console.log(`[n8n] Removing existing workflow '${instance}' (id=${existing.id}) before recreate`);
+    await deactivateWorkflow(existing.id);
+    await deleteWorkflow(existing.id);
   }
 
-  return await publish.json();
+  // 4. Create the new workflow
+  const createRes = await fetch(`${n8nUrl}workflows`, {
+    method: "POST",
+    headers: _headers,
+    body: JSON.stringify(newWorkflow),
+  });
+  if (!createRes.ok) {
+    throw new Error(`N8N workflow create failed [${createRes.status}]: ${await createRes.text()}`);
+  }
+  const workflowCreated = await createRes.json();
+
+  // 5. Activate it
+  const activateRes = await fetch(`${n8nUrl}workflows/${workflowCreated.id}/activate`, {
+    method: "POST",
+    headers: _headers,
+  });
+  if (!activateRes.ok) {
+    // Cleanup: delete the newly created workflow to avoid orphans
+    await deleteWorkflow(workflowCreated.id).catch(() => {});
+    throw new Error(`N8N workflow activate failed [${activateRes.status}]: ${await activateRes.text()}`);
+  }
+
+  return await activateRes.json();
 };
+
+// ─── Node transformers ────────────────────────────────────────────────────────
 
 const replaceWebhookId = (nodes, instance) => {
   const oldId = "d5c1216d-4d32-406a-afde-ddc5ca51b40d";
   const otherId = "4f9d86ae-04c0-49ca-a77c-a38f5a345aad";
 
-  // Função recursiva para percorrer objetos e substituir strings
   const traverse = (obj) => {
     if (typeof obj === "string") {
-      // Substitui todas as ocorrências (caso apareça mais de uma vez no mesmo campo)
       return obj.replaceAll(oldId, instance).replaceAll(otherId, instance);
     } else if (Array.isArray(obj)) {
-      return obj.map((item) => traverse(item));
+      return obj.map(traverse);
     } else if (obj && typeof obj === "object") {
-      const newObj = {};
-      for (const [key, value] of Object.entries(obj)) {
-        newObj[key] = traverse(value);
-      }
-      return newObj;
+      return Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, traverse(v)]));
     }
     return obj;
   };
 
-  return nodes.map((node) => traverse(node));
-};
-
-const sanitizeWorkflow = (workflow, instance) => {
-  const nodes = workflow.nodes.map((node) => {
-    const cleanNode = {
-      id: node.id,
-      name: node.name,
-      type: node.type,
-      typeVersion: node.typeVersion,
-      position: node.position,
-      parameters: node.parameters,
-    };
-
-    if (node.credentials) {
-      cleanNode.credentials = {};
-
-      for (const key of Object.keys(node.credentials)) {
-        cleanNode.credentials[key] = {
-          name: node.credentials[key].name,
-        };
-      }
-    }
-
-    return cleanNode;
-  });
-
-  return {
-    name: instance,
-    nodes,
-    connections: workflow.connections,
-    settings: {}, // obrigatório
-  };
+  return nodes.map(traverse);
 };
 
 const replaceCompanyId = (nodes, company) => {
   return nodes.map((node) => {
-    if (node.parameters && node.parameters.operation === "executeQuery" && node.parameters.query) {
+    if (node.parameters?.operation === "executeQuery" && node.parameters?.query) {
       node.parameters.query = node.parameters.query.replace(/c\.id\s*=\s*\d+/, `c.id = ${company}`);
     }
-
     return node;
   });
 };
