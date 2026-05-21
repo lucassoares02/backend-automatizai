@@ -363,13 +363,15 @@ const createPublicOrder = async (data) => {
   const discount = Number(data.discount ?? 0);
   const subtotal = items.reduce((sum, i) => sum + Number(i.subtotal), 0);
   const total = subtotal + delivery_fee - discount;
+  const delivery_lat = toNumber(data.delivery_lat);
+  const delivery_lng = toNumber(data.delivery_lng);
 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     const orderRes = await client.query(
-      `INSERT INTO orders (company_id, client_id, status, notes, subtotal, delivery_fee, discount, total, payment_method_id, delivery_address, scheduled_for, tag)
-       VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, 'public') RETURNING *`,
+      `INSERT INTO orders (company_id, client_id, status, notes, subtotal, delivery_fee, discount, total, payment_method_id, delivery_address, scheduled_for, tag, delivery_lat, delivery_lng)
+       VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, 'public', $11, $12) RETURNING *`,
       [
         company_id,
         client_id,
@@ -381,6 +383,8 @@ const createPublicOrder = async (data) => {
         payment_method_id ?? null,
         delivery_address ?? null,
         scheduled_for ?? null,
+        delivery_lat,
+        delivery_lng,
       ],
     );
     const order = orderRes.rows[0];
@@ -419,8 +423,11 @@ const _PUBLIC_ORDER_SELECT = `
     o.id, o.company_id, o.client_id, o.status, o.notes,
     o.subtotal, o.delivery_fee, o.discount, o.total,
     o.delivery_address, o.scheduled_for, o.created_at, o.updated_at,
+    o.delivery_lat, o.delivery_lng,
     c.name AS client_name, c.phone AS client_phone,
     co.name AS company_name, co.brand_color, co.logo_url, co.phone AS company_phone,
+    (SELECT ca.latitude FROM company_addresses ca WHERE ca.company_id = o.company_id ORDER BY ca.id DESC LIMIT 1) AS company_lat,
+    (SELECT ca.longitude FROM company_addresses ca WHERE ca.company_id = o.company_id ORDER BY ca.id DESC LIMIT 1) AS company_lng,
     pm.label AS payment_method_label, pm.type AS payment_method_type,
     COALESCE(
       (
