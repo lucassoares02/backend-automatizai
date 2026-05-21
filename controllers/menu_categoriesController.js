@@ -34,6 +34,20 @@ const find = async (req, res) => {
 /**
  * Create new MenuCategories
  */
+const findByCompany = async (req, res) => {
+  const { companyId } = req.params;
+  if (!companyId || isNaN(companyId)) {
+    return res.status(400).json({ error: "Invalid companyId" });
+  }
+  try {
+    const data = await service.findByCompany(Number(companyId));
+    return res.status(200).json(data);
+  } catch (error) {
+    console.error("Error fetching MenuCategories by company:", error);
+    return res.status(500).json({ error: "Failed to fetch MenuCategories" });
+  }
+};
+
 const create = async (req, res) => {
   const menu_categories = req.body;
   if (!menu_categories || Object.keys(menu_categories).length === 0) {
@@ -44,7 +58,10 @@ const create = async (req, res) => {
     return res.status(201).json(newItem);
   } catch (error) {
     console.error("Error creating MenuCategories:", error);
-    return res.status(500).json({ error: "Failed to create MenuCategories" });
+    const status = error.statusCode || 500;
+    return res
+      .status(status)
+      .json({ error: error.message || "Failed to create MenuCategories" });
   }
 };
 
@@ -85,4 +102,4 @@ const remove = async (req, res) => {
   }
 };
 
-module.exports = { findAll, find, create, update, remove };
+module.exports = { findAll, findByCompany, find, create, update, remove };

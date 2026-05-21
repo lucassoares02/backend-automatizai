@@ -17,8 +17,8 @@ const update = async (data) => {
   // espera um objeto com propriedades em camelCase + id
   const { id, name, email, active, createdAt, phone, document, birthday } = data;
   const result = await pool.query(
-    "UPDATE users SET id = $1, name = $2, email = $3, active = $4, created_at = $5, phone = $6, document = $7, birthday = $8 WHERE id = $9 RETURNING *",
-    [id, name, email, active, createdAt, phone, document, birthday, id]
+    "UPDATE users SET id = $1, name = $2, email = $3, active = $4, phone = $5, document = $6, birthday = $7 WHERE id = $8  RETURNING *",
+    [id, name, email, active, phone, document, birthday, id],
   );
   return result.rows[0];
 };

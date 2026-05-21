@@ -88,6 +88,45 @@ const calculateDeliveryFee = async (req, res) => {
   }
 };
 
+const getOrder = async (req, res) => {
+  const { id } = req.params;
+  const { phone } = req.query;
+  if (!id || isNaN(id)) {
+    return res.status(400).json({ error: "Invalid order id" });
+  }
+  try {
+    const order = await service.getPublicOrder({
+      id: Number(id),
+      phone: phone ? String(phone) : null,
+    });
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    return res.status(200).json(order);
+  } catch (error) {
+    console.error("Error fetching public order:", error);
+    return res.status(500).json({ error: "Failed to fetch order" });
+  }
+};
+
+const listOrdersByPhone = async (req, res) => {
+  const { company_id, phone } = req.query;
+  if (!company_id || isNaN(company_id)) {
+    return res.status(400).json({ error: "company_id inválido" });
+  }
+  if (!phone) {
+    return res.status(400).json({ error: "phone é obrigatório" });
+  }
+  try {
+    const orders = await service.findPublicOrdersByPhone({
+      company_id: Number(company_id),
+      phone: String(phone),
+    });
+    return res.status(200).json(orders);
+  } catch (error) {
+    console.error("Error listing public orders by phone:", error);
+    return res.status(500).json({ error: "Failed to list orders" });
+  }
+};
+
 module.exports = {
   getCompanyMenu,
   findClientByPhone,
@@ -95,4 +134,6 @@ module.exports = {
   updateClient,
   createOrder,
   calculateDeliveryFee,
+  getOrder,
+  listOrdersByPhone,
 };

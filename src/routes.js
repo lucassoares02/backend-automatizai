@@ -60,6 +60,7 @@ router.delete("/company_opening_hours/:id", company_opening_hours.remove);
 
 //menu_categories
 router.get("/menu_categories", menu_categories.findAll);
+router.get("/menu_categories/company/:companyId", menu_categories.findByCompany);
 router.get("/menu_categories/:id", menu_categories.find);
 router.post("/menu_categories", menu_categories.create);
 router.patch("/menu_categories/:id", menu_categories.update);
@@ -151,5 +152,7 @@ router.get("/public/client", publicCtrl.findClientByPhone);
 router.post("/public/clients", publicCtrl.createClient);
 router.patch("/public/clients/:id", publicCtrl.updateClient);
 router.post("/public/orders", publicCtrl.createOrder);
+router.get("/public/orders", publicCtrl.listOrdersByPhone);
+router.get("/public/orders/:id", publicCtrl.getOrder);
 
 module.exports = router;

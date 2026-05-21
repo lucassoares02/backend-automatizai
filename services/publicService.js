@@ -161,13 +161,30 @@ const getCompanyPublicMenu = async (companyId) => {
   };
 };
 
-const calculatePublicDeliveryFee = async ({
-  company_id,
-  destination_lat,
-  destination_lng,
-}) => {
+const _geocodeAddress = async (addressLine) => {
+  if (!MAPS_KEY || !addressLine) return null;
+  try {
+    const { data } = await axios.get("https://maps.googleapis.com/maps/api/geocode/json", {
+      params: {
+        address: addressLine,
+        key: MAPS_KEY,
+        language: "pt-BR",
+        region: "br",
+      },
+    });
+    const loc = data?.results?.[0]?.geometry?.location;
+    if (loc && Number.isFinite(loc.lat) && Number.isFinite(loc.lng)) {
+      return { lat: loc.lat, lng: loc.lng };
+    }
+    return null;
+  } catch (_) {
+    return null;
+  }
+};
+
+const calculatePublicDeliveryFee = async ({ company_id, destination_lat, destination_lng }) => {
   const companyAddressRes = await pool.query(
-    `SELECT latitude, longitude, street, number, neighborhood, city, state, zip_code
+    `SELECT id, latitude, longitude, street, number, neighborhood, city, state, zip_code
      FROM company_addresses
      WHERE company_id = $1
      ORDER BY id DESC
@@ -198,15 +215,32 @@ const calculatePublicDeliveryFee = async ({
     };
   }
 
-  const originLat = toNumber(companyAddress.latitude);
-  const originLng = toNumber(companyAddress.longitude);
+  let originLat = toNumber(companyAddress.latitude);
+  let originLng = toNumber(companyAddress.longitude);
+
+  // Fallback: geocodificar o endereço da empresa se lat/lng não estão salvos
+  if (originLat === null || originLng === null) {
+    const addressLine = _buildAddressLine(companyAddress);
+    const geo = await _geocodeAddress(addressLine);
+    if (geo) {
+      originLat = geo.lat;
+      originLng = geo.lng;
+      // Persistir para próximas chamadas
+      try {
+        await pool.query(`UPDATE company_addresses SET latitude = $1, longitude = $2 WHERE id = $3`, [originLat, originLng, companyAddress.id]);
+      } catch (_) {
+        // não-fatal: usamos o valor geocoded em memória mesmo se o UPDATE falhar
+      }
+    }
+  }
+
   const destLat = toNumber(destination_lat);
   const destLng = toNumber(destination_lng);
   if (originLat === null || originLng === null || destLat === null || destLng === null) {
     return {
       ok: false,
       reason: "invalid_coordinates",
-      message: "Coordenadas de origem ou destino indisponíveis.",
+      message: "Não foi possível localizar o endereço da empresa. Confira o cadastro do endereço com CEP e número.",
     };
   }
   if (!MAPS_KEY) {
@@ -217,18 +251,17 @@ const calculatePublicDeliveryFee = async ({
     };
   }
 
-  const { data } = await axios.get(
-    "https://maps.googleapis.com/maps/api/distancematrix/json",
-    {
-      params: {
-        origins: `${originLat},${originLng}`,
-        destinations: `${destLat},${destLng}`,
-        key: MAPS_KEY,
-        language: "pt-BR",
-        units: "metric",
-      },
+  const { data } = await axios.get("https://maps.googleapis.com/maps/api/distancematrix/json", {
+    params: {
+      origins: `${originLat},${originLng}`,
+      destinations: `${destLat},${destLng}`,
+      key: MAPS_KEY,
+      language: "pt-BR",
+      units: "metric",
     },
-  );
+  });
+
+  console.log(data);
 
   const element = data?.rows?.[0]?.elements?.[0];
   if (!element || element.status !== "OK") {
@@ -274,10 +307,7 @@ const calculatePublicDeliveryFee = async ({
 };
 
 const findClientByPhone = async (phone, companyId) => {
-  const result = await pool.query(
-    "SELECT * FROM clients WHERE phone = $1 AND company_id = $2 LIMIT 1",
-    [phone, companyId],
-  );
+  const result = await pool.query("SELECT * FROM clients WHERE phone = $1 AND company_id = $2 LIMIT 1", [phone, companyId]);
   return result.rows[0] || null;
 };
 
@@ -289,8 +319,18 @@ const createPublicClient = async ({ company_id, name, phone, street, number, com
   const result = await pool.query(
     `INSERT INTO clients (company_id, name, phone, street, number, complement, neighborhood, city, state, zip_code)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-    [company_id, name, phone ?? null, street ?? null, number ?? null, complement ?? null,
-     neighborhood ?? null, city ?? null, state ?? null, zip_code ?? null],
+    [
+      company_id,
+      name,
+      phone ?? null,
+      street ?? null,
+      number ?? null,
+      complement ?? null,
+      neighborhood ?? null,
+      city ?? null,
+      state ?? null,
+      zip_code ?? null,
+    ],
   );
   return result.rows[0];
 };
@@ -301,8 +341,18 @@ const updatePublicClient = async ({ id, name, phone, street, number, complement,
      SET name = $2, phone = $3, street = $4, number = $5, complement = $6,
          neighborhood = $7, city = $8, state = $9, zip_code = $10, updated_at = NOW()
      WHERE id = $1 RETURNING *`,
-    [id, name, phone ?? null, street ?? null, number ?? null, complement ?? null,
-     neighborhood ?? null, city ?? null, state ?? null, zip_code ?? null],
+    [
+      id,
+      name,
+      phone ?? null,
+      street ?? null,
+      number ?? null,
+      complement ?? null,
+      neighborhood ?? null,
+      city ?? null,
+      state ?? null,
+      zip_code ?? null,
+    ],
   );
   return result.rows[0];
 };
@@ -320,7 +370,18 @@ const createPublicOrder = async (data) => {
     const orderRes = await client.query(
       `INSERT INTO orders (company_id, client_id, status, notes, subtotal, delivery_fee, discount, total, payment_method_id, delivery_address, scheduled_for, tag)
        VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, 'public') RETURNING *`,
-      [company_id, client_id, notes ?? null, subtotal, delivery_fee, discount, total, payment_method_id ?? null, delivery_address ?? null, scheduled_for ?? null],
+      [
+        company_id,
+        client_id,
+        notes ?? null,
+        subtotal,
+        delivery_fee,
+        discount,
+        total,
+        payment_method_id ?? null,
+        delivery_address ?? null,
+        scheduled_for ?? null,
+      ],
     );
     const order = orderRes.rows[0];
 
@@ -353,6 +414,84 @@ const createPublicOrder = async (data) => {
   }
 };
 
+const _PUBLIC_ORDER_SELECT = `
+  SELECT
+    o.id, o.company_id, o.client_id, o.status, o.notes,
+    o.subtotal, o.delivery_fee, o.discount, o.total,
+    o.delivery_address, o.scheduled_for, o.created_at, o.updated_at,
+    c.name AS client_name, c.phone AS client_phone,
+    co.name AS company_name, co.brand_color, co.logo_url, co.phone AS company_phone,
+    pm.label AS payment_method_label, pm.type AS payment_method_type,
+    COALESCE(
+      (
+        SELECT json_agg(
+          json_build_object(
+            'id', oi.id,
+            'menu_item_id', oi.menu_item_id,
+            'name', oi.item_name,
+            'quantity', oi.quantity,
+            'unit_price', oi.item_price,
+            'subtotal', oi.subtotal,
+            'notes', oi.notes,
+            'promotion_id', oi.promotion_id,
+            'promotion_group_key', oi.promotion_group_key
+          )
+          ORDER BY oi.id
+        )
+        FROM order_items oi
+        WHERE oi.order_id = o.id
+      ),
+      '[]'::json
+    ) AS items,
+    COALESCE(
+      (
+        SELECT json_agg(
+          json_build_object(
+            'status', sh.status,
+            'notes', sh.notes,
+            'created_at', sh.created_at
+          )
+          ORDER BY sh.created_at
+        )
+        FROM order_status_history sh
+        WHERE sh.order_id = o.id
+      ),
+      '[]'::json
+    ) AS status_history
+  FROM orders o
+  JOIN clients c ON c.id = o.client_id
+  LEFT JOIN companies co ON co.id = o.company_id
+  LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id
+`;
+
+const _normalizePhone = (phone) => String(phone || "").replace(/\D/g, "");
+
+const getPublicOrder = async ({ id, phone }) => {
+  const result = await pool.query(`${_PUBLIC_ORDER_SELECT} WHERE o.id = $1 LIMIT 1`, [id]);
+  const row = result.rows[0] || null;
+  if (!row) return null;
+  if (phone) {
+    const rowPhone = _normalizePhone(row.client_phone);
+    const reqPhone = _normalizePhone(phone);
+    if (rowPhone && reqPhone && rowPhone !== reqPhone) return null;
+  }
+  return row;
+};
+
+const findPublicOrdersByPhone = async ({ company_id, phone }) => {
+  const normalized = _normalizePhone(phone);
+  if (!normalized) return [];
+  const result = await pool.query(
+    `${_PUBLIC_ORDER_SELECT}
+     WHERE o.company_id = $1
+       AND REGEXP_REPLACE(COALESCE(c.phone, ''), '\\D', '', 'g') = $2
+     ORDER BY o.created_at DESC
+     LIMIT 50`,
+    [company_id, normalized],
+  );
+  return result.rows;
+};
+
 module.exports = {
   getCompanyPublicMenu,
   findClientByPhone,
@@ -360,4 +499,6 @@ module.exports = {
   updatePublicClient,
   createPublicOrder,
   calculatePublicDeliveryFee,
+  getPublicOrder,
+  findPublicOrdersByPhone,
 };
