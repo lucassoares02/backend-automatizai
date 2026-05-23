@@ -22,6 +22,8 @@ const publicCtrl = require("../controllers/publicController");
 const dashboard = require("../controllers/dashboardController");
 const address = require("../controllers/addressController");
 const promotions = require("../controllers/promotionsController");
+const upsell = require("../controllers/upsellController");
+const searchAnalytics = require("../controllers/searchAnalyticsController");
 
 router.get("/", (req, res) => {
   res.send("API is running 🚀");
@@ -140,6 +142,23 @@ router.post("/promotions", authMiddleware, promotions.create);
 router.patch("/promotions/:id", authMiddleware, promotions.update);
 router.patch("/promotions/:id/status", authMiddleware, promotions.toggleStatus);
 router.delete("/promotions/:id", authMiddleware, promotions.remove);
+
+// upsell rules (authenticated)
+router.get("/upsell/company/:companyId", authMiddleware, upsell.findByCompany);
+router.post("/upsell", authMiddleware, upsell.create);
+router.patch("/upsell/:id", authMiddleware, upsell.update);
+router.patch("/upsell/:id/status", authMiddleware, upsell.toggleStatus);
+router.post("/upsell/:id/duplicate", authMiddleware, upsell.duplicate);
+router.delete("/upsell/:id", authMiddleware, upsell.remove);
+
+// upsell public — no auth
+router.get("/public/upsell/suggestions", upsell.getSuggestions);
+
+// search analytics — public ingest (no auth), report endpoints (auth)
+router.post("/public/search-analytics", searchAnalytics.track);
+router.get("/search-analytics/top-terms/:companyId", authMiddleware, searchAnalytics.topTerms);
+router.get("/search-analytics/top-products/:companyId", authMiddleware, searchAnalytics.topProducts);
+router.get("/search-analytics/no-results/:companyId", authMiddleware, searchAnalytics.noResults);
 
 // address (Google Places autocomplete/details — public, no token needed)
 router.get("/address/autocomplete", address.autocomplete);
