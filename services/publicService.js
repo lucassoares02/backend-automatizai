@@ -1,6 +1,7 @@
 const axios = require("axios");
 const pool = require("../db");
 const productOptionsService = require("./productOptionsService");
+const purchaseGoalsService = require("./purchaseGoalsService");
 
 const MAPS_KEY = process.env.GOOGLE_API_KEY;
 
@@ -365,9 +366,14 @@ const updatePublicClient = async ({ id, name, phone, street, number, complement,
 const createPublicOrder = async (data) => {
   const { company_id, client_id, notes, items, delivery_address, scheduled_for, payment_method_id } = data;
   const delivery_fee = Number(data.delivery_fee ?? 0);
-  const discount = Number(data.discount ?? 0);
 
-  // Validate & enrich items with options snapshots
+  // Validate purchase goal discounts the client is asking for
+  const goalRequests = items
+    .filter((it) => it.menu_item_id && it.purchase_goal_id)
+    .map((it) => ({ menu_item_id: it.menu_item_id, purchase_goal_id: it.purchase_goal_id }));
+  const goalMap = await purchaseGoalsService.validateGoalDiscounts(company_id, goalRequests);
+
+  // Validate & enrich items with options snapshots + goal discount
   const enrichedItems = [];
   for (const item of items) {
     let optionsSnapshot = [];
@@ -383,8 +389,21 @@ const createPublicOrder = async (data) => {
 
     const qty = Number(item.quantity ?? 1);
     const baseUnit = Number(item.unit_price ?? 0);
-    const finalUnit = Number((baseUnit + extraPerUnit).toFixed(2));
+    const goalInfo = goalMap.get(Number(item.menu_item_id));
+
+    let goalDiscountPct = null;
+    let goalDiscountPerUnit = 0;
+    let goalId = null;
+    if (goalInfo && goalInfo.percentage > 0) {
+      goalDiscountPct = goalInfo.percentage;
+      goalId = goalInfo.goalId;
+      // Aplica desconto somente sobre o preço base do produto (não sobre os adicionais)
+      goalDiscountPerUnit = Number((baseUnit * (goalDiscountPct / 100)).toFixed(2));
+    }
+
+    const finalUnit = Number((baseUnit + extraPerUnit - goalDiscountPerUnit).toFixed(2));
     const subtotal = Number((finalUnit * qty).toFixed(2));
+    const goalDiscountAmount = goalDiscountPerUnit > 0 ? Number((goalDiscountPerUnit * qty).toFixed(2)) : null;
 
     enrichedItems.push({
       ...item,
@@ -392,11 +411,21 @@ const createPublicOrder = async (data) => {
       base_unit_price: baseUnit,
       subtotal,
       _options_snapshot: optionsSnapshot,
+      _purchase_goal_id: goalId,
+      _goal_discount_percentage: goalDiscountPct,
+      _goal_discount_amount: goalDiscountAmount,
     });
   }
 
   const subtotalOrder = enrichedItems.reduce((sum, i) => sum + Number(i.subtotal), 0);
-  const total = subtotalOrder + delivery_fee - discount;
+  // Desconto total: somatório dos descontos por item (goals) + desconto manual eventual
+  const goalsDiscount = enrichedItems.reduce(
+    (sum, i) => sum + Number(i._goal_discount_amount || 0),
+    0,
+  );
+  const manualDiscount = Number(data.discount ?? 0);
+  const discount = Number((goalsDiscount + manualDiscount).toFixed(2));
+  const total = Number((subtotalOrder + delivery_fee - manualDiscount).toFixed(2));
 
   const client = await pool.connect();
   try {
@@ -421,8 +450,8 @@ const createPublicOrder = async (data) => {
 
     for (const item of enrichedItems) {
       const itemRes = await client.query(
-        `INSERT INTO order_items (order_id, menu_item_id, item_name, quantity, item_price, subtotal, notes, promotion_id, promotion_group_key)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+        `INSERT INTO order_items (order_id, menu_item_id, item_name, quantity, item_price, subtotal, notes, promotion_id, promotion_group_key, purchase_goal_id, goal_discount_percentage, goal_discount_amount)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
         [
           order.id,
           item.menu_item_id ?? null,
@@ -433,6 +462,9 @@ const createPublicOrder = async (data) => {
           item.notes ?? null,
           item.promotion_id ?? null,
           item.promotion_group_key ?? null,
+          item._purchase_goal_id ?? null,
+          item._goal_discount_percentage ?? null,
+          item._goal_discount_amount ?? null,
         ],
       );
       const orderItemId = itemRes.rows[0].id;
@@ -489,6 +521,9 @@ const _PUBLIC_ORDER_SELECT = `
             'notes', oi.notes,
             'promotion_id', oi.promotion_id,
             'promotion_group_key', oi.promotion_group_key,
+            'purchase_goal_id', oi.purchase_goal_id,
+            'goal_discount_percentage', oi.goal_discount_percentage,
+            'goal_discount_amount', oi.goal_discount_amount,
             'options', COALESCE((
               SELECT json_agg(
                 json_build_object(

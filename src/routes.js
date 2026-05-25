@@ -26,6 +26,7 @@ const upsell = require("../controllers/upsellController");
 const searchAnalytics = require("../controllers/searchAnalyticsController");
 const orderMessages = require("../controllers/orderMessagesController");
 const productOptions = require("../controllers/productOptionsController");
+const purchaseGoals = require("../controllers/purchaseGoalsController");
 
 router.get("/", (req, res) => {
   res.send("API is running 🚀");
@@ -183,6 +184,14 @@ router.patch("/product-options/reorder/:productId", authMiddleware, productOptio
 router.patch("/product-options/:groupId", authMiddleware, productOptions.update);
 router.delete("/product-options/:groupId", authMiddleware, productOptions.remove);
 router.get("/public/product-options/:productId", productOptions.publicFindByProduct);
+
+// purchase goals (objetivo de compra)
+router.get("/purchase-goals/company/:companyId", authMiddleware, purchaseGoals.findByCompany);
+router.post("/purchase-goals", authMiddleware, purchaseGoals.create);
+router.patch("/purchase-goals/:id/status", authMiddleware, purchaseGoals.setStatus);
+router.patch("/purchase-goals/:id", authMiddleware, purchaseGoals.update);
+router.delete("/purchase-goals/:id", authMiddleware, purchaseGoals.remove);
+router.post("/public/purchase-goals/suggest", purchaseGoals.publicSuggest);
 
 // public ordering (no auth)
 router.get("/public/company/:companyId", publicCtrl.getCompanyMenu);
