@@ -176,6 +176,7 @@ router.get("/public/orders/:orderId/messages", orderMessages.publicList);
 router.post("/public/orders/:orderId/messages", orderMessages.publicSend);
 
 // product options / additionals
+router.post("/product-options/upload-item-image", authMiddleware, productOptions.upload.single("image"), productOptions.uploadImage);
 router.get("/product-options/product/:productId", authMiddleware, productOptions.findByProduct);
 router.post("/product-options", authMiddleware, productOptions.create);
 router.patch("/product-options/reorder/:productId", authMiddleware, productOptions.reorder);

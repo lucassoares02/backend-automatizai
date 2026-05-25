@@ -52,6 +52,7 @@ const _hydrateGroups = (rows) => {
         additional_price: Number(row.additional_price ?? 0),
         sort_order: row.item_sort_order,
         is_active: row.is_active,
+        image_url: row.item_image_url || null,
       });
     }
   }
@@ -76,7 +77,8 @@ const findByProduct = async (productId, { onlyActive = false } = {}) => {
        i.name          AS item_name,
        i.additional_price,
        i.sort_order    AS item_sort_order,
-       i.is_active
+       i.is_active,
+       i.image_url     AS item_image_url
      FROM product_option_groups g
      LEFT JOIN product_option_items i ON i.group_id = g.id ${onlyActive ? "AND i.is_active = true" : ""}
      WHERE g.product_id = $1
@@ -119,14 +121,15 @@ const create = async ({ company_id, product_id, name, type, min_selection, max_s
         if (!it?.name || !String(it.name).trim()) continue;
         await client.query(
           `INSERT INTO product_option_items
-            (group_id, name, additional_price, sort_order, is_active)
-           VALUES ($1,$2,$3,$4,$5)`,
+            (group_id, name, additional_price, sort_order, is_active, image_url)
+           VALUES ($1,$2,$3,$4,$5,$6)`,
           [
             groupId,
             String(it.name).trim(),
             _money(it.additional_price),
             _int(it.sort_order) ?? i,
             it.is_active === false ? false : true,
+            it.image_url || null,
           ],
         );
       }
@@ -201,28 +204,31 @@ const update = async (groupId, { company_id, name, type, min_selection, max_sele
         if (itemId) {
           await client.query(
             `UPDATE product_option_items
-             SET name = $2, additional_price = $3, sort_order = $4, is_active = $5
-             WHERE id = $1 AND group_id = $6`,
+             SET name = $2, additional_price = $3, sort_order = $4, is_active = $5,
+                 image_url = COALESCE($6, image_url)
+             WHERE id = $1 AND group_id = $7`,
             [
               itemId,
               String(it.name).trim(),
               _money(it.additional_price),
               _int(it.sort_order) ?? i,
               it.is_active === false ? false : true,
+              it.image_url || null,
               gid,
             ],
           );
         } else {
           await client.query(
             `INSERT INTO product_option_items
-              (group_id, name, additional_price, sort_order, is_active)
-             VALUES ($1,$2,$3,$4,$5)`,
+              (group_id, name, additional_price, sort_order, is_active, image_url)
+             VALUES ($1,$2,$3,$4,$5,$6)`,
             [
               gid,
               String(it.name).trim(),
               _money(it.additional_price),
               _int(it.sort_order) ?? i,
               it.is_active === false ? false : true,
+              it.image_url || null,
             ],
           );
         }

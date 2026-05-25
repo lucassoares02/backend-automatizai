@@ -1,4 +1,15 @@
 const service = require("../services/productOptionsService");
+const minio = require("./minioController");
+const multer = require("multer");
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const allowed = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
+    allowed.includes(file.mimetype) ? cb(null, true) : cb(new Error("Tipo de arquivo não suportado"));
+  },
+});
 
 const _int = (v) => {
   const n = Number(v);
@@ -81,4 +92,16 @@ const reorder = async (req, res) => {
   }
 };
 
-module.exports = { findByProduct, publicFindByProduct, create, update, remove, reorder };
+const uploadImage = async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Nenhuma imagem enviada" });
+  try {
+    const { buffer, originalname, mimetype } = req.file;
+    const { url } = await minio.uploadFile(buffer, originalname, mimetype);
+    return res.status(200).json({ url });
+  } catch (error) {
+    console.error("Error uploading option item image:", error);
+    return res.status(500).json({ error: "Falha ao fazer upload da imagem" });
+  }
+};
+
+module.exports = { findByProduct, publicFindByProduct, create, update, remove, reorder, uploadImage, upload };
