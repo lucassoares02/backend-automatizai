@@ -1,5 +1,6 @@
 const axios = require("axios");
 const pool = require("../db");
+const productOptionsService = require("./productOptionsService");
 
 const MAPS_KEY = process.env.GOOGLE_API_KEY;
 
@@ -54,7 +55,11 @@ const getCompanyPublicMenu = async (companyId) => {
   const menuRes = await pool.query(
     `SELECT mi.id, mi.name, mi.description, mi.price, mi.image_url, mi.category_id,
             mi.prep_time_minutes, mi.featured,
-            mc.name AS category_name, mc.sort_order AS cat_sort
+            mc.name AS category_name, mc.sort_order AS cat_sort,
+            EXISTS(
+              SELECT 1 FROM product_option_groups pog
+              WHERE pog.product_id = mi.id
+            ) AS has_options
      FROM menu_items mi
      LEFT JOIN menu_categories mc ON mc.id = mi.category_id
      WHERE mi.company_id = $1 AND mi.available = true
@@ -361,8 +366,38 @@ const createPublicOrder = async (data) => {
   const { company_id, client_id, notes, items, delivery_address, scheduled_for, payment_method_id } = data;
   const delivery_fee = Number(data.delivery_fee ?? 0);
   const discount = Number(data.discount ?? 0);
-  const subtotal = items.reduce((sum, i) => sum + Number(i.subtotal), 0);
-  const total = subtotal + delivery_fee - discount;
+
+  // Validate & enrich items with options snapshots
+  const enrichedItems = [];
+  for (const item of items) {
+    let optionsSnapshot = [];
+    let extraPerUnit = 0;
+    if (item.menu_item_id && Array.isArray(item.options) && item.options.length > 0) {
+      const result = await productOptionsService.validateSelections(item.menu_item_id, item.options);
+      optionsSnapshot = result.snapshot;
+      extraPerUnit = result.extraTotalPerUnit;
+    } else if (item.menu_item_id) {
+      // Garante obrigatórios mesmo se cliente não enviou nada
+      await productOptionsService.validateSelections(item.menu_item_id, []);
+    }
+
+    const qty = Number(item.quantity ?? 1);
+    const baseUnit = Number(item.unit_price ?? 0);
+    const finalUnit = Number((baseUnit + extraPerUnit).toFixed(2));
+    const subtotal = Number((finalUnit * qty).toFixed(2));
+
+    enrichedItems.push({
+      ...item,
+      unit_price: finalUnit,
+      base_unit_price: baseUnit,
+      subtotal,
+      _options_snapshot: optionsSnapshot,
+    });
+  }
+
+  const subtotalOrder = enrichedItems.reduce((sum, i) => sum + Number(i.subtotal), 0);
+  const total = subtotalOrder + delivery_fee - discount;
+
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -373,7 +408,7 @@ const createPublicOrder = async (data) => {
         company_id,
         client_id,
         notes ?? null,
-        subtotal,
+        subtotalOrder,
         delivery_fee,
         discount,
         total,
@@ -384,10 +419,10 @@ const createPublicOrder = async (data) => {
     );
     const order = orderRes.rows[0];
 
-    for (const item of items) {
-      await client.query(
+    for (const item of enrichedItems) {
+      const itemRes = await client.query(
         `INSERT INTO order_items (order_id, menu_item_id, item_name, quantity, item_price, subtotal, notes, promotion_id, promotion_group_key)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
         [
           order.id,
           item.menu_item_id ?? null,
@@ -400,6 +435,24 @@ const createPublicOrder = async (data) => {
           item.promotion_group_key ?? null,
         ],
       );
+      const orderItemId = itemRes.rows[0].id;
+
+      for (const opt of item._options_snapshot || []) {
+        await client.query(
+          `INSERT INTO order_item_options
+             (order_item_id, group_id, group_name, option_id, option_name, additional_price, quantity)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [
+            orderItemId,
+            opt.group_id ?? null,
+            opt.group_name,
+            opt.option_id ?? null,
+            opt.option_name,
+            Number(opt.additional_price ?? 0),
+            Math.max(1, Number(opt.quantity ?? 1)),
+          ],
+        );
+      }
     }
 
     await client.query("INSERT INTO order_status_history (order_id, status) VALUES ($1, 1)", [order.id]);
@@ -435,7 +488,19 @@ const _PUBLIC_ORDER_SELECT = `
             'subtotal', oi.subtotal,
             'notes', oi.notes,
             'promotion_id', oi.promotion_id,
-            'promotion_group_key', oi.promotion_group_key
+            'promotion_group_key', oi.promotion_group_key,
+            'options', COALESCE((
+              SELECT json_agg(
+                json_build_object(
+                  'group_id', oio.group_id,
+                  'group_name', oio.group_name,
+                  'option_id', oio.option_id,
+                  'option_name', oio.option_name,
+                  'additional_price', oio.additional_price,
+                  'quantity', oio.quantity
+                ) ORDER BY oio.id
+              ) FROM order_item_options oio WHERE oio.order_item_id = oi.id
+            ), '[]'::json)
           )
           ORDER BY oi.id
         )

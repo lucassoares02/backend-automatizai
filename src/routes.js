@@ -24,6 +24,8 @@ const address = require("../controllers/addressController");
 const promotions = require("../controllers/promotionsController");
 const upsell = require("../controllers/upsellController");
 const searchAnalytics = require("../controllers/searchAnalyticsController");
+const orderMessages = require("../controllers/orderMessagesController");
+const productOptions = require("../controllers/productOptionsController");
 
 router.get("/", (req, res) => {
   res.send("API is running 🚀");
@@ -124,6 +126,11 @@ router.post("/clients", authMiddleware, clients.create);
 router.patch("/clients/:id", authMiddleware, clients.update);
 router.delete("/clients/:id", authMiddleware, clients.remove);
 
+// order messages (admin)
+router.get("/orders/:orderId/messages", authMiddleware, orderMessages.adminList);
+router.post("/orders/:orderId/messages", authMiddleware, orderMessages.adminSend);
+router.patch("/orders/:orderId/messages/read", authMiddleware, orderMessages.markRead);
+
 //orders
 router.get("/orders/company/:id", authMiddleware, orders.findByCompany);
 router.get("/orders/today/:id", authMiddleware, orders.findTodayByCompany);
@@ -164,6 +171,18 @@ router.get("/search-analytics/no-results/:companyId", authMiddleware, searchAnal
 router.get("/address/autocomplete", address.autocomplete);
 router.get("/address/details/:placeId", address.details);
 
+// order messages (public — phone-verified)
+router.get("/public/orders/:orderId/messages", orderMessages.publicList);
+router.post("/public/orders/:orderId/messages", orderMessages.publicSend);
+
+// product options / additionals
+router.get("/product-options/product/:productId", authMiddleware, productOptions.findByProduct);
+router.post("/product-options", authMiddleware, productOptions.create);
+router.patch("/product-options/reorder/:productId", authMiddleware, productOptions.reorder);
+router.patch("/product-options/:groupId", authMiddleware, productOptions.update);
+router.delete("/product-options/:groupId", authMiddleware, productOptions.remove);
+router.get("/public/product-options/:productId", productOptions.publicFindByProduct);
+
 // public ordering (no auth)
 router.get("/public/company/:companyId", publicCtrl.getCompanyMenu);
 router.get("/public/delivery-fee", publicCtrl.calculateDeliveryFee);
@@ -172,6 +191,7 @@ router.post("/public/clients", publicCtrl.createClient);
 router.patch("/public/clients/:id", publicCtrl.updateClient);
 router.post("/public/orders", publicCtrl.createOrder);
 router.get("/public/orders", publicCtrl.listOrdersByPhone);
+router.get("/public/orders/:id/reorder", publicCtrl.reorder);
 router.get("/public/orders/:id", publicCtrl.getOrder);
 
 module.exports = router;

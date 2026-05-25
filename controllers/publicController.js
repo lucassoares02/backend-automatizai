@@ -1,4 +1,5 @@
 const service = require("../services/publicService");
+const reorderService = require("../services/reorderService");
 
 const getCompanyMenu = async (req, res) => {
   const { companyId } = req.params;
@@ -127,6 +128,26 @@ const listOrdersByPhone = async (req, res) => {
   }
 };
 
+const reorder = async (req, res) => {
+  const { id } = req.params;
+  const { phone } = req.query;
+  if (!id || isNaN(id)) {
+    return res.status(400).json({ error: "Invalid order id" });
+  }
+  try {
+    const data = await reorderService.reorder({
+      orderId: Number(id),
+      phone: phone ? String(phone) : null,
+    });
+    return res.status(200).json(data);
+  } catch (error) {
+    const status = error?.status || 500;
+    const message = error?.message || "Failed to reorder";
+    if (status >= 500) console.error("Error rebuilding reorder:", error);
+    return res.status(status).json({ error: message });
+  }
+};
+
 module.exports = {
   getCompanyMenu,
   findClientByPhone,
@@ -136,4 +157,5 @@ module.exports = {
   calculateDeliveryFee,
   getOrder,
   listOrdersByPhone,
+  reorder,
 };

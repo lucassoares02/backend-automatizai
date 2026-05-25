@@ -7,10 +7,40 @@ const ORDER_SELECT = `
   SELECT o.*,
          c.name  AS client_name,
          c.phone AS client_phone,
-         COALESCE(json_agg(oi ORDER BY oi.id) FILTER (WHERE oi.id IS NOT NULL), '[]') AS items
+         COALESCE(
+           (SELECT json_agg(
+              json_build_object(
+                'id', oi.id,
+                'menu_item_id', oi.menu_item_id,
+                'item_name', oi.item_name,
+                'name', oi.item_name,
+                'quantity', oi.quantity,
+                'item_price', oi.item_price,
+                'unit_price', oi.item_price,
+                'subtotal', oi.subtotal,
+                'notes', oi.notes,
+                'promotion_id', oi.promotion_id,
+                'promotion_group_key', oi.promotion_group_key,
+                'options', COALESCE((
+                  SELECT json_agg(
+                    json_build_object(
+                      'group_id', oio.group_id,
+                      'group_name', oio.group_name,
+                      'option_id', oio.option_id,
+                      'option_name', oio.option_name,
+                      'additional_price', oio.additional_price,
+                      'quantity', oio.quantity
+                    ) ORDER BY oio.id
+                  ) FROM order_item_options oio WHERE oio.order_item_id = oi.id
+                ), '[]'::json)
+              ) ORDER BY oi.id
+            ) FROM order_items oi WHERE oi.order_id = o.id),
+           '[]'::json
+         ) AS items,
+         (SELECT COUNT(*) FROM order_messages m
+          WHERE m.order_id = o.id AND m.sender_type = 'customer' AND m.is_read = false) AS unread_messages_count
   FROM orders o
   JOIN clients c ON c.id = o.client_id
-  LEFT JOIN order_items oi ON oi.order_id = o.id
 `;
 
 const findByCompany = async (companyId) => {
