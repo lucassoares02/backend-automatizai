@@ -364,8 +364,16 @@ const updatePublicClient = async ({ id, name, phone, street, number, complement,
 };
 
 const createPublicOrder = async (data) => {
-  const { company_id, client_id, notes, items, delivery_address, scheduled_for, payment_method_id } = data;
-  const delivery_fee = Number(data.delivery_fee ?? 0);
+  const { company_id, client_id, notes, items, scheduled_for, payment_method_id } = data;
+
+  // Tipo de entrega — coluna BOOLEAN no DB (TRUE = entrega, FALSE = retirada).
+  // O payload da API público continua aceitando "delivery" | "pickup".
+  const isPickup = data.delivery_type === "pickup" || data.delivery_type === false;
+  const delivery_type_bool = !isPickup; // TRUE = delivery
+
+  // Em retirada: zera taxa e ignora endereço (snapshot vazio).
+  const delivery_address = isPickup ? null : (data.delivery_address ?? null);
+  const delivery_fee = isPickup ? 0 : Number(data.delivery_fee ?? 0);
 
   // Validate purchase goal discounts the client is asking for
   const goalRequests = items
@@ -431,8 +439,11 @@ const createPublicOrder = async (data) => {
   try {
     await client.query("BEGIN");
     const orderRes = await client.query(
-      `INSERT INTO orders (company_id, client_id, status, notes, subtotal, delivery_fee, discount, total, payment_method_id, delivery_address, scheduled_for, tag)
-       VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, 'public') RETURNING *`,
+      `INSERT INTO orders (
+         company_id, client_id, status, notes, subtotal, delivery_fee, discount, total,
+         payment_method_id, delivery_address, delivery_type, scheduled_for, tag
+       )
+       VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'public') RETURNING *`,
       [
         company_id,
         client_id,
@@ -442,7 +453,8 @@ const createPublicOrder = async (data) => {
         discount,
         total,
         payment_method_id ?? null,
-        delivery_address ?? null,
+        delivery_address,
+        delivery_type_bool,
         scheduled_for ?? null,
       ],
     );
@@ -502,7 +514,8 @@ const _PUBLIC_ORDER_SELECT = `
   SELECT
     o.id, o.company_id, o.client_id, o.status, o.notes,
     o.subtotal, o.delivery_fee, o.discount, o.total,
-    o.delivery_address, o.scheduled_for, o.created_at, o.updated_at,
+    o.delivery_address, o.delivery_type,
+    o.scheduled_for, o.created_at, o.updated_at,
     c.name AS client_name, c.phone AS client_phone,
     co.name AS company_name, co.brand_color, co.logo_url, co.phone AS company_phone,
     (SELECT ca.latitude FROM company_addresses ca WHERE ca.company_id = o.company_id ORDER BY ca.id DESC LIMIT 1) AS company_lat,

@@ -224,7 +224,9 @@ const listSessions = async (companyId, opts = {}) => {
   return res.rows;
 };
 
-// Sessões com coordenadas (para o mapa).
+// Sessões com coordenadas (para o mapa). Pedidos de retirada (delivery_type =
+// 'pickup') são excluídos do mapa — eles não têm coordenadas relevantes para
+// rastreio geográfico.
 const listMapPoints = async (companyId) => {
   const cid = _int(companyId);
   if (!cid) return [];
@@ -236,12 +238,14 @@ const listMapPoints = async (companyId) => {
             s.cart_items_count, s.subtotal,
             s.latitude, s.longitude, s.address,
             s.order_id, s.last_activity_at, s.created_at,
-            o.status AS order_status
+            o.status AS order_status,
+            o.delivery_type AS order_delivery_type
        FROM customer_tracking_sessions s
        LEFT JOIN orders o ON o.id = s.order_id
       WHERE s.company_id = $1
         AND s.latitude IS NOT NULL
         AND s.longitude IS NOT NULL
+        AND (s.order_id IS NULL OR COALESCE(o.delivery_type, TRUE) = TRUE)
         AND (
               s.is_active = TRUE
            OR s.last_activity_at >= NOW() - INTERVAL '2 hours'

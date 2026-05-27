@@ -100,7 +100,18 @@ const summarize = async (companyId) => {
 };
 
 const create = async (data) => {
-  const { company_id, client_id, notes, items, payment_method_id, delivery_address, delivery_type, tag } = data;
+  const { company_id, client_id, notes, items, payment_method_id, delivery_address, tag } = data;
+
+  // delivery_type é BOOLEAN no DB (TRUE = entrega, FALSE = retirada).
+  // Aceita boolean direto, ou string 'delivery'/'pickup' por compatibilidade.
+  let delivery_type;
+  if (data.delivery_type === false || data.delivery_type === "pickup") {
+    delivery_type = false;
+  } else if (data.delivery_type === true || data.delivery_type === "delivery") {
+    delivery_type = true;
+  } else {
+    delivery_type = null;
+  }
 
   const delivery_fee = Number(data.delivery_fee ?? 0);
   const discount = Number(data.discount ?? 0);
