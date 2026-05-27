@@ -27,6 +27,7 @@ const searchAnalytics = require("../controllers/searchAnalyticsController");
 const orderMessages = require("../controllers/orderMessagesController");
 const productOptions = require("../controllers/productOptionsController");
 const purchaseGoals = require("../controllers/purchaseGoalsController");
+const customerTracking = require("../controllers/customerTrackingController");
 
 router.get("/", (req, res) => {
   res.send("API is running 🚀");
@@ -203,5 +204,15 @@ router.post("/public/orders", publicCtrl.createOrder);
 router.get("/public/orders", publicCtrl.listOrdersByPhone);
 router.get("/public/orders/:id/reorder", publicCtrl.reorder);
 router.get("/public/orders/:id", publicCtrl.getOrder);
+
+// customer tracking — público (fire-and-forget) e admin (com auth)
+router.post("/public/customer-tracking/session", customerTracking.upsertSession);
+router.post("/public/customer-tracking/location", customerTracking.updateLocation);
+router.post("/public/customer-tracking/order", customerTracking.attachOrder);
+router.post("/public/customer-tracking/event", customerTracking.trackEvent);
+router.get("/customer-tracking/company/:companyId/sessions", authMiddleware, customerTracking.listSessions);
+router.get("/customer-tracking/company/:companyId/map", authMiddleware, customerTracking.listMapPoints);
+router.get("/customer-tracking/company/:companyId/metrics", authMiddleware, customerTracking.getMetrics);
+router.get("/customer-tracking/company/:companyId/session/:sessionId/events", authMiddleware, customerTracking.listSessionEvents);
 
 module.exports = router;
