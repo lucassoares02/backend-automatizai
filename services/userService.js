@@ -7,6 +7,18 @@ const findUserByEmail = async (email) => {
   return result.rows[0];
 };
 
+const findPrimaryCompanyId = async (userId) => {
+  const result = await pool.query(
+    `SELECT company_id
+     FROM user_companies
+     WHERE user_id = $1
+     ORDER BY company_id
+     LIMIT 1`,
+    [userId],
+  );
+  return result.rows[0]?.company_id ?? null;
+};
+
 const validateLogin = async (email, password) => {
   const user = await findUserByEmail(email);
   if (!user) throw new Error("User not found");
@@ -15,6 +27,7 @@ const validateLogin = async (email, password) => {
   if (!passwordMatch) throw new Error("Invalid credentials");
 
   const { password: _, ...userWithoutPassword } = user;
+  userWithoutPassword.company = await findPrimaryCompanyId(user.id);
 
   return userWithoutPassword;
 };
@@ -36,4 +49,4 @@ const createUser = async (name, email, password, active) => {
   return result.rows[0];
 };
 
-module.exports = { findUserByEmail, validateLogin, getAllUsers, createUser };
+module.exports = { findUserByEmail, validateLogin, getAllUsers, createUser, findPrimaryCompanyId };

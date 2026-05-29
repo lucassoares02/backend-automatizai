@@ -47,6 +47,8 @@ const deleteWorkflow = async (id) => {
 
 // ─── Main export ──────────────────────────────────────────────────────────────
 
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 const duplicate = async (instance, company) => {
   // 1. Fetch the template workflow
   const templateRes = await fetch(`${n8nUrl}workflows/sBNtd2jZC8s9YQPO`, {
@@ -58,7 +60,7 @@ const duplicate = async (instance, company) => {
   const workflow = await templateRes.json();
 
   // 2. Adapt nodes for this instance/company
-  const updatedNodes = replaceWebhookId(replaceCompanyId(workflow.nodes, company), instance);
+  const updatedNodes = rewriteWebhookIds(replaceCompanyId(workflow.nodes, company), instance);
 
   const newWorkflow = {
     name: instance,
@@ -73,6 +75,8 @@ const duplicate = async (instance, company) => {
     console.log(`[n8n] Removing existing workflow '${instance}' (id=${existing.id}) before recreate`);
     await deactivateWorkflow(existing.id);
     await deleteWorkflow(existing.id);
+    // Pequeno respiro pra n8n liberar o registro do webhook antes do create.
+    await _sleep(600);
   }
 
   // 4. Create the new workflow
@@ -92,9 +96,10 @@ const duplicate = async (instance, company) => {
     headers: _headers,
   });
   if (!activateRes.ok) {
+    const errText = await activateRes.text();
     // Cleanup: delete the newly created workflow to avoid orphans
     await deleteWorkflow(workflowCreated.id).catch(() => {});
-    throw new Error(`N8N workflow activate failed [${activateRes.status}]: ${await activateRes.text()}`);
+    throw new Error(`N8N workflow activate failed [${activateRes.status}]: ${errText}`);
   }
 
   return await activateRes.json();
@@ -102,13 +107,72 @@ const duplicate = async (instance, company) => {
 
 // ─── Node transformers ────────────────────────────────────────────────────────
 
-const replaceWebhookId = (nodes, instance) => {
-  const oldId = "d5c1216d-4d32-406a-afde-ddc5ca51b40d";
-  const otherId = "4f9d86ae-04c0-49ca-a77c-a38f5a345aad";
+/**
+ * Rewrites every webhook node in the workflow to have a fresh unique
+ * `webhookId` AND a fresh unique `parameters.path`, both derived from
+ * `instance` plus a per-node suffix.
+ *
+ * Two things matter for n8n to activate without "conflict with one of the
+ * webhooks":
+ *  - each webhook node within the workflow must have a unique webhookId;
+ *  - each webhook PATH must be globally unique across all active workflows
+ *    in the n8n instance.
+ *
+ * Strategy:
+ *  1. First pass: scan nodes, detect every webhook-like node, assign new
+ *     unique IDs, and build a map oldId → newId.
+ *  2. Second pass: traverse ALL nodes (including non-webhook) and rewrite
+ *     any string reference to an old webhook id to its new value. This keeps
+ *     internal references (e.g., HTTP/Wait/Resume nodes that point back to
+ *     the webhook) consistent.
+ *
+ * This is robust to ANY UUID present in the template — we don't hardcode the
+ * old ids.
+ */
+const rewriteWebhookIds = (nodes, instance) => {
+  const idMap = new Map(); // oldWebhookId → newWebhookId
+  const isWebhookNode = (node) => {
+    const t = String(node?.type || "").toLowerCase();
+    // Catches: n8n-nodes-base.webhook, .formTrigger, .respondToWebhook, etc.
+    return t.includes("webhook") || t.endsWith(".formtrigger");
+  };
+
+  // ── Pass 1: detect webhooks, assign new unique ids ──────────────────────────
+  let counter = 0;
+  const stage1 = nodes.map((node) => {
+    if (!isWebhookNode(node)) return node;
+    counter += 1;
+    const oldId = node.webhookId;
+    // const newId = `${instance}-${counter}`;
+    const newId = `${instance}`;
+    if (oldId && !idMap.has(oldId)) idMap.set(oldId, newId);
+
+    const oldPath = node?.parameters?.path;
+    // Reaproveita o mesmo newId pra path — fica simples de auditar nas URLs.
+    if (oldPath && !idMap.has(oldPath) && oldPath !== oldId) {
+      idMap.set(oldPath, newId);
+    }
+
+    return {
+      ...node,
+      webhookId: newId,
+      parameters: {
+        ...(node.parameters || {}),
+        path: newId,
+      },
+    };
+  });
+
+  // ── Pass 2: rewrite every string that references an old id ──────────────────
+  if (idMap.size === 0) return stage1;
 
   const traverse = (obj) => {
     if (typeof obj === "string") {
-      return obj.replaceAll(oldId, instance).replaceAll(otherId, instance);
+      let s = obj;
+      for (const [oldId, newId] of idMap) {
+        if (s.includes(oldId)) s = s.split(oldId).join(newId);
+      }
+      return s;
     } else if (Array.isArray(obj)) {
       return obj.map(traverse);
     } else if (obj && typeof obj === "object") {
@@ -117,7 +181,7 @@ const replaceWebhookId = (nodes, instance) => {
     return obj;
   };
 
-  return nodes.map(traverse);
+  return stage1.map(traverse);
 };
 
 const replaceCompanyId = (nodes, company) => {
@@ -129,4 +193,15 @@ const replaceCompanyId = (nodes, company) => {
   });
 };
 
-module.exports = { duplicate };
+/**
+ * Atualizar fluxo do n8n para uma empresa.
+ *
+ * Estratégia: delete + recria. Reutiliza `duplicate` que já implementa esse
+ * fluxo (deactivate → delete → fetch template → adapt → create → activate).
+ * Mantida como função separada para deixar a intenção clara no controller.
+ */
+const update = async (instance, company) => {
+  return duplicate(instance, company);
+};
+
+module.exports = { duplicate, update };

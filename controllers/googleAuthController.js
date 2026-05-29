@@ -1,4 +1,5 @@
 const { verifyAccessToken, findOrCreateUser } = require('../services/googleAuthService');
+const { findPrimaryCompanyId } = require('../services/userService');
 const { generateToken } = require('../helpers/jwt');
 
 /**
@@ -25,6 +26,7 @@ exports.googleSignIn = async (req, res) => {
     }
 
     const token = generateToken({ id: user.id, email: user.email, type: user.type ?? 0 });
+    user.company = await findPrimaryCompanyId(user.id);
 
     return res.status(200).json({
       message: 'Login realizado com sucesso',

@@ -109,6 +109,7 @@ router.get("/connections/status/:instance", authMiddleware, connections.getStatu
 router.get("/connections/:id", authMiddleware, connections.find);
 router.post("/connections", authMiddleware, connections.create);
 router.patch("/connections/:id", authMiddleware, connections.update);
+router.post("/connections/:id/update-workflow", authMiddleware, connections.updateWorkflow);
 router.delete("/connections/:id/:instance", authMiddleware, connections.remove);
 router.post("/search-address", connections.searchAddress);
 

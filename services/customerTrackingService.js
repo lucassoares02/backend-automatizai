@@ -84,10 +84,30 @@ const upsertSession = async (payload) => {
        customer_id      = COALESCE(EXCLUDED.customer_id, customer_tracking_sessions.customer_id),
        customer_name    = COALESCE(EXCLUDED.customer_name, customer_tracking_sessions.customer_name),
        customer_phone   = COALESCE(EXCLUDED.customer_phone, customer_tracking_sessions.customer_phone),
-       status           = EXCLUDED.status,
-       current_step     = EXCLUDED.current_step,
-       cart_items_count = EXCLUDED.cart_items_count,
-       subtotal         = EXCLUDED.subtotal,
+       -- Quando a sessão já foi marcada como order_created, congelamos status,
+       -- step e os totais do carrinho — o cliente pode esvaziar o carrinho
+       -- após o pedido (clearCart) e isso NÃO deve zerar os valores do pedido
+       -- já criado.
+       status = CASE
+         WHEN customer_tracking_sessions.status = 'order_created'
+         THEN customer_tracking_sessions.status
+         ELSE EXCLUDED.status
+       END,
+       current_step = CASE
+         WHEN customer_tracking_sessions.status = 'order_created'
+         THEN customer_tracking_sessions.current_step
+         ELSE EXCLUDED.current_step
+       END,
+       cart_items_count = CASE
+         WHEN customer_tracking_sessions.status = 'order_created'
+         THEN customer_tracking_sessions.cart_items_count
+         ELSE EXCLUDED.cart_items_count
+       END,
+       subtotal = CASE
+         WHEN customer_tracking_sessions.status = 'order_created'
+         THEN customer_tracking_sessions.subtotal
+         ELSE EXCLUDED.subtotal
+       END,
        latitude         = COALESCE(EXCLUDED.latitude, customer_tracking_sessions.latitude),
        longitude        = COALESCE(EXCLUDED.longitude, customer_tracking_sessions.longitude),
        address          = COALESCE(EXCLUDED.address, customer_tracking_sessions.address),

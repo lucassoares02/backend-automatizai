@@ -116,6 +116,41 @@ const remove = async (req, res) => {
 };
 
 /**
+ * Atualizar fluxo do n8n vinculado a uma conexão existente.
+ *
+ * Estratégia simples: delete + recria.
+ *  1. Busca conexão atual (valida que ela pertence à empresa do token)
+ *  2. Chama n8n.update — internamente faz deactivate → delete → recreate → activate
+ *     do workflow com o mesmo nome (instanceName) usando o template master atualizado
+ *  3. Reaplica os dados da empresa via os mesmos transformers da criação
+ *
+ * Nada precisa ser gravado no banco: o vínculo workflow ↔ empresa é feito
+ * pelo `instanceName`, que continua o mesmo após a recriação.
+ */
+const updateWorkflow = async (req, res) => {
+  const { id } = req.params;
+  if (!id || isNaN(id)) {
+    return res.status(400).json({ error: "Invalid ID" });
+  }
+  try {
+    const connection = await service.find(id);
+    if (!connection) return res.status(404).json({ error: "Connection not found" });
+
+    const instance = connection.instance_name;
+    const company = connection.company_id;
+    if (!instance || !company) {
+      return res.status(400).json({ error: "Connection missing instanceName or company" });
+    }
+
+    const result = await n8n.update(instance, company);
+    return res.status(200).json({ message: "Workflow updated", data: result });
+  } catch (error) {
+    console.error("Error updating workflow:", error);
+    return res.status(500).json({ error: "Failed to update workflow", details: error.message });
+  }
+};
+
+/**
  * Get fresh QR code for an instance — used for auto-refresh in the UI
  */
 const getQrCode = async (req, res) => {
@@ -195,9 +230,7 @@ const webhook = async (req, res) => {
         await service.updateStatusByInstance(instance, state);
       }
     } else if (event === "MESSAGES_UPSERT") {
-      evolution.forwardToN8n(instance, req.body).catch((e) =>
-        console.error("[webhook] N8N forward failed:", e.message),
-      );
+      evolution.forwardToN8n(instance, req.body).catch((e) => console.error("[webhook] N8N forward failed:", e.message));
     }
   } catch (err) {
     console.error("[webhook] handler error:", err.message);
@@ -220,4 +253,4 @@ const getStatus = async (req, res) => {
   }
 };
 
-module.exports = { findAll, find, create, update, remove, getQrCode, testConnection, searchAddress, webhook, getStatus };
+module.exports = { findAll, find, create, update, remove, getQrCode, testConnection, searchAddress, webhook, getStatus, updateWorkflow };

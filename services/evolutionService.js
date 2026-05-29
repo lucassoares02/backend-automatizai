@@ -18,8 +18,7 @@ const n8nUrlWebhook = _buildN8nWebhookUrl();
 
 const FETCH_TIMEOUT_MS = 15000;
 
-const _fetcher = (url, options = {}) =>
-  fetch(url, { ...options, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+const _fetcher = (url, options = {}) => fetch(url, { ...options, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
 
 const create = async (instanceName, integration, qrcode) => {
   const response = await _fetcher(`${evolutionUrl}/instance/create`, {
@@ -51,7 +50,7 @@ const updateInstance = async (instanceName) => {
     webhook: {
       enabled: true,
       base64: true,
-      url: `${process.env.API_BASE_URL}/api/connections/webhook`,
+      url: `${process.env.N8N_BASE_URL}/webhook/${instanceName}`,
       events: ["MESSAGES_UPSERT", "CONNECTION_UPDATE"],
     },
   });

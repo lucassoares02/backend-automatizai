@@ -13,6 +13,7 @@ const express = require("express");
 const app = express();
 const cors = require("cors");
 const routes = require("./src/routes");
+const watchdogService = require("./services/watchdogService");
 
 const corsOptions = {
   origin: `${process.env.ORIGIN}`,
@@ -44,6 +45,7 @@ const PORT = process.env.PORT || 3003;
 app
   .listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
+    watchdogService.start();
   })
   .on("error", (err) => {
     console.error("❌ Server startup error:");

@@ -74,4 +74,14 @@ const getStatusByInstance = async (instanceName) => {
   return result.rows[0]?.status ?? null;
 };
 
-module.exports = { findAll, find, find_by_instance, create, update, remove, updateStatusByInstance, getStatusByInstance };
+const findActive = async () => {
+  const result = await pool.query(
+    `SELECT id, instance_name, status, company_id
+     FROM connections
+     WHERE status IS NOT NULL
+       AND status NOT IN ('disconnected', 'error')`,
+  );
+  return result.rows;
+};
+
+module.exports = { findAll, find, find_by_instance, create, update, remove, updateStatusByInstance, getStatusByInstance, findActive };
