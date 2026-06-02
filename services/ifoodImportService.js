@@ -1,15 +1,17 @@
 const axios = require("axios");
 
 // Actor da Apify que faz a inteligência do restaurante iFood.
-const APIFY_ACTOR = "viralanalyzer~ifood-restaurant-intelligence";
-const APIFY_TOKEN = process.env.APIFY_TOKEN || "process.env.APIFY_TOKEN";
+const APIFY_ACTOR = process.env.APIFY_ACTOR || "";
+const APIFY_TOKEN = process.env.APIFY_TOKEN || "";
 const APIFY_URL = `https://api.apify.com/v2/acts/${APIFY_ACTOR}/run-sync-get-dataset-items?token=${APIFY_TOKEN}`;
 
 // Converte preços vindos em número ou string ("R$ 12,90", "12.90") para Number.
 const _toNumber = (v) => {
   if (v == null) return null;
   if (typeof v === "number") return Number.isFinite(v) ? v : null;
-  let s = String(v).replace(/[^\d.,-]/g, "").trim();
+  let s = String(v)
+    .replace(/[^\d.,-]/g, "")
+    .trim();
   if (!s) return null;
   const hasComma = s.includes(",");
   const hasDot = s.includes(".");
