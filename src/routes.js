@@ -28,6 +28,7 @@ const orderMessages = require("../controllers/orderMessagesController");
 const productOptions = require("../controllers/productOptionsController");
 const purchaseGoals = require("../controllers/purchaseGoalsController");
 const customerTracking = require("../controllers/customerTrackingController");
+const ifoodImport = require("../controllers/ifoodImportController");
 
 router.get("/", (req, res) => {
   res.send("API is running 🚀");
@@ -71,6 +72,10 @@ router.get("/menu_categories/:id", menu_categories.find);
 router.post("/menu_categories", menu_categories.create);
 router.patch("/menu_categories/:id", menu_categories.update);
 router.delete("/menu_categories/:id", menu_categories.remove);
+
+//ifood import (preenchimento automático de cardápio)
+router.post("/ifood/import-preview", ifoodImport.importPreview);
+router.post("/ifood/import", ifoodImport.importMenu);
 
 //menu_items
 router.get("/menu_items", menu_items.findAll);

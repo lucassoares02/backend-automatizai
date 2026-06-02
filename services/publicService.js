@@ -60,7 +60,15 @@ const getCompanyPublicMenu = async (companyId) => {
             EXISTS(
               SELECT 1 FROM product_option_groups pog
               WHERE pog.product_id = mi.id
-            ) AS has_options
+            ) AS has_options,
+            COALESCE((
+              SELECT SUM(oi.quantity)
+              FROM order_items oi
+              JOIN orders o2 ON o2.id = oi.order_id
+              WHERE oi.menu_item_id = mi.id
+                AND o2.company_id = mi.company_id
+                AND o2.status NOT IN (6, 7)
+            ), 0) AS sales_count
      FROM menu_items mi
      LEFT JOIN menu_categories mc ON mc.id = mi.category_id
      WHERE mi.company_id = $1 AND mi.available = true
