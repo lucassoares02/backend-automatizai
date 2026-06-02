@@ -32,11 +32,15 @@ const create = async (data) => {
 };
 
 const update = async (data) => {
-  // espera um objeto com propriedades em camelCase + id
-  const { id, companyId, weekday, opensAt, closesAt, isClosed } = data;
+  const id = data.id;
+  const companyId = data.company_id !== undefined ? data.company_id : data.companyId;
+  const weekday = data.weekday;
+  const opensAt = data.opens_at !== undefined ? data.opens_at : data.opensAt;
+  const closesAt = data.closes_at !== undefined ? data.closes_at : data.closesAt;
+  const isClosed = data.is_closed !== undefined ? data.is_closed : data.isClosed;
   const result = await pool.query(
-    "UPDATE company_opening_hours SET id = $1, company_id = $2, weekday = $3, opens_at = $4, closes_at = $5, is_closed = $6 WHERE id = $7 RETURNING *",
-    [id, companyId, weekday, opensAt, closesAt, isClosed, id],
+    "UPDATE company_opening_hours SET company_id = $2, weekday = $3, opens_at = $4, closes_at = $5, is_closed = $6 WHERE id = $1 RETURNING *",
+    [id, companyId, weekday, opensAt, closesAt, isClosed],
   );
   return result.rows[0];
 };

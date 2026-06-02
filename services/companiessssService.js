@@ -1,6 +1,51 @@
 const pool = require("../db");
 
 /**
+ * Normaliza a lista de restrições alimentares antes de persistir:
+ * remove valores não-string, faz trim, descarta vazios e elimina duplicatas
+ * ignorando maiúsculas/minúsculas (preservando a primeira ocorrência).
+ * Retorna null quando a lista resultante fica vazia.
+ */
+const normalizeDietaryRestrictions = (value) => {
+  if (!Array.isArray(value)) return null;
+  const seen = new Set();
+  const result = [];
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const trimmed = item.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(trimmed);
+  }
+  return result.length ? result : null;
+};
+
+/**
+ * Normaliza o catálogo de personalidades personalizadas da IA antes de
+ * persistir em coluna JSONB. Cada item precisa ter `label` e `prompt`
+ * (strings não vazias). Retorna uma string JSON pronta para o parâmetro JSONB,
+ * ou null quando vazio.
+ */
+const normalizeAiPersonalities = (value) => {
+  if (!Array.isArray(value)) return null;
+  const seen = new Set();
+  const result = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const label = typeof item.label === "string" ? item.label.trim() : "";
+    const prompt = typeof item.prompt === "string" ? item.prompt.trim() : "";
+    if (!label || !prompt) continue;
+    const key = label.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push({ label, prompt });
+  }
+  return result.length ? JSON.stringify(result) : null;
+};
+
+/**
  * Get All companies
  */
 const findAll = async () => {
@@ -31,6 +76,8 @@ const update = async (data) => {
     id, name, description, status, phone,
     logo_url, brand_color, banner_url,
     ai_name, ai_gender, ai_personality, cuisine_type, dietary_restrictions,
+    custom_dietary_restrictions,
+    custom_ai_personalities,
     max_distance_meters_delivery,
     kilometer_price,
     max_distance_meters_free_delivery,
@@ -46,13 +93,17 @@ const update = async (data) => {
          name = $2, description = $3, status = $4, phone = $5,
          logo_url = $6, brand_color = $7, banner_url = $8,
          ai_name = $9, ai_gender = $10, ai_personality = $11,
-         cuisine_type = $12, dietary_restrictions = $13
+         cuisine_type = $12, dietary_restrictions = $13,
+         custom_dietary_restrictions = $14,
+         custom_ai_personalities = $15
        WHERE id = $1 RETURNING *`,
       [
         id, name, description, status, phone,
         logo_url ?? null, brand_color ?? null, banner_url ?? null,
         ai_name ?? null, ai_gender ?? null, ai_personality ?? null,
-        cuisine_type ?? null, dietary_restrictions ?? null,
+        cuisine_type ?? null, normalizeDietaryRestrictions(dietary_restrictions),
+        normalizeDietaryRestrictions(custom_dietary_restrictions),
+        normalizeAiPersonalities(custom_ai_personalities),
       ],
     );
 

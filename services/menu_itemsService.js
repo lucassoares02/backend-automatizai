@@ -16,7 +16,13 @@ const findByCompany = async (id) => {
      FROM menu_items mi
      LEFT JOIN menu_categories mc ON mc.id = mi.category_id
      WHERE mi.company_id = $1
-     ORDER BY COALESCE(mi.display_order, mi.id) DESC`,
+     ORDER BY
+       CASE
+         WHEN mi.available = false THEN 2
+         WHEN mi.featured = true THEN 0
+         ELSE 1
+       END,
+       COALESCE(mi.display_order, mi.id) DESC`,
     [id],
   );
   return result.rows || null;
