@@ -20,14 +20,35 @@ const FETCH_TIMEOUT_MS = 15000;
 
 const _fetcher = (url, options = {}) => fetch(url, { ...options, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
 
-const create = async (instanceName, integration, qrcode) => {
+const _booleanOrDefault = (value, fallback) => {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value === 1;
+  if (typeof value !== "string") return fallback;
+
+  const normalized = value.trim().toLowerCase();
+  if (["true", "1", "yes", "sim"].includes(normalized)) return true;
+  if (["false", "0", "no", "nao", "não"].includes(normalized)) return false;
+  return fallback;
+};
+
+const create = async (instanceName, integration, qrcode, settings = {}) => {
+  const payload = {
+    instanceName,
+    integration,
+    qrcode,
+    rejectCall: _booleanOrDefault(settings.rejectCall, true),
+    groupsIgnore: _booleanOrDefault(settings.groupsIgnore, true),
+    syncFullHistory: _booleanOrDefault(settings.syncFullHistory, true),
+  };
+
   const response = await _fetcher(`${evolutionUrl}/instance/create`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       apikey: process.env.TOKEN_EVOLUTION,
     },
-    body: JSON.stringify({ instanceName, integration, qrcode }),
+    body: JSON.stringify(payload),
   });
 
   const text = await response.text();

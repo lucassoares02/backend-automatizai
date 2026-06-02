@@ -86,11 +86,16 @@ const summarize = async (companyId) => {
        ORDER BY order_id, created_at DESC
      )
      SELECT
-       COUNT(*)                                                                                        AS total,
-       COUNT(*) FILTER (WHERE o.created_at::date = CURRENT_DATE)                                      AS today,
-       COUNT(*) FILTER (WHERE ls.status_code IS NULL OR ls.status_code = ANY($2::int[])) AS in_progress,
-       COUNT(*) FILTER (WHERE ls.status_code = ANY($3::int[]))                             AS completed,
-       COUNT(*) FILTER (WHERE ls.status_code = ANY($4::int[]))                             AS cancelled
+       COUNT(*)                                                                                      AS total,
+       COUNT(*) FILTER (WHERE o.created_at::date = CURRENT_DATE)                                    AS today,
+       COUNT(*) FILTER (WHERE ls.status_code IS NULL OR ls.status_code = ANY($2::int[]))            AS in_progress,
+       COUNT(*) FILTER (WHERE ls.status_code = ANY($3::int[]))                                      AS completed,
+       COUNT(*) FILTER (WHERE ls.status_code = ANY($4::int[]))                                      AS cancelled,
+       COALESCE(SUM(o.total), 0)                                                                     AS total_value,
+       COALESCE(SUM(o.total) FILTER (WHERE o.created_at::date = CURRENT_DATE), 0)                   AS today_value,
+       COALESCE(SUM(o.total) FILTER (WHERE ls.status_code IS NULL OR ls.status_code = ANY($2::int[])), 0) AS in_progress_value,
+       COALESCE(SUM(o.total) FILTER (WHERE ls.status_code = ANY($3::int[])), 0)                     AS completed_value,
+       COALESCE(SUM(o.total) FILTER (WHERE ls.status_code = ANY($4::int[])), 0)                     AS cancelled_value
      FROM orders o
      LEFT JOIN latest_status ls ON ls.order_id = o.id
      WHERE o.company_id = $1`,

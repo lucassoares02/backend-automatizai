@@ -42,7 +42,21 @@ const find = async (req, res) => {
  * Create a new Connection (Evolution instance + N8N workflow)
  */
 const create = async (req, res) => {
-  const { integration, instanceName, qrcode, company, description } = req.body;
+  const {
+    integration,
+    instanceName,
+    qrcode,
+    company,
+    description,
+    rejectCall,
+    reject_call: rejectCallSnake,
+    groupsIgnore,
+    groups_ignore: groupsIgnoreSnake,
+    ignoreGroups,
+    ignore_groups: ignoreGroupsSnake,
+    syncFullHistory,
+    sync_full_history: syncFullHistorySnake,
+  } = req.body;
 
   if (!integration || !instanceName || !company) {
     return res.status(400).json({ error: "integration, instanceName and company are required" });
@@ -51,7 +65,11 @@ const create = async (req, res) => {
   try {
     const templateN8N = await n8n.duplicate(instanceName, company);
 
-    const newConnection = await evolution.create(instanceName, integration, qrcode ?? true);
+    const newConnection = await evolution.create(instanceName, integration, qrcode ?? true, {
+      rejectCall: rejectCall ?? rejectCallSnake,
+      groupsIgnore: groupsIgnore ?? groupsIgnoreSnake ?? ignoreGroups ?? ignoreGroupsSnake,
+      syncFullHistory: syncFullHistory ?? syncFullHistorySnake,
+    });
 
     await service.create({
       company,
