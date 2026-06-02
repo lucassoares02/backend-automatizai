@@ -528,6 +528,15 @@ const _PUBLIC_ORDER_SELECT = `
     co.name AS company_name, co.brand_color, co.logo_url, co.phone AS company_phone,
     (SELECT ca.latitude FROM company_addresses ca WHERE ca.company_id = o.company_id ORDER BY ca.id DESC LIMIT 1) AS company_lat,
     (SELECT ca.longitude FROM company_addresses ca WHERE ca.company_id = o.company_id ORDER BY ca.id DESC LIMIT 1) AS company_lng,
+    (
+      SELECT NULLIF(TRIM(BOTH ', ' FROM CONCAT_WS(', ',
+        NULLIF(TRIM(CONCAT_WS(' ', ca.street, ca.number)), ''),
+        NULLIF(ca.neighborhood, ''),
+        NULLIF(CONCAT_WS(' / ', NULLIF(ca.city, ''), NULLIF(ca.state, '')), ''),
+        NULLIF(CASE WHEN COALESCE(ca.zip_code, '') <> '' THEN 'CEP ' || ca.zip_code END, '')
+      )), '')
+      FROM company_addresses ca WHERE ca.company_id = o.company_id ORDER BY ca.id DESC LIMIT 1
+    ) AS company_address,
     pm.label AS payment_method_label, pm.type AS payment_method_type,
     COALESCE(
       (
