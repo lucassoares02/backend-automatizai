@@ -172,4 +172,4 @@ const forwardToN8n = async (instanceName, body) => {
   }
 };
 
-module.exports = { create, updateInstance, getQrCode, testConnection, getInstance, deleteInstance, forwardToN8n };
+module.exports = { create, updateInstance, getQrCode, testConnection, getInstance, deleteInstance, forwardToN8n, n8nUrlWebhook };

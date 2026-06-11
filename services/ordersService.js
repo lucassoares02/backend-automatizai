@@ -1,4 +1,5 @@
 const pool = require("../db");
+const orderWebhookService = require("./orderWebhookService");
 const STATUS_IN_PROGRESS = [1, 2, 3, 4, 8];
 const STATUS_COMPLETED = [5, 9];
 const STATUS_CANCELLED = [6, 7];
@@ -195,6 +196,11 @@ const updateStatus = async (id, status, cancelReason) => {
     );
 
     await client.query("COMMIT");
+
+    // Fire-and-forget: o service decide se o status dispara e nunca lança —
+    // falha do n8n não pode impactar a atualização do pedido.
+    orderWebhookService.notifyStatusChange(order, Number(status));
+
     return order;
   } catch (err) {
     await client.query("ROLLBACK");
