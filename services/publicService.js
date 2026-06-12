@@ -667,6 +667,91 @@ const findPublicOrdersByPhone = async ({ company_id, phone }) => {
   return result.rows;
 };
 
+// ─── Marketplace público de restaurantes (/order) ───────────────────────────
+// Lista todas as empresas com cardápio publicado, enriquecidas com métricas
+// para ranking (pedidos/faturamento), tempo médio de preparo, taxa/pedido
+// mínimo e status aberto/fechado. Também devolve promoções ativas para a
+// vitrine. Sem autenticação — dados estritamente públicos.
+const _isOpenNow = (hours) => {
+  const now = new Date();
+  const weekday = now.getDay();
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const today = hours.find((h) => h.weekday === weekday);
+  if (!today || today.is_closed) return false;
+  const [oh, om] = String(today.opens_at).split(":").map(Number);
+  const [ch, cm] = String(today.closes_at).split(":").map(Number);
+  if (![oh, om, ch, cm].every(Number.isFinite)) return false;
+  return currentMinutes >= oh * 60 + om && currentMinutes <= ch * 60 + cm;
+};
+
+const listPublicRestaurants = async () => {
+  // Ranking: pedidos válidos (não cancelados/rejeitados) > faturamento > mais
+  // recentes — melhor métrica disponível na estrutura atual.
+  const restaurantsRes = await pool.query(
+    `SELECT c.id, c.name, c.description, c.logo_url, c.banner_url, c.brand_color,
+            c.cuisine_type,
+            (SELECT COUNT(*)::int FROM orders o
+              WHERE o.company_id = c.id AND o.status NOT IN (6, 7)) AS orders_count,
+            (SELECT COALESCE(SUM(o.total), 0)::float FROM orders o
+              WHERE o.company_id = c.id AND o.status NOT IN (6, 7)) AS revenue_total,
+            (SELECT ROUND(AVG(mi.prep_time_minutes))::int FROM menu_items mi
+              WHERE mi.company_id = c.id AND mi.available = true
+                AND mi.prep_time_minutes IS NOT NULL AND mi.prep_time_minutes > 0) AS avg_prep_minutes,
+            (SELECT COUNT(*)::int FROM menu_items mi
+              WHERE mi.company_id = c.id AND mi.available = true) AS items_count,
+            (SELECT cp.min_price_order FROM company_preferences cp
+              WHERE cp.company_id = c.id ORDER BY cp.id DESC LIMIT 1) AS min_price_order,
+            (SELECT cp.min_tax_delivery FROM company_preferences cp
+              WHERE cp.company_id = c.id ORDER BY cp.id DESC LIMIT 1) AS min_tax_delivery,
+            EXISTS(SELECT 1 FROM promotions p
+              WHERE p.company_id = c.id AND p.active = true) AS has_promotions
+     FROM companies c
+     WHERE EXISTS (SELECT 1 FROM menu_items mi
+                   WHERE mi.company_id = c.id AND mi.available = true)
+     ORDER BY orders_count DESC, revenue_total DESC, c.id DESC`,
+  );
+  const restaurants = restaurantsRes.rows;
+
+  // Horários de todas as empresas listadas em uma query só → aberto/fechado.
+  const ids = restaurants.map((r) => r.id);
+  let hoursByCompany = new Map();
+  if (ids.length > 0) {
+    const hoursRes = await pool.query(
+      `SELECT company_id, weekday, opens_at, closes_at, is_closed
+       FROM company_opening_hours WHERE company_id = ANY($1::int[])`,
+      [ids],
+    );
+    hoursByCompany = hoursRes.rows.reduce((map, h) => {
+      if (!map.has(h.company_id)) map.set(h.company_id, []);
+      map.get(h.company_id).push(h);
+      return map;
+    }, new Map());
+  }
+
+  for (const r of restaurants) {
+    r.is_open = _isOpenNow(hoursByCompany.get(r.id) || []);
+    r.min_price_order = toNumber(r.min_price_order);
+    r.min_tax_delivery = toNumber(r.min_tax_delivery);
+    r.revenue_total = toNumber(r.revenue_total) ?? 0;
+  }
+
+  // Promoções ativas para a vitrine "Promoções imperdíveis".
+  const promosRes = await pool.query(
+    `SELECT p.id, p.company_id, p.name, p.image_url,
+            p.discount_percent, p.original_price, p.final_price,
+            c.name AS company_name, c.logo_url AS company_logo
+     FROM promotions p
+     JOIN companies c ON c.id = p.company_id
+     WHERE p.active = true
+       AND EXISTS (SELECT 1 FROM menu_items mi
+                   WHERE mi.company_id = p.company_id AND mi.available = true)
+     ORDER BY p.updated_at DESC NULLS LAST, p.id DESC
+     LIMIT 12`,
+  );
+
+  return { restaurants, promotions: promosRes.rows };
+};
+
 module.exports = {
   getCompanyPublicMenu,
   findClientByPhone,
@@ -676,4 +761,5 @@ module.exports = {
   calculatePublicDeliveryFee,
   getPublicOrder,
   findPublicOrdersByPhone,
+  listPublicRestaurants,
 };

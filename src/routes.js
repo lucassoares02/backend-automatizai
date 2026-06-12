@@ -201,6 +201,7 @@ router.delete("/purchase-goals/:id", authMiddleware, purchaseGoals.remove);
 router.post("/public/purchase-goals/suggest", purchaseGoals.publicSuggest);
 
 // public ordering (no auth)
+router.get("/public/restaurants", publicCtrl.listRestaurants);
 router.get("/public/company/:companyId", publicCtrl.getCompanyMenu);
 router.get("/public/delivery-fee", publicCtrl.calculateDeliveryFee);
 router.get("/public/client", publicCtrl.findClientByPhone);

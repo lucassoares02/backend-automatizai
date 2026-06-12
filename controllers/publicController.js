@@ -1,6 +1,16 @@
 const service = require("../services/publicService");
 const reorderService = require("../services/reorderService");
 
+const listRestaurants = async (_req, res) => {
+  try {
+    const data = await service.listPublicRestaurants();
+    return res.status(200).json(data);
+  } catch (error) {
+    console.error("Error fetching public restaurants:", error);
+    return res.status(500).json({ error: "Failed to fetch restaurants" });
+  }
+};
+
 const getCompanyMenu = async (req, res) => {
   const { companyId } = req.params;
   if (!companyId || isNaN(companyId)) return res.status(400).json({ error: "Invalid company ID" });
@@ -149,6 +159,7 @@ const reorder = async (req, res) => {
 };
 
 module.exports = {
+  listRestaurants,
   getCompanyMenu,
   findClientByPhone,
   createClient,
