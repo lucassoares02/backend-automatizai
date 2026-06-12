@@ -25,6 +25,7 @@ const ORDER_SELECT = `
                 'options', COALESCE((
                   SELECT json_agg(
                     json_build_object(
+                      'menu_item_id', oio.menu_item_id,
                       'group_id', oio.group_id,
                       'group_name', oio.group_name,
                       'option_id', oio.option_id,

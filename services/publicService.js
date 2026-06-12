@@ -102,7 +102,10 @@ const getCompanyPublicMenu = async (companyId) => {
                   'name', mi.name,
                   'price', mi.price,
                   'image_url', mi.image_url,
-                  'subtotal', (COALESCE(mi.price, 0) * pi.quantity)
+                  'subtotal', (COALESCE(mi.price, 0) * pi.quantity),
+                  'has_options', EXISTS (
+                    SELECT 1 FROM product_option_groups pog WHERE pog.product_id = pi.menu_item_id
+                  )
                 )
                 ORDER BY pi.id
               ) FILTER (WHERE pi.id IS NOT NULL),
@@ -403,6 +406,22 @@ const createPublicOrder = async (data) => {
       await productOptionsService.validateSelections(item.menu_item_id, []);
     }
 
+    // Combos: valida e captura as opções de cada item interno do combo. As
+    // opções obrigatórias dos sub-itens são exigidas aqui (validateSelections
+    // lança se faltarem). O preço do combo permanece o promocional (as opções
+    // dos sub-itens não somam preço extra ao combo).
+    let comboOptions = [];
+    if (item.promotion_id && Array.isArray(item.promotion_items)) {
+      for (const sub of item.promotion_items) {
+        if (!sub || !sub.menu_item_id) continue;
+        const subSelections = Array.isArray(sub.options) ? sub.options : [];
+        const result = await productOptionsService.validateSelections(sub.menu_item_id, subSelections);
+        if (result.snapshot.length > 0) {
+          comboOptions.push({ menu_item_id: sub.menu_item_id, snapshot: result.snapshot });
+        }
+      }
+    }
+
     const qty = Number(item.quantity ?? 1);
     const baseUnit = Number(item.unit_price ?? 0);
     const goalInfo = goalMap.get(Number(item.menu_item_id));
@@ -427,6 +446,7 @@ const createPublicOrder = async (data) => {
       base_unit_price: baseUnit,
       subtotal,
       _options_snapshot: optionsSnapshot,
+      _combo_options: comboOptions,
       _purchase_goal_id: goalId,
       _goal_discount_percentage: goalDiscountPct,
       _goal_discount_amount: goalDiscountAmount,
@@ -492,10 +512,11 @@ const createPublicOrder = async (data) => {
       for (const opt of item._options_snapshot || []) {
         await client.query(
           `INSERT INTO order_item_options
-             (order_item_id, group_id, group_name, option_id, option_name, additional_price, quantity)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+             (order_item_id, menu_item_id, group_id, group_name, option_id, option_name, additional_price, quantity)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
           [
             orderItemId,
+            item.menu_item_id ?? null,
             opt.group_id ?? null,
             opt.group_name,
             opt.option_id ?? null,
@@ -504,6 +525,28 @@ const createPublicOrder = async (data) => {
             Math.max(1, Number(opt.quantity ?? 1)),
           ],
         );
+      }
+
+      // Combos: persiste as opções de cada item interno, atribuídas ao sub-item
+      // via menu_item_id (o order_item do combo tem menu_item_id nulo).
+      for (const combo of item._combo_options || []) {
+        for (const opt of combo.snapshot || []) {
+          await client.query(
+            `INSERT INTO order_item_options
+               (order_item_id, menu_item_id, group_id, group_name, option_id, option_name, additional_price, quantity)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+            [
+              orderItemId,
+              combo.menu_item_id ?? null,
+              opt.group_id ?? null,
+              opt.group_name,
+              opt.option_id ?? null,
+              opt.option_name,
+              Number(opt.additional_price ?? 0),
+              Math.max(1, Number(opt.quantity ?? 1)),
+            ],
+          );
+        }
       }
     }
 
@@ -557,6 +600,7 @@ const _PUBLIC_ORDER_SELECT = `
             'options', COALESCE((
               SELECT json_agg(
                 json_build_object(
+                  'menu_item_id', oio.menu_item_id,
                   'group_id', oio.group_id,
                   'group_name', oio.group_name,
                   'option_id', oio.option_id,
