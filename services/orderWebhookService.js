@@ -44,6 +44,7 @@ const _buildPayload = (order, status, extra) => ({
   },
   total: order.total != null ? Number(order.total) : null,
   delivery_type: _deliveryTypeLabel(order.delivery_type),
+  tag: extra.tag ?? null,
   created_at: order.created_at,
   updated_at: order.updated_at,
 });
@@ -59,7 +60,7 @@ const notifyStatusChange = async (order, status) => {
     if (!order?.id || !TRIGGER_STATUSES.has(Number(status))) return;
 
     const extraRes = await pool.query(
-      `SELECT comp.name AS company_name, cli.name AS client_name, cli.phone AS client_phone
+      `SELECT comp.name AS company_name, cli.name AS client_name, cli.phone AS client_phone, o.tag
        FROM orders o
        JOIN companies comp ON comp.id = o.company_id
        JOIN clients cli ON cli.id = o.client_id
