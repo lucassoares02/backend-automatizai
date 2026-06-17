@@ -1,5 +1,6 @@
 const pool = require("../db");
 const orderWebhookService = require("./orderWebhookService");
+const { generateUniqueOrderTag } = require("../helpers/orderTag");
 const STATUS_IN_PROGRESS = [1, 2, 3, 4, 8];
 const STATUS_COMPLETED = [5, 9];
 const STATUS_CANCELLED = [6, 7];
@@ -107,7 +108,7 @@ const summarize = async (companyId) => {
 };
 
 const create = async (data) => {
-  const { company_id, client_id, notes, items, payment_method_id, delivery_address, tag } = data;
+  const { company_id, client_id, notes, items, payment_method_id, delivery_address } = data;
 
   // delivery_type é BOOLEAN no DB (TRUE = entrega, FALSE = retirada).
   // Aceita boolean direto, ou string 'delivery'/'pickup' por compatibilidade.
@@ -129,6 +130,7 @@ const create = async (data) => {
   try {
     await client.query("BEGIN");
 
+    const tag = await generateUniqueOrderTag(client);
     const orderRes = await client.query(
       `INSERT INTO orders
          (company_id, client_id, status, notes, subtotal, delivery_fee, discount, total,
@@ -146,7 +148,7 @@ const create = async (data) => {
         payment_method_id ?? null,
         delivery_address ?? null,
         delivery_type ?? null,
-        tag ?? null,
+        tag,
       ],
     );
     const order = orderRes.rows[0];

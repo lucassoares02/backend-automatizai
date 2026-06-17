@@ -2,6 +2,7 @@ const axios = require("axios");
 const pool = require("../db");
 const productOptionsService = require("./productOptionsService");
 const purchaseGoalsService = require("./purchaseGoalsService");
+const { generateUniqueOrderTag } = require("../helpers/orderTag");
 
 const MAPS_KEY = process.env.GOOGLE_API_KEY;
 
@@ -466,12 +467,13 @@ const createPublicOrder = async (data) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    const tag = await generateUniqueOrderTag(client);
     const orderRes = await client.query(
       `INSERT INTO orders (
          company_id, client_id, status, notes, subtotal, delivery_fee, discount, total,
          payment_method_id, delivery_address, delivery_type, scheduled_for, tag
        )
-       VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'public') RETURNING *`,
+       VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
       [
         company_id,
         client_id,
@@ -484,6 +486,7 @@ const createPublicOrder = async (data) => {
         delivery_address,
         delivery_type_bool,
         scheduled_for ?? null,
+        tag,
       ],
     );
     const order = orderRes.rows[0];
@@ -565,7 +568,7 @@ const _PUBLIC_ORDER_SELECT = `
   SELECT
     o.id, o.company_id, o.client_id, o.status, o.notes,
     o.subtotal, o.delivery_fee, o.discount, o.total,
-    o.delivery_address, o.delivery_type,
+    o.delivery_address, o.delivery_type, o.tag,
     o.scheduled_for, o.created_at, o.updated_at,
     c.name AS client_name, c.phone AS client_phone,
     co.name AS company_name, co.brand_color, co.logo_url, co.phone AS company_phone,
