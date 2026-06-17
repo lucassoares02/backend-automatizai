@@ -30,7 +30,8 @@ const _buildAddressLine = (row) => {
 const getCompanyPublicMenu = async (companyId) => {
   const companyRes = await pool.query(
     `SELECT id, name, description, phone, status,
-            logo_url, banner_url, brand_color
+            logo_url, banner_url, brand_color,
+            accepts_delivery, accepts_pickup
      FROM companies WHERE id = $1`,
     [companyId],
   );
@@ -382,6 +383,21 @@ const createPublicOrder = async (data) => {
   // O payload da API público continua aceitando "delivery" | "pickup".
   const isPickup = data.delivery_type === "pickup" || data.delivery_type === false;
   const delivery_type_bool = !isPickup; // TRUE = delivery
+
+  // Garante que o método escolhido é aceito pela empresa.
+  const acceptsRes = await pool.query(
+    "SELECT accepts_delivery, accepts_pickup FROM companies WHERE id = $1",
+    [company_id],
+  );
+  const accepts = acceptsRes.rows[0];
+  if (accepts) {
+    if (isPickup && accepts.accepts_pickup === false) {
+      throw new Error("Esta empresa não aceita pedidos para retirada.");
+    }
+    if (!isPickup && accepts.accepts_delivery === false) {
+      throw new Error("Esta empresa não aceita pedidos para entrega.");
+    }
+  }
 
   // Em retirada: zera taxa e ignora endereço (snapshot vazio).
   const delivery_address = isPickup ? null : (data.delivery_address ?? null);

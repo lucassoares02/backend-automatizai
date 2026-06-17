@@ -78,6 +78,8 @@ const update = async (data) => {
     ai_name, ai_gender, ai_personality, cuisine_type, dietary_restrictions,
     custom_dietary_restrictions,
     custom_ai_personalities,
+    accepts_delivery,
+    accepts_pickup,
     max_distance_meters_delivery,
     kilometer_price,
     max_distance_meters_free_delivery,
@@ -95,7 +97,9 @@ const update = async (data) => {
          ai_name = $9, ai_gender = $10, ai_personality = $11,
          cuisine_type = $12, dietary_restrictions = $13,
          custom_dietary_restrictions = $14,
-         custom_ai_personalities = $15
+         custom_ai_personalities = $15,
+         accepts_delivery = COALESCE($16, accepts_delivery),
+         accepts_pickup = COALESCE($17, accepts_pickup)
        WHERE id = $1 RETURNING *`,
       [
         id, name, description, status, phone,
@@ -104,6 +108,8 @@ const update = async (data) => {
         cuisine_type ?? null, normalizeDietaryRestrictions(dietary_restrictions),
         normalizeDietaryRestrictions(custom_dietary_restrictions),
         normalizeAiPersonalities(custom_ai_personalities),
+        typeof accepts_delivery === "boolean" ? accepts_delivery : null,
+        typeof accepts_pickup === "boolean" ? accepts_pickup : null,
       ],
     );
 
