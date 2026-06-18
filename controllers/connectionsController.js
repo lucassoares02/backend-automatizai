@@ -2,6 +2,7 @@ const service = require("../services/connectionsService");
 const evolution = require("../services/evolutionService");
 const n8n = require("../services/n8nService");
 const googleService = require("../services/googleService");
+const messageQueue = require("../services/messageQueueService");
 
 /**
  * Get all Connections for a company
@@ -242,13 +243,19 @@ const webhook = async (req, res) => {
     const { event, instance, data } = req.body || {};
     if (!event || !instance) return;
 
-    if (event === "CONNECTION_UPDATE") {
+    // Evolution pode enviar o evento como "messages.upsert" (minúsculo/pontuado)
+    // ou "MESSAGES_UPSERT". Normaliza para uma única forma.
+    const ev = String(event).toUpperCase().replace(/\./g, "_");
+
+    if (ev === "CONNECTION_UPDATE") {
       const state = data?.state;
       if (state) {
         await service.updateStatusByInstance(instance, state);
       }
-    } else if (event === "MESSAGES_UPSERT") {
-      evolution.forwardToN8n(instance, req.body).catch((e) => console.error("[webhook] N8N forward failed:", e.message));
+    } else if (ev === "MESSAGES_UPSERT") {
+      // Enfileira (buffer + debounce). O messageQueueService agrupa mensagens da
+      // mesma conversa e despacha ao N8N respeitando o lock por conversa.
+      messageQueue.enqueue(instance, req.body).catch((e) => console.error("[webhook] enqueue failed:", e.message));
     }
   } catch (err) {
     console.error("[webhook] handler error:", err.message);

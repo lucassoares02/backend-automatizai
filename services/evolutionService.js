@@ -67,11 +67,13 @@ const updateInstance = async (instanceName) => {
     },
   });
 
+  // O webhook da Evolution aponta para a API (não mais direto pro N8N). A API é
+  // dona da fila: agrupa/serializa as mensagens e só então encaminha ao N8N.
   const bodyWebHook = JSON.stringify({
     webhook: {
       enabled: true,
       base64: true,
-      url: `${process.env.N8N_BASE_URL}/webhook/${instanceName}`,
+      url: `${process.env.API_BASE_URL}/api/connections/webhook`,
       events: ["MESSAGES_UPSERT", "CONNECTION_UPDATE"],
     },
   });

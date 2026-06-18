@@ -15,6 +15,7 @@ const cors = require("cors");
 const routes = require("./src/routes");
 const watchdogService = require("./services/watchdogService");
 const cartAbandonmentService = require("./services/cartAbandonmentService");
+const messageQueueService = require("./services/messageQueueService");
 
 const corsOptions = {
   origin: `${process.env.ORIGIN}`,
@@ -48,6 +49,7 @@ app
     console.log(`🚀 Server running on port ${PORT}`);
     watchdogService.start();
     cartAbandonmentService.start();
+    messageQueueService.start();
   })
   .on("error", (err) => {
     console.error("❌ Server startup error:");
