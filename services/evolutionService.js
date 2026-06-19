@@ -174,4 +174,26 @@ const forwardToN8n = async (instanceName, body) => {
   }
 };
 
-module.exports = { create, updateInstance, getQrCode, testConnection, getInstance, deleteInstance, forwardToN8n, n8nUrlWebhook };
+/**
+ * Confirma a leitura (read receipt) de uma mensagem recebida, encaminhando ao
+ * webhook do N8N em /chat/markMessageAsRead/{instance}. O N8N repassa para a
+ * Evolution. Lança em caso de falha (HTTP != 2xx); o chamador decide se ignora.
+ */
+const markMessageAsRead = async (instanceName, { remoteJid, fromMe = false, id }) => {
+  const url = `${n8nUrlWebhook}chat/markMessageAsRead/${instanceName}`;
+  const body = {
+    readMessages: [{ remoteJid, fromMe: fromMe === true, id }],
+  };
+
+  const res = await _fetcher(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`N8N markMessageAsRead failed [${res.status}]: ${t}`);
+  }
+};
+
+module.exports = { create, updateInstance, getQrCode, testConnection, getInstance, deleteInstance, forwardToN8n, markMessageAsRead, n8nUrlWebhook };

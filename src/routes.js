@@ -221,5 +221,6 @@ router.get("/customer-tracking/company/:companyId/sessions", authMiddleware, cus
 router.get("/customer-tracking/company/:companyId/map", authMiddleware, customerTracking.listMapPoints);
 router.get("/customer-tracking/company/:companyId/metrics", authMiddleware, customerTracking.getMetrics);
 router.get("/customer-tracking/company/:companyId/session/:sessionId/events", authMiddleware, customerTracking.listSessionEvents);
+router.post("/customer-tracking/company/:companyId/session/:sessionId/abandonment", authMiddleware, customerTracking.notifyAbandonment);
 
 module.exports = router;

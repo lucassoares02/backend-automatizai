@@ -1,4 +1,5 @@
 const tracking = require("../services/customerTrackingService");
+const abandonment = require("../services/cartAbandonmentService");
 
 // ─── Público (fire-and-forget) ───────────────────────────────────────────────
 const upsertSession = async (req, res) => {
@@ -88,6 +89,24 @@ const listSessionEvents = async (req, res) => {
   }
 };
 
+// Dispara manualmente o webhook de abandono para uma sessão (botão no painel).
+// Força o reenvio mesmo que o cron já tenha notificado.
+const notifyAbandonment = async (req, res) => {
+  try {
+    const result = await abandonment.notifyBySessionId(
+      req.params.sessionId,
+      req.params.companyId,
+    );
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    if (err.code === "NOT_FOUND") {
+      return res.status(404).json({ error: "Sessão não encontrada" });
+    }
+    console.error("tracking.notifyAbandonment error:", err.message);
+    res.status(502).json({ error: "Falha ao disparar o webhook de abandono" });
+  }
+};
+
 module.exports = {
   upsertSession,
   updateLocation,
@@ -97,4 +116,5 @@ module.exports = {
   listMapPoints,
   getMetrics,
   listSessionEvents,
+  notifyAbandonment,
 };

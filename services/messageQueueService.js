@@ -67,6 +67,18 @@ const enqueue = async (instanceName, body) => {
   const parsed = _parseMessage(body);
   if (!parsed.remoteJid || parsed.fromMe) return;
 
+  // Confirma a leitura da mensagem recebida (read receipt) via N8N → Evolution.
+  // Fire-and-forget: falha aqui não pode impactar a fila de mensagens.
+  if (parsed.messageKey) {
+    evolution
+      .markMessageAsRead(instanceName, {
+        remoteJid: parsed.remoteJid,
+        fromMe: false,
+        id: parsed.messageKey,
+      })
+      .catch((e) => console.error(`[message-queue] markMessageAsRead falhou (instance=${instanceName}): ${e.message}`));
+  }
+
   const conn = await connectionsService.find_by_instance(instanceName).catch(() => null);
   const companyId = conn?.company_id ?? null;
 

@@ -64,6 +64,25 @@ const _findAbandoned = async () => {
   return res.rows;
 };
 
+// Busca uma sessão específica (para disparo manual sob demanda). Filtra por
+// company para impedir disparo cruzado entre empresas.
+const _findBySessionId = async (sessionId, companyId) => {
+  const res = await pool.query(
+    `SELECT s.id, s.session_id, s.company_id,
+            s.customer_id, s.customer_name, s.customer_phone,
+            s.cart_items_count, s.subtotal, s.address,
+            s.current_step, s.last_activity_at, s.created_at,
+            comp.name AS company_name
+       FROM customer_tracking_sessions s
+       JOIN companies comp ON comp.id = s.company_id
+      WHERE s.session_id = $1
+        AND s.company_id = $2
+      LIMIT 1`,
+    [sessionId, companyId],
+  );
+  return res.rows[0] || null;
+};
+
 const _markNotified = async (id) => {
   await pool.query(
     `UPDATE customer_tracking_sessions
@@ -73,22 +92,27 @@ const _markNotified = async (id) => {
   );
 };
 
-// Notifica o n8n sobre um carrinho abandonado. Nunca lança: falhas do n8n não
-// podem travar o ciclo. A sessão só é marcada como notificada em caso de sucesso
-// (permite nova tentativa no próximo ciclo se o webhook estiver indisponível).
-const _notify = async (row) => {
+// Faz o POST do webhook. Lança em caso de falha (HTTP != 2xx, timeout, rede).
+const _postWebhook = async (row) => {
   const url = `${n8nUrlWebhook}${WEBHOOK_PATH}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(_buildPayload(row)),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status}: ${text}`);
+  }
+};
+
+// Notifica o n8n sobre um carrinho abandonado (ciclo do cron). Nunca lança:
+// falhas do n8n não podem travar o ciclo. A sessão só é marcada como notificada
+// em caso de sucesso (permite nova tentativa no próximo ciclo).
+const _notify = async (row) => {
   try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(_buildPayload(row)),
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`HTTP ${res.status}: ${text}`);
-    }
+    await _postWebhook(row);
     await _markNotified(row.id);
     console.log(
       `[abandono-carrinho] webhook enviado. session=${row.session_id} company=${row.company_id} subtotal=${row.subtotal}`,
@@ -98,6 +122,24 @@ const _notify = async (row) => {
       `[abandono-carrinho] falha ao enviar webhook. session=${row.session_id} erro=${err.message}`,
     );
   }
+};
+
+// Disparo manual sob demanda (botão no painel de tracking). Força o reenvio
+// mesmo que o cron já tenha notificado. Lança para o controller responder o
+// status HTTP adequado (404 sessão inexistente / 502 falha no webhook).
+const notifyBySessionId = async (sessionId, companyId) => {
+  const row = await _findBySessionId(sessionId, companyId);
+  if (!row) {
+    const err = new Error("Sessão não encontrada");
+    err.code = "NOT_FOUND";
+    throw err;
+  }
+  await _postWebhook(row);
+  await _markNotified(row.id);
+  console.log(
+    `[abandono-carrinho] webhook MANUAL enviado. session=${row.session_id} company=${row.company_id} subtotal=${row.subtotal}`,
+  );
+  return { session_id: row.session_id };
 };
 
 let running = false;
@@ -130,4 +172,4 @@ const start = () => {
   console.log(`[abandono-carrinho] agendado com expressão "${CRON_EXPRESSION}"`);
 };
 
-module.exports = { start, runOnce };
+module.exports = { start, runOnce, notifyBySessionId };
