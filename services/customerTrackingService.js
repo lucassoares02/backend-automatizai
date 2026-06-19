@@ -43,6 +43,18 @@ const _int = (v) => {
   return Number.isFinite(n) && n > 0 ? n : null;
 };
 
+// Serializa um array (snapshot do carrinho) para jsonb. Retorna null se não for
+// array ou se exceder o teto de tamanho (proteção contra payloads abusivos).
+const _jsonArray = (v, maxLen = 20000) => {
+  if (!Array.isArray(v)) return null;
+  try {
+    const s = JSON.stringify(v);
+    return s.length > maxLen ? null : s;
+  } catch (_) {
+    return null;
+  }
+};
+
 // Upsert da sessão. Idempotente — o cliente reenvia o estado completo a cada
 // transição relevante e o backend atualiza por (company_id, session_id).
 const upsertSession = async (payload) => {
@@ -69,6 +81,7 @@ const upsertSession = async (payload) => {
     _int(payload?.order_id),
     _str(payload?.device_type, 30) || "web",
     _str(payload?.user_agent, 500),
+    _jsonArray(payload?.cart_items),
   ];
 
   const res = await pool.query(
@@ -76,9 +89,9 @@ const upsertSession = async (payload) => {
        (session_id, company_id, customer_id, customer_name, customer_phone,
         status, current_step, cart_items_count, subtotal,
         latitude, longitude, address, order_id,
-        device_type, user_agent,
+        device_type, user_agent, cart_items,
         is_active, last_activity_at, created_at, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,
              TRUE, NOW(), NOW(), NOW())
      ON CONFLICT (company_id, session_id) DO UPDATE SET
        customer_id      = COALESCE(EXCLUDED.customer_id, customer_tracking_sessions.customer_id),
@@ -107,6 +120,11 @@ const upsertSession = async (payload) => {
          WHEN customer_tracking_sessions.status = 'order_created'
          THEN customer_tracking_sessions.subtotal
          ELSE EXCLUDED.subtotal
+       END,
+       cart_items = CASE
+         WHEN customer_tracking_sessions.status = 'order_created'
+         THEN customer_tracking_sessions.cart_items
+         ELSE COALESCE(EXCLUDED.cart_items, customer_tracking_sessions.cart_items)
        END,
        latitude         = COALESCE(EXCLUDED.latitude, customer_tracking_sessions.latitude),
        longitude        = COALESCE(EXCLUDED.longitude, customer_tracking_sessions.longitude),

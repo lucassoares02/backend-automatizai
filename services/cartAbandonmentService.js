@@ -40,6 +40,7 @@ const _buildPayload = (row) => ({
   cart: {
     items_count: row.cart_items_count,
     subtotal: row.subtotal != null ? Number(row.subtotal) : null,
+    items: Array.isArray(row.cart_items) ? row.cart_items : [],
   },
   address: row.address,
   current_step: row.current_step,
@@ -53,7 +54,7 @@ const _findAbandoned = async () => {
   const res = await pool.query(
     `SELECT s.id, s.session_id, s.company_id,
             s.customer_id, s.customer_name, s.customer_phone,
-            s.cart_items_count, s.subtotal, s.address,
+            s.cart_items_count, s.subtotal, s.cart_items, s.address,
             s.current_step, s.last_activity_at, s.created_at,
             comp.name AS company_name
        FROM customer_tracking_sessions s
@@ -77,7 +78,7 @@ const _findBySessionId = async (sessionId, companyId) => {
   const res = await pool.query(
     `SELECT s.id, s.session_id, s.company_id,
             s.customer_id, s.customer_name, s.customer_phone,
-            s.cart_items_count, s.subtotal, s.address,
+            s.cart_items_count, s.subtotal, s.cart_items, s.address,
             s.current_step, s.last_activity_at, s.created_at,
             comp.name AS company_name
        FROM customer_tracking_sessions s
