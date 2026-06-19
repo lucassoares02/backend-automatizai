@@ -67,18 +67,6 @@ const enqueue = async (instanceName, body) => {
   const parsed = _parseMessage(body);
   if (!parsed.remoteJid || parsed.fromMe) return;
 
-  // Confirma a leitura da mensagem recebida (read receipt) via N8N → Evolution.
-  // Fire-and-forget: falha aqui não pode impactar a fila de mensagens.
-  if (parsed.messageKey) {
-    evolution
-      .markMessageAsRead(instanceName, {
-        remoteJid: parsed.remoteJid,
-        fromMe: false,
-        id: parsed.messageKey,
-      })
-      .catch((e) => console.error(`[message-queue] markMessageAsRead falhou (instance=${instanceName}): ${e.message}`));
-  }
-
   const conn = await connectionsService.find_by_instance(instanceName).catch(() => null);
   const companyId = conn?.company_id ?? null;
 
@@ -242,6 +230,28 @@ const _buildPayload = async (job) => {
   return payload;
 };
 
+/**
+ * Confirma a leitura (read receipt) na Evolution de todas as mensagens do job —
+ * só é chamado no momento do despacho ao N8N. Enquanto a mensagem está na fila
+ * (aguardando o debounce/lock), NÃO marca como lida. Fire-and-forget: falha aqui
+ * não pode impactar o ciclo de dispatch.
+ */
+const _markRead = async (job) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT message_key
+         FROM incoming_messages
+        WHERE id = ANY($1::bigint[]) AND message_key IS NOT NULL`,
+      [job.message_ids],
+    );
+    const readMessages = rows.map((r) => ({ remoteJid: job.remote_jid, fromMe: false, id: r.message_key }));
+    if (readMessages.length === 0) return;
+    await evolution.markMessagesAsRead(job.instance_name, readMessages);
+  } catch (err) {
+    console.error(`[message-queue] markMessagesAsRead falhou (job=${job.id}): ${err.message}`);
+  }
+};
+
 const _onForwardFailure = async (job, err) => {
   console.error(`[message-queue] forward N8N falhou (job=${job.id}, attempts=${job.attempts + 1}): ${err.message}`);
   await pool
@@ -278,6 +288,9 @@ const runDispatch = async () => {
         try {
           const payload = await _buildPayload(job);
           await evolution.forwardToN8n(job.instance_name, payload);
+          // Marca como lida na Evolution só agora — quando a mensagem efetivamente
+          // foi enviada ao N8N (não enquanto estava na fila/debounce).
+          await _markRead(job);
           console.log(`[message-queue] job ${job.id} despachado (${job.remote_jid}, ${job.message_ids.length} msg)`);
         } catch (err) {
           await _onForwardFailure(job, err);

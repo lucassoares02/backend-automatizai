@@ -175,14 +175,21 @@ const forwardToN8n = async (instanceName, body) => {
 };
 
 /**
- * Confirma a leitura (read receipt) de uma mensagem recebida, chamando direto a
- * Evolution em POST /chat/markMessageAsRead/{instance}. Lança em caso de falha
+ * Confirma a leitura (read receipt) de uma ou mais mensagens recebidas, chamando
+ * direto a Evolution em POST /chat/markMessageAsRead/{instance}. Recebe um array
+ * `readMessages` ([{ remoteJid, fromMe, id }]). Lança em caso de falha
  * (HTTP != 2xx); o chamador decide se ignora.
  */
-const markMessageAsRead = async (instanceName, { remoteJid, fromMe = false, id }) => {
+const markMessagesAsRead = async (instanceName, readMessages) => {
+  if (!Array.isArray(readMessages) || readMessages.length === 0) return;
+
   const url = `${evolutionUrl}/chat/markMessageAsRead/${instanceName}`;
   const body = {
-    readMessages: [{ remoteJid, fromMe: fromMe === true, id }],
+    readMessages: readMessages.map((m) => ({
+      remoteJid: m.remoteJid,
+      fromMe: m.fromMe === true,
+      id: m.id,
+    })),
   };
 
   const res = await _fetcher(url, {
@@ -199,4 +206,4 @@ const markMessageAsRead = async (instanceName, { remoteJid, fromMe = false, id }
   }
 };
 
-module.exports = { create, updateInstance, getQrCode, testConnection, getInstance, deleteInstance, forwardToN8n, markMessageAsRead, n8nUrlWebhook };
+module.exports = { create, updateInstance, getQrCode, testConnection, getInstance, deleteInstance, forwardToN8n, markMessagesAsRead, n8nUrlWebhook };
