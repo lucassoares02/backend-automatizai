@@ -5,6 +5,13 @@ const { n8nUrlWebhook } = require("./evolutionService");
 const WEBHOOK_PATH = "abandono-carrinho";
 const FETCH_TIMEOUT_MS = 15000;
 
+// Basic Auth do webhook n8n (mesmas credenciais usadas em orderWebhookService).
+const WEBHOOK_AUTH_USER = process.env.WEBHOOK_N8N_USER;
+const WEBHOOK_AUTH_PASS = process.env.WEBHOOK_N8N_PASS;
+const WEBHOOK_AUTH_HEADER = `Basic ${Buffer.from(
+  `${WEBHOOK_AUTH_USER}:${WEBHOOK_AUTH_PASS}`,
+).toString("base64")}`;
+
 // A cada 5 min varremos os carrinhos abandonados ainda não notificados.
 const CRON_EXPRESSION = "*/5 * * * *";
 
@@ -97,7 +104,10 @@ const _postWebhook = async (row) => {
   const url = `${n8nUrlWebhook}${WEBHOOK_PATH}`;
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: WEBHOOK_AUTH_HEADER,
+    },
     body: JSON.stringify(_buildPayload(row)),
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
