@@ -119,9 +119,21 @@ const remove = async (req, res) => {
     return res.status(400).json({ error: "Invalid ID" });
   }
   try {
-    const deleteEvolution = await evolution.deleteInstance(instance);
-    if (!deleteEvolution) {
-      return res.status(404).json({ error: "Connection not found in Evolution" });
+    // Limpeza dos recursos externos é BEST-EFFORT: se a instância da Evolution
+    // já não existir (404), a Evolution estiver fora, ou o workflow do n8n já
+    // tiver sido removido, isso NÃO deve impedir a exclusão local. O registro no
+    // banco é a fonte da verdade da UI, portanto é sempre removido ao final.
+    if (instance) {
+      try {
+        await evolution.deleteInstance(instance);
+      } catch (err) {
+        console.warn(`[connections.remove] Evolution deleteInstance('${instance}') falhou (seguindo): ${err.message}`);
+      }
+      try {
+        await n8n.remove(instance);
+      } catch (err) {
+        console.warn(`[connections.remove] n8n remove('${instance}') falhou (seguindo): ${err.message}`);
+      }
     }
 
     const deleted = await service.remove(id);

@@ -45,6 +45,17 @@ const deleteWorkflow = async (id) => {
   return res.ok || res.status === 404;
 };
 
+/**
+ * Remove o workflow N8N vinculado a uma instância (mesmo nome da instância).
+ * Best-effort: desativa e apaga. Retorna `true` se removeu ou se já não existia.
+ */
+const remove = async (instance) => {
+  const existing = await findWorkflowByName(instance);
+  if (!existing) return true; // nada para remover
+  await deactivateWorkflow(existing.id);
+  return await deleteWorkflow(existing.id);
+};
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -204,4 +215,4 @@ const update = async (instance, company) => {
   return duplicate(instance, company);
 };
 
-module.exports = { duplicate, update };
+module.exports = { duplicate, update, remove };
