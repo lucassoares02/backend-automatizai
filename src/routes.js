@@ -29,6 +29,8 @@ const productOptions = require("../controllers/productOptionsController");
 const purchaseGoals = require("../controllers/purchaseGoalsController");
 const customerTracking = require("../controllers/customerTrackingController");
 const ifoodImport = require("../controllers/ifoodImportController");
+const deliveries = require("../controllers/deliveriesController");
+const deliveryDrivers = require("../controllers/deliveryDriversController");
 
 router.get("/", (req, res) => {
   res.send("API is running 🚀");
@@ -147,6 +149,18 @@ router.get("/orders/:id", authMiddleware, orders.find);
 router.post("/orders", authMiddleware, orders.create);
 router.patch("/orders/:id/status", authMiddleware, orders.updateStatus);
 router.delete("/orders/:id", authMiddleware, orders.remove);
+
+// deliveries — gestão inteligente de entregas (pedidos em rota + rotas otimizadas)
+router.get("/deliveries/active/:companyId", authMiddleware, deliveries.getActive);
+router.post("/deliveries/routes", authMiddleware, deliveries.createRoute);
+router.get("/deliveries/routes/:companyId", authMiddleware, deliveries.listRoutes);
+
+// delivery drivers — motoboys (CRUD)
+router.get("/delivery-drivers/company/:companyId", authMiddleware, deliveryDrivers.findByCompany);
+router.post("/delivery-drivers", authMiddleware, deliveryDrivers.create);
+router.put("/delivery-drivers/:id", authMiddleware, deliveryDrivers.update);
+router.patch("/delivery-drivers/:id", authMiddleware, deliveryDrivers.update);
+router.delete("/delivery-drivers/:id", authMiddleware, deliveryDrivers.remove);
 
 //dashboard (aggregated executive view)
 router.get("/dashboard/:companyId", authMiddleware, dashboard.getDashboard);
