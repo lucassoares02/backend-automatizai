@@ -27,16 +27,25 @@ const _buildAddressLine = (row) => {
   return parts.length ? parts.join(", ") : null;
 };
 
-const getCompanyPublicMenu = async (companyId) => {
+// Aceita o UUID público da empresa OU o id numérico (retrocompatível com os
+// links antigos `/order?company={id}`).
+const _UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const getCompanyPublicMenu = async (companyRef) => {
+  const ref = String(companyRef).trim();
+  const byUuid = _UUID_RE.test(ref);
   const companyRes = await pool.query(
-    `SELECT id, name, description, phone, status,
+    `SELECT id, uuid, name, description, phone, status,
             logo_url, banner_url, brand_color,
             accepts_delivery, accepts_pickup
-     FROM companies WHERE id = $1`,
-    [companyId],
+     FROM companies WHERE ${byUuid ? "uuid = $1" : "id = $1"}`,
+    [ref],
   );
   const company = companyRes.rows[0];
   if (!company) return null;
+
+  // A partir daqui todas as subconsultas usam o id numérico resolvido.
+  const companyId = company.id;
 
   const hoursRes = await pool.query(
     "SELECT weekday, opens_at, closes_at, is_closed FROM company_opening_hours WHERE company_id = $1 ORDER BY weekday",
@@ -582,7 +591,7 @@ const createPublicOrder = async (data) => {
 
 const _PUBLIC_ORDER_SELECT = `
   SELECT
-    o.id, o.company_id, o.client_id, o.status, o.notes,
+    o.id, o.uuid, o.company_id, o.client_id, o.status, o.notes,
     o.subtotal, o.delivery_fee, o.discount, o.total,
     o.delivery_address, o.delivery_type, o.tag,
     o.scheduled_for, o.created_at, o.updated_at,
@@ -660,8 +669,16 @@ const _PUBLIC_ORDER_SELECT = `
 
 const _normalizePhone = (phone) => String(phone || "").replace(/\D/g, "");
 
+// Aceita o UUID público do pedido OU o id numérico (retrocompatível).
+const _ORDER_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const getPublicOrder = async ({ id, phone }) => {
-  const result = await pool.query(`${_PUBLIC_ORDER_SELECT} WHERE o.id = $1 LIMIT 1`, [id]);
+  const ref = String(id).trim();
+  const byUuid = _ORDER_UUID_RE.test(ref);
+  const result = await pool.query(
+    `${_PUBLIC_ORDER_SELECT} WHERE ${byUuid ? "o.uuid = $1" : "o.id = $1"} LIMIT 1`,
+    [ref],
+  );
   const row = result.rows[0] || null;
   if (!row) return null;
   if (phone) {
@@ -707,7 +724,7 @@ const listPublicRestaurants = async () => {
   // Ranking: pedidos válidos (não cancelados/rejeitados) > faturamento > mais
   // recentes — melhor métrica disponível na estrutura atual.
   const restaurantsRes = await pool.query(
-    `SELECT c.id, c.name, c.description, c.logo_url, c.banner_url, c.brand_color,
+    `SELECT c.id, c.uuid, c.name, c.description, c.logo_url, c.banner_url, c.brand_color,
             c.cuisine_type,
             (SELECT COUNT(*)::int FROM orders o
               WHERE o.company_id = c.id AND o.status NOT IN (6, 7)) AS orders_count,

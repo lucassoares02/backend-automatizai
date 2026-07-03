@@ -79,7 +79,10 @@ const getSuggestions = async (companyId, triggerItemId) => {
        r.id AS rule_id, r.description, r.max_suggestions,
        ri.id AS item_rule_id, ri.menu_item_id,
        ri.discount_type, ri.discount_value, ri.final_price, ri.display_order,
-       mi.name AS item_name, mi.price AS item_price, mi.image_url AS item_image_url
+       mi.name AS item_name, mi.price AS item_price, mi.image_url AS item_image_url,
+       EXISTS(
+         SELECT 1 FROM product_option_groups pog WHERE pog.product_id = mi.id
+       ) AS has_options
      FROM upsell_rules r
      JOIN upsell_rule_items ri ON ri.rule_id = r.id
      JOIN menu_items mi ON mi.id = ri.menu_item_id
@@ -102,6 +105,7 @@ const getSuggestions = async (companyId, triggerItemId) => {
     item_name: row.item_name,
     item_price: Number(row.item_price ?? 0),
     item_image_url: row.item_image_url,
+    has_options: row.has_options === true,
     discount_type: row.discount_type,
     discount_value: Number(row.discount_value ?? 0),
     final_price: Number(row.final_price ?? 0),

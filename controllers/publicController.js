@@ -13,7 +13,8 @@ const listRestaurants = async (_req, res) => {
 
 const getCompanyMenu = async (req, res) => {
   const { companyId } = req.params;
-  if (!companyId || isNaN(companyId)) return res.status(400).json({ error: "Invalid company ID" });
+  // companyId pode ser o UUID público ou o id numérico (retrocompatível).
+  if (!companyId || !String(companyId).trim()) return res.status(400).json({ error: "Invalid company reference" });
   try {
     const data = await service.getCompanyPublicMenu(companyId);
     if (!data) return res.status(404).json({ error: "Company not found" });
@@ -102,12 +103,13 @@ const calculateDeliveryFee = async (req, res) => {
 const getOrder = async (req, res) => {
   const { id } = req.params;
   const { phone } = req.query;
-  if (!id || isNaN(id)) {
+  // id pode ser o UUID público do pedido ou o id numérico (retrocompatível).
+  if (!id || !String(id).trim()) {
     return res.status(400).json({ error: "Invalid order id" });
   }
   try {
     const order = await service.getPublicOrder({
-      id: Number(id),
+      id: String(id).trim(),
       phone: phone ? String(phone) : null,
     });
     if (!order) return res.status(404).json({ error: "Order not found" });
