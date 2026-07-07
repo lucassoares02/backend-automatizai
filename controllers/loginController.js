@@ -2,11 +2,11 @@ const userService = require('../services/userService');
 const { generateToken } = require('../helpers/jwt');
 
 exports.signin = async (req, res, next) => {
-    console.log('Request Login');
     const { email, password } = req.body;
+    if (!email || !password) {
+        return res.status(400).json({ error: 'email and password are required' });
+    }
     try {
-        console.log('Email: ', email);
-        console.log('Password: ', password);
         const user = await userService.validateLogin(email, password);
         const token = generateToken({ id: user.id, email: user.email, type: user.type });
         console.log('Login successful for user:', user.id);

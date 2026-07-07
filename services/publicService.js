@@ -2,6 +2,8 @@ const axios = require("axios");
 const pool = require("../db");
 const productOptionsService = require("./productOptionsService");
 const purchaseGoalsService = require("./purchaseGoalsService");
+const stripeService = require("./stripeService");
+const campaignsService = require("./campaignsService");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 
 const MAPS_KEY = process.env.GOOGLE_API_KEY;
@@ -37,7 +39,8 @@ const getCompanyPublicMenu = async (companyRef) => {
   const companyRes = await pool.query(
     `SELECT id, uuid, name, description, phone, status,
             logo_url, banner_url, brand_color,
-            accepts_delivery, accepts_pickup
+            accepts_delivery, accepts_pickup,
+            stripe_account_id, stripe_charges_enabled
      FROM companies WHERE ${byUuid ? "uuid = $1" : "id = $1"}`,
     [ref],
   );
@@ -46,6 +49,21 @@ const getCompanyPublicMenu = async (companyRef) => {
 
   // A partir daqui todas as subconsultas usam o id numérico resolvido.
   const companyId = company.id;
+
+  // Self-heal do status Stripe: a conta está conectada mas ainda marcada como
+  // não habilitada localmente. Isso acontece quando o webhook `account.updated`
+  // não chegou (ex.: ambiente sem endpoint público / localhost). Sincroniza sob
+  // demanda com a Stripe — só ocorre enquanto a conta está pendente; assim que
+  // `charges_enabled` vira true, a coluna é persistida e esta chamada não repete.
+  let stripeEnabled = company.stripe_charges_enabled === true;
+  if (!stripeEnabled && company.stripe_account_id) {
+    try {
+      const status = await stripeService.refreshAccountStatus(companyId);
+      stripeEnabled = status.charges_enabled === true;
+    } catch (_) {
+      // Falha ao sincronizar com a Stripe não deve derrubar o menu público.
+    }
+  }
 
   const hoursRes = await pool.query(
     "SELECT weekday, opens_at, closes_at, is_closed FROM company_opening_hours WHERE company_id = $1 ORDER BY weekday",
@@ -86,6 +104,19 @@ const getCompanyPublicMenu = async (companyRef) => {
      ORDER BY COALESCE(mc.sort_order, 9999), mc.id NULLS LAST, COALESCE(mi.display_order, mi.id)`,
     [companyId],
   );
+
+  // Desconto de campanha ativo: aplica o preço promocional (final_price) no menu
+  // público para o cliente ver, mantendo o preço original para o "de/por".
+  const activeCampaignPrices = await campaignsService.getActivePricesMap(companyId);
+  for (const item of menuRes.rows) {
+    const camp = activeCampaignPrices.get(Number(item.id));
+    if (camp && camp.final_price < Number(item.price ?? 0)) {
+      item.original_price = Number(item.price ?? 0);
+      item.campaign_price = camp.final_price;
+      item.campaign_discount_percent = camp.discount_percent;
+      item.price = camp.final_price; // preço efetivo exibido/cobrado
+    }
+  }
 
   const categoriesMap = new Map();
   const uncategorized = [];
@@ -177,6 +208,12 @@ const getCompanyPublicMenu = async (companyRef) => {
     uncategorized,
     promotions: promotionsRes.rows,
     payment_methods: paymentMethodsRes.rows,
+    // Pagamento online via Stripe (contas conectadas). `enabled` reflete se o
+    // comerciante concluiu o onboarding Connect e a conta pode receber cobranças.
+    stripe: {
+      enabled: stripeEnabled,
+      publishable_key: stripeEnabled ? (process.env.STRIPE_PUBLISHABLE_KEY || null) : null,
+    },
     company_preferences: prefsRes.rows[0] || null,
     company_address: companyAddress
       ? {
@@ -364,11 +401,19 @@ const createPublicClient = async ({ company_id, name, phone, street, number, com
 };
 
 const updatePublicClient = async ({ id, name, phone, street, number, complement, neighborhood, city, state, zip_code }) => {
+  // Prova de posse: o cliente só pode editar o próprio cadastro provando conhecer
+  // o telefone atualmente registrado (o app público sempre envia o telefone do
+  // próprio cliente). Impede IDOR — editar o cadastro de outro cliente por id.
+  const normalized = _normalizePhone(phone);
+  if (!normalized) return { _forbidden: true };
+
   const result = await pool.query(
     `UPDATE clients
      SET name = $2, phone = $3, street = $4, number = $5, complement = $6,
          neighborhood = $7, city = $8, state = $9, zip_code = $10, updated_at = NOW()
-     WHERE id = $1 RETURNING *`,
+     WHERE id = $1
+       AND REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g') = $11
+     RETURNING *`,
     [
       id,
       name,
@@ -380,8 +425,11 @@ const updatePublicClient = async ({ id, name, phone, street, number, complement,
       city ?? null,
       state ?? null,
       zip_code ?? null,
+      normalized,
     ],
   );
+  // Nenhuma linha → id inexistente OU telefone não confere (acesso negado).
+  if (!result.rows[0]) return { _forbidden: true };
   return result.rows[0];
 };
 
@@ -409,8 +457,41 @@ const createPublicOrder = async (data) => {
   }
 
   // Em retirada: zera taxa e ignora endereço (snapshot vazio).
+  // A taxa nunca pode ser negativa (clamp), evitando "desconto" via taxa.
   const delivery_address = isPickup ? null : (data.delivery_address ?? null);
-  const delivery_fee = isPickup ? 0 : Number(data.delivery_fee ?? 0);
+  const delivery_fee = isPickup ? 0 : Math.max(0, Number(data.delivery_fee ?? 0));
+
+  // ─── Preços autoritativos do servidor ───────────────────────────────────────
+  // NUNCA confiar no `unit_price` enviado pelo cliente. Buscamos o preço real de
+  // cada produto (menu_items.price) e de cada combo (promotions.final_price)
+  // diretamente no banco, restritos à empresa do pedido. Isso impede fraude de
+  // preço (comprar por centavos) sem alterar o payload da API pública.
+  const menuItemIds = [...new Set(items.map((i) => i.menu_item_id).filter(Boolean).map(Number))];
+  const promotionIds = [...new Set(items.map((i) => i.promotion_id).filter(Boolean).map(Number))];
+
+  const menuPriceById = new Map();
+  if (menuItemIds.length) {
+    // Preço autoritativo com desconto de campanha aplicado quando ativo — é isso
+    // que faz o desconto "valer de verdade" no valor cobrado do cliente.
+    const activeCampaignPrices = await campaignsService.getActivePricesMap(company_id);
+    const r = await pool.query(
+      "SELECT id, price FROM menu_items WHERE company_id = $1 AND id = ANY($2::int[])",
+      [company_id, menuItemIds],
+    );
+    for (const row of r.rows) {
+      const base = Number(row.price ?? 0);
+      const camp = activeCampaignPrices.get(Number(row.id));
+      menuPriceById.set(Number(row.id), camp ? Math.min(base, camp.final_price) : base);
+    }
+  }
+  const promoPriceById = new Map();
+  if (promotionIds.length) {
+    const r = await pool.query(
+      "SELECT id, final_price FROM promotions WHERE company_id = $1 AND id = ANY($2::int[])",
+      [company_id, promotionIds],
+    );
+    for (const row of r.rows) promoPriceById.set(Number(row.id), Number(row.final_price ?? 0));
+  }
 
   // Validate purchase goal discounts the client is asking for
   const goalRequests = items
@@ -449,7 +530,23 @@ const createPublicOrder = async (data) => {
     }
 
     const qty = Number(item.quantity ?? 1);
-    const baseUnit = Number(item.unit_price ?? 0);
+
+    // Preço base resolvido no servidor (ignora o unit_price do cliente).
+    let baseUnit;
+    if (item.promotion_id) {
+      if (!promoPriceById.has(Number(item.promotion_id))) {
+        throw new Error("Promoção inválida para esta empresa.");
+      }
+      baseUnit = promoPriceById.get(Number(item.promotion_id));
+    } else if (item.menu_item_id) {
+      if (!menuPriceById.has(Number(item.menu_item_id))) {
+        throw new Error("Item inválido para esta empresa.");
+      }
+      baseUnit = menuPriceById.get(Number(item.menu_item_id));
+    } else {
+      throw new Error("Item de pedido sem referência de produto.");
+    }
+
     const goalInfo = goalMap.get(Number(item.menu_item_id));
 
     let goalDiscountPct = null;
@@ -485,7 +582,10 @@ const createPublicOrder = async (data) => {
     (sum, i) => sum + Number(i._goal_discount_amount || 0),
     0,
   );
-  const manualDiscount = Number(data.discount ?? 0);
+  // Descontos arbitrários enviados pelo cliente são ignorados. Apenas os
+  // descontos de metas (goals), validados no servidor, são aplicados — eles já
+  // estão embutidos no subtotal por item via goalDiscountPerUnit.
+  const manualDiscount = 0;
   const discount = Number((goalsDiscount + manualDiscount).toFixed(2));
   const total = Number((subtotalOrder + delivery_fee - manualDiscount).toFixed(2));
 
@@ -675,16 +775,24 @@ const _ORDER_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 const getPublicOrder = async ({ id, phone }) => {
   const ref = String(id).trim();
   const byUuid = _ORDER_UUID_RE.test(ref);
+
+  // Acesso por UUID (não enumerável) dispensa telefone — é o link de rastreio.
+  // Acesso por id numérico (enumerável) EXIGE telefone correspondente, para
+  // impedir IDOR/enumeração de pedidos e vazamento de PII.
+  const reqPhone = _normalizePhone(phone);
+  if (!byUuid && !reqPhone) return null;
+
   const result = await pool.query(
     `${_PUBLIC_ORDER_SELECT} WHERE ${byUuid ? "o.uuid = $1" : "o.id = $1"} LIMIT 1`,
     [ref],
   );
   const row = result.rows[0] || null;
   if (!row) return null;
-  if (phone) {
+
+  // Sempre que um telefone for informado, ele precisa bater com o do pedido.
+  if (reqPhone) {
     const rowPhone = _normalizePhone(row.client_phone);
-    const reqPhone = _normalizePhone(phone);
-    if (rowPhone && reqPhone && rowPhone !== reqPhone) return null;
+    if (rowPhone !== reqPhone) return null;
   }
   return row;
 };

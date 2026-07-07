@@ -3,7 +3,6 @@ const { comparePassword, hashPassword } = require("../helpers/hash");
 
 const findUserByEmail = async (email) => {
   const result = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
-  console.log("Result", result);
   return result.rows[0];
 };
 
@@ -33,8 +32,10 @@ const validateLogin = async (email, password) => {
 };
 
 const getAllUsers = async () => {
-  // const result = await pool.query('SELECT * FROM users');
-  const result = await pool.query(`SELECT * from users ORDER BY id DESC`);
+  // Nunca retornar o hash de senha. Selecionar colunas explicitamente.
+  const result = await pool.query(
+    `SELECT id, name, email, type, active FROM users ORDER BY id DESC`,
+  );
   return result.rows;
 };
 

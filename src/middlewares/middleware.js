@@ -1,5 +1,6 @@
 const { verifyToken } = require('../../helpers/jwt');
 const { logAccess } = require('../../services/logService');
+const { getUserCompanyIds } = require('./authorize');
 
 const authMiddleware = async (req, res, next) => {
     const authHeader = req.headers.authorization;
@@ -11,6 +12,16 @@ const authMiddleware = async (req, res, next) => {
     try {
         const decoded = verifyToken(token);
         req.user = decoded;
+
+        // Carrega as empresas vinculadas ao usuário para autorização multi-tenant.
+        // Falha de leitura não bloqueia a autenticação, mas deixa a lista vazia
+        // (os middlewares de autorização então negam por padrão — fail-closed).
+        try {
+            req.userCompanies = await getUserCompanyIds(decoded.id);
+        } catch (e) {
+            console.error('Failed to load user companies:', e.message);
+            req.userCompanies = [];
+        }
 
         logAccess({
             userId: decoded.id,

@@ -1,14 +1,22 @@
 const Minio = require("minio");
 
+// Exige credenciais via ambiente — sem fallback inseguro. Falha cedo se ausentes.
+const { MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, MINIO_BUCKET } = process.env;
+
+if (!MINIO_ENDPOINT || !MINIO_ACCESS_KEY || !MINIO_SECRET_KEY || !MINIO_BUCKET) {
+  throw new Error(
+    "MinIO mal configurado: defina MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY e MINIO_BUCKET no .env",
+  );
+}
+
 const minioClient = new Minio.Client({
-  endPoint: process.env.MINIO_ENDPOINT || "files.iasemburocracia.com.br",
-  // port: parseInt(process.env.MINIO_PORT) || 443,
+  endPoint: MINIO_ENDPOINT,
   useSSL: true,
-  accessKey: process.env.MINIO_ACCESS_KEY || "admin",
-  secretKey: process.env.MINIO_SECRET_KEY || "12345678",
+  accessKey: MINIO_ACCESS_KEY,
+  secretKey: MINIO_SECRET_KEY,
 });
 
-const BUCKET = process.env.MINIO_BUCKET || "iasemburocracia";
+const BUCKET = MINIO_BUCKET;
 
 /**
  * Faz upload de um arquivo para o MinIO
