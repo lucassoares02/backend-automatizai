@@ -81,9 +81,9 @@ const createOnboardingLink = async (companyId) => {
   const stripe = getStripe();
 
   const refreshUrl =
-    process.env.STRIPE_CONNECT_REFRESH_URL || `${PORTAL_URL}/payment-methods?stripe=refresh`;
+    process.env.STRIPE_CONNECT_REFRESH_URL || `${PORTAL_URL}/business-settings?stripe=refresh`;
   const returnUrl =
-    process.env.STRIPE_CONNECT_RETURN_URL || `${PORTAL_URL}/payment-methods?stripe=return`;
+    process.env.STRIPE_CONNECT_RETURN_URL || `${PORTAL_URL}/business-settings?stripe=return`;
 
   const link = await stripe.accountLinks.create({
     account: accountId,
