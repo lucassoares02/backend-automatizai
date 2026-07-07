@@ -13,12 +13,30 @@ const find = async (id) => {
   return result.rows[0] || null;
 };
 
+// Atualização PARCIAL: só altera os campos realmente enviados (não-nulos). Isso
+// evita que salvar apenas nome+telefone (ex.: etapa inicial do onboarding)
+// sobrescreva/zere colunas obrigatórias como `email` (NOT NULL) — o que fazia a
+// gravação do telefone falhar silenciosamente. O `id` vem sempre do req.user.
 const update = async (data) => {
-  // espera um objeto com propriedades em camelCase + id
-  const { id, name, email, active, createdAt, phone, document, birthday } = data;
+  const id = data.id;
+  const allowed = ["name", "email", "active", "phone", "document", "birthday"];
+  const sets = [];
+  const values = [];
+  let i = 1;
+  for (const key of allowed) {
+    if (data[key] !== undefined && data[key] !== null) {
+      sets.push(`${key} = $${i++}`);
+      values.push(data[key]);
+    }
+  }
+
+  if (sets.length === 0) return find(id);
+
+  values.push(id);
   const result = await pool.query(
-    "UPDATE users SET id = $1, name = $2, email = $3, active = $4, phone = $5, document = $6, birthday = $7 WHERE id = $8  RETURNING *",
-    [id, name, email, active, phone, document, birthday, id],
+    `UPDATE users SET ${sets.join(", ")} WHERE id = $${i}
+     RETURNING id,name,email,active,created_at,phone,document,birthday`,
+    values,
   );
   return result.rows[0];
 };
