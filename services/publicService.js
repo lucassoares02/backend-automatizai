@@ -435,6 +435,9 @@ const updatePublicClient = async ({ id, name, phone, street, number, complement,
 
 const createPublicOrder = async (data) => {
   const { company_id, client_id, notes, items, scheduled_for, payment_method_id } = data;
+  // Provedor de pagamento online (ex.: 'stripe'). Gravado já na criação para que
+  // o pedido nasça com "pagamento pendente" e o cliente pague pelos detalhes.
+  const payment_provider = data.payment_provider === "stripe" ? "stripe" : null;
 
   // Tipo de entrega — coluna BOOLEAN no DB (TRUE = entrega, FALSE = retirada).
   // O payload da API público continua aceitando "delivery" | "pickup".
@@ -596,9 +599,9 @@ const createPublicOrder = async (data) => {
     const orderRes = await client.query(
       `INSERT INTO orders (
          company_id, client_id, status, notes, subtotal, delivery_fee, discount, total,
-         payment_method_id, delivery_address, delivery_type, scheduled_for, tag
+         payment_method_id, delivery_address, delivery_type, scheduled_for, tag, payment_provider
        )
-       VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+       VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
       [
         company_id,
         client_id,
@@ -612,6 +615,7 @@ const createPublicOrder = async (data) => {
         delivery_type_bool,
         scheduled_for ?? null,
         tag,
+        payment_provider,
       ],
     );
     const order = orderRes.rows[0];
@@ -694,6 +698,7 @@ const _PUBLIC_ORDER_SELECT = `
     o.id, o.uuid, o.company_id, o.client_id, o.status, o.notes,
     o.subtotal, o.delivery_fee, o.discount, o.total,
     o.delivery_address, o.delivery_type, o.tag,
+    o.payment_status, o.payment_provider,
     o.scheduled_for, o.created_at, o.updated_at,
     c.name AS client_name, c.phone AS client_phone,
     co.name AS company_name, co.brand_color, co.logo_url, co.phone AS company_phone,
