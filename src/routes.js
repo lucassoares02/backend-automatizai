@@ -147,7 +147,8 @@ router.get("/connections/qrcode/:instance", authMiddleware, connections.getQrCod
 router.get("/connections/test/:instance", authMiddleware, connections.testConnection);
 router.get("/connections/status/:instance", authMiddleware, connections.getStatus);
 router.get("/connections/:id", authMiddleware, authorizeConnection, connections.find);
-router.post("/connections", authMiddleware, authorizeCompanyBody(), connections.create);
+// A criação de conexão envia o id da empresa na chave `company` (não `company_id`).
+router.post("/connections", authMiddleware, authorizeCompanyBody("company"), connections.create);
 router.patch("/connections/:id", authMiddleware, authorizeConnection, connections.update);
 router.post("/connections/:id/update-workflow", authMiddleware, authorizeConnection, connections.updateWorkflow);
 router.delete("/connections/:id/:instance", authMiddleware, authorizeConnection, connections.remove);

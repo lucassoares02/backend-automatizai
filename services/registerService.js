@@ -1,7 +1,6 @@
 const pool = require("../db");
 const { hashPassword } = require("../helpers/hash");
 const axios = require("axios");
-const base = require("../templates/base.json");
 
 /**
  * Get All users
@@ -48,23 +47,10 @@ const createCompanies = async (data) => {
     [user, company.id, type],
   );
 
-  const title_flow = `${company.id} - ${name}`;
-
-  // 3. Monta o payload do workflow do n8n
-  const workflowPayload = base;
-  workflowPayload["name"] = title_flow;
-  workflowPayload["nodes"][2]["parameters"]["url"] = `https://backend-automatizai.onrender.com/api/companies/${company.id}`;
-
-  console.log("Payload do workflow:", JSON.stringify(workflowPayload, null, 2));
-
-  // 4. Envia para o n8n
-  await axios.post(`${process.env.URL_N8N}workflows`, workflowPayload, {
-    headers: {
-      "Content-Type": "application/json",
-      "X-N8N-API-KEY": process.env.TOKEN_N8N,
-    },
-  });
-
+  // O workflow do n8n NÃO é mais criado aqui. Ele é gerado sob demanda quando o
+  // usuário inicia uma conexão do WhatsApp (connectionsController.create ->
+  // n8nService.duplicate), que usa seu próprio template. Isso evita fluxos órfãos
+  // para empresas que nunca conectam.
   return company;
 };
 
