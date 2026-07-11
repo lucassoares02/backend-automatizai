@@ -428,6 +428,18 @@ const dispatchCampaign = async (campaignId) => {
     [campaign.id],
   );
 
+  // Instância da Evolution da empresa (preferindo uma conexão ativa) — o n8n usa
+  // isso para saber por qual número/instância disparar as mensagens.
+  const connRes = await pool.query(
+    `SELECT instance_name
+       FROM connections
+      WHERE company_id = $1
+      ORDER BY (status IS NOT NULL AND status NOT IN ('disconnected', 'error')) DESC, id DESC
+      LIMIT 1`,
+    [campaign.company_id],
+  );
+  const instanceName = connRes.rows[0]?.instance_name || null;
+
   const payload = {
     event: "campaign_run",
     campaign: {
@@ -439,7 +451,7 @@ const dispatchCampaign = async (campaignId) => {
       scheduled_date: campaign.scheduled_date,
       schedule_type: campaign.schedule_type,
     },
-    company: { id: campaign.company_id, name: campaign.company_name },
+    company: { id: campaign.company_id, name: campaign.company_name, instance: instanceName },
     products: prodRes.rows,
     clients: targets,
     report_url: "/api/campaigns/webhook/report",
