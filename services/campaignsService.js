@@ -2,13 +2,11 @@ const pool = require("../db");
 const { n8nUrlWebhook } = require("./evolutionService");
 
 // Webhook do n8n que roda a campanha (IA dispara as mensagens no WhatsApp).
-const WEBHOOK_PATH = "run-campaign";
+const WEBHOOK_PATH = "alerta-promo";
 const FETCH_TIMEOUT_MS = 15000;
 const WEBHOOK_AUTH_USER = process.env.WEBHOOK_N8N_USER;
 const WEBHOOK_AUTH_PASS = process.env.WEBHOOK_N8N_PASS;
-const WEBHOOK_AUTH_HEADER = `Basic ${Buffer.from(
-  `${WEBHOOK_AUTH_USER}:${WEBHOOK_AUTH_PASS}`,
-).toString("base64")}`;
+const WEBHOOK_AUTH_HEADER = `Basic ${Buffer.from(`${WEBHOOK_AUTH_USER}:${WEBHOOK_AUTH_PASS}`).toString("base64")}`;
 
 const AUDIENCE_TYPES = ["all", "selected", "top_recurrence", "inactive"];
 const SCHEDULE_TYPES = ["now", "scheduled"];
@@ -45,10 +43,7 @@ const _buildProducts = async (companyId, products) => {
   const list = Array.isArray(products) ? products : [];
   const ids = [...new Set(list.map((p) => Number(p.menu_item_id)).filter(Boolean))];
   if (!ids.length) return [];
-  const res = await pool.query(
-    "SELECT id, name, price FROM menu_items WHERE company_id = $1 AND id = ANY($2::int[])",
-    [companyId, ids],
-  );
+  const res = await pool.query("SELECT id, name, price FROM menu_items WHERE company_id = $1 AND id = ANY($2::int[])", [companyId, ids]);
   const byId = new Map(res.rows.map((r) => [r.id, r]));
   const out = [];
   for (const p of list) {
@@ -233,9 +228,7 @@ const create = async (data) => {
 
   const products = await _buildProducts(companyId, data.products);
   const selectedClientIds =
-    audienceType === "selected" && Array.isArray(data.client_ids)
-      ? [...new Set(data.client_ids.map(Number).filter(Boolean))]
-      : [];
+    audienceType === "selected" && Array.isArray(data.client_ids) ? [...new Set(data.client_ids.map(Number).filter(Boolean))] : [];
 
   // 'now' já nasce como 'scheduled' e é despachado logo abaixo; o cron cobre o resto.
   const status = "scheduled";
@@ -288,9 +281,7 @@ const create = async (data) => {
     // Disparo imediato quando "Agora".
     if (scheduleType === "now") {
       // fora da transação: falha no n8n não deve desfazer a campanha criada.
-      dispatchCampaign(campaign.id).catch((e) =>
-        console.error(`[campaigns] dispatch imediato falhou id=${campaign.id}: ${e.message}`),
-      );
+      dispatchCampaign(campaign.id).catch((e) => console.error(`[campaigns] dispatch imediato falhou id=${campaign.id}: ${e.message}`));
     }
 
     return await find(campaign.id, companyId);
@@ -303,10 +294,7 @@ const create = async (data) => {
 };
 
 const update = async (id, companyId, data) => {
-  const current = await pool.query(
-    "SELECT * FROM campaigns WHERE id = $1 AND company_id = $2",
-    [id, companyId],
-  );
+  const current = await pool.query("SELECT * FROM campaigns WHERE id = $1 AND company_id = $2", [id, companyId]);
   const camp = current.rows[0];
   if (!camp) throw Object.assign(new Error("Campanha não encontrada."), { status: 404 });
   if (!["draft", "scheduled"].includes(camp.status)) {
@@ -319,9 +307,7 @@ const update = async (id, companyId, data) => {
   const scheduledDate = scheduleType === "scheduled" ? data.scheduled_date || camp.scheduled_date : null;
   const products = await _buildProducts(companyId, data.products);
   const selectedClientIds =
-    audienceType === "selected" && Array.isArray(data.client_ids)
-      ? [...new Set(data.client_ids.map(Number).filter(Boolean))]
-      : null;
+    audienceType === "selected" && Array.isArray(data.client_ids) ? [...new Set(data.client_ids.map(Number).filter(Boolean))] : null;
 
   const client = await pool.connect();
   try {
@@ -381,10 +367,7 @@ const update = async (id, companyId, data) => {
 };
 
 const remove = async (id, companyId) => {
-  const res = await pool.query(
-    "DELETE FROM campaigns WHERE id = $1 AND company_id = $2 RETURNING id",
-    [id, companyId],
-  );
+  const res = await pool.query("DELETE FROM campaigns WHERE id = $1 AND company_id = $2 RETURNING id", [id, companyId]);
   if (!res.rows[0]) throw Object.assign(new Error("Campanha não encontrada."), { status: 404 });
   return { id: res.rows[0].id };
 };
@@ -462,10 +445,10 @@ const dispatchCampaign = async (campaignId) => {
     report_url: "/api/campaigns/webhook/report",
   };
 
-  await pool.query(
-    "UPDATE campaigns SET status = 'running', fired_at = NOW(), clients_count = $2, updated_at = NOW() WHERE id = $1",
-    [campaign.id, targets.length],
-  );
+  await pool.query("UPDATE campaigns SET status = 'running', fired_at = NOW(), clients_count = $2, updated_at = NOW() WHERE id = $1", [
+    campaign.id,
+    targets.length,
+  ]);
 
   try {
     await _postWebhook(payload);
@@ -557,10 +540,7 @@ const findDueCampaigns = async () => {
   return res.rows.filter((r) => {
     const d = new Date(r.scheduled_date);
     // Dias passados: dispara já. Hoje: respeita a hora de início da janela.
-    const isToday =
-      d.getFullYear() === now.getFullYear() &&
-      d.getMonth() === now.getMonth() &&
-      d.getDate() === now.getDate();
+    const isToday = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
     if (!isToday) return true;
     return now.getHours() >= _periodStartHour(r.period);
   });
