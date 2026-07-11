@@ -133,22 +133,22 @@ const find = async (id) => {
   return result.rows[0] || null;
 };
 
-const create = async ({ company_id, name, phone, street, number, complement, neighborhood, city, state, zip_code }) => {
+const create = async ({ company_id, name, phone, street, number, complement, neighborhood, city, state, zip_code, note }) => {
   const result = await pool.query(
-    `INSERT INTO clients (company_id, name, phone, street, number, complement, neighborhood, city, state, zip_code)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-    [company_id, name, phone ?? null, street ?? null, number ?? null, complement ?? null, neighborhood ?? null, city ?? null, state ?? null, zip_code ?? null],
+    `INSERT INTO clients (company_id, name, phone, street, number, complement, neighborhood, city, state, zip_code, note)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+    [company_id, name, phone ?? null, street ?? null, number ?? null, complement ?? null, neighborhood ?? null, city ?? null, state ?? null, zip_code ?? null, note ?? null],
   );
   return result.rows[0];
 };
 
-const update = async ({ id, name, phone, street, number, complement, neighborhood, city, state, zip_code }) => {
+const update = async ({ id, name, phone, street, number, complement, neighborhood, city, state, zip_code, note }) => {
   const result = await pool.query(
     `UPDATE clients
      SET name = $2, phone = $3, street = $4, number = $5, complement = $6,
-         neighborhood = $7, city = $8, state = $9, zip_code = $10, updated_at = NOW()
+         neighborhood = $7, city = $8, state = $9, zip_code = $10, note = $11, updated_at = NOW()
      WHERE id = $1 RETURNING *`,
-    [id, name, phone ?? null, street ?? null, number ?? null, complement ?? null, neighborhood ?? null, city ?? null, state ?? null, zip_code ?? null],
+    [id, name, phone ?? null, street ?? null, number ?? null, complement ?? null, neighborhood ?? null, city ?? null, state ?? null, zip_code ?? null, note ?? null],
   );
   return result.rows[0];
 };

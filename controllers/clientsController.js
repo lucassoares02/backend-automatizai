@@ -52,10 +52,10 @@ const find = async (req, res) => {
 };
 
 const create = async (req, res) => {
-  const { company_id, name, phone, street, number, complement, neighborhood, city, state, zip_code } = req.body;
+  const { company_id, name, phone, street, number, complement, neighborhood, city, state, zip_code, note } = req.body;
   if (!company_id || !name) return res.status(400).json({ error: "company_id and name are required" });
   try {
-    const client = await service.create({ company_id, name, phone, street, number, complement, neighborhood, city, state, zip_code });
+    const client = await service.create({ company_id, name, phone, street, number, complement, neighborhood, city, state, zip_code, note });
     return res.status(201).json(client);
   } catch (error) {
     console.error("Error creating client:", error);
@@ -65,11 +65,11 @@ const create = async (req, res) => {
 
 const update = async (req, res) => {
   const { id } = req.params;
-  const { name, phone, street, number, complement, neighborhood, city, state, zip_code } = req.body;
+  const { name, phone, street, number, complement, neighborhood, city, state, zip_code, note } = req.body;
   if (!id || isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
   if (!name) return res.status(400).json({ error: "name is required" });
   try {
-    const updated = await service.update({ id: parseInt(id), name, phone, street, number, complement, neighborhood, city, state, zip_code });
+    const updated = await service.update({ id: parseInt(id), name, phone, street, number, complement, neighborhood, city, state, zip_code, note });
     if (!updated) return res.status(404).json({ error: "Client not found" });
     return res.status(200).json(updated);
   } catch (error) {

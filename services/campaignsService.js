@@ -19,6 +19,35 @@ const _num = (v, def = 0) => {
   return Number.isFinite(n) ? n : def;
 };
 
+// Deriva o mimetype da imagem da campanha a partir da extensão da URL.
+// O n8n/Evolution usa isso para enviar o arquivo com o Content-Type correto.
+const _IMAGE_MIME_BY_EXT = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  gif: "image/gif",
+  webp: "image/webp",
+  bmp: "image/bmp",
+  svg: "image/svg+xml",
+};
+const _mimeFromUrl = (url) => {
+  if (!url) return null;
+  // Remove querystring/hash antes de extrair a extensão.
+  const clean = String(url).split(/[?#]/)[0];
+  const ext = clean.split(".").pop().toLowerCase();
+  return _IMAGE_MIME_BY_EXT[ext] || "application/octet-stream";
+};
+
+// Normaliza o telefone para o padrão do Brasil (só dígitos, com DDI 55 na frente).
+// Se já vier com o 55 (DDI + DDD + número = 12/13 dígitos) mantém; caso contrário prefixa.
+// A checagem de comprimento evita confundir o DDD 55 (ex.: Santa Maria/RS) com o DDI.
+const _normalizeBrazilPhone = (raw) => {
+  const digits = String(raw ?? "").replace(/\D/g, "");
+  if (!digits) return null;
+  if (digits.startsWith("55") && digits.length >= 12) return digits;
+  return `55${digits}`;
+};
+
 // Janela de validade do desconto no carrinho. Recebe 'yyyy-MM-dd' opcional;
 // default = fim do dia da data agendada (ou de hoje, quando 'Agora').
 const _computeValidUntil = (validUntil, scheduledDate) => {
@@ -419,7 +448,8 @@ const dispatchCampaign = async (campaignId) => {
       WHERE cc.campaign_id = $1`,
     [campaign.id],
   );
-  const targets = targetRes.rows;
+  // Garante o DDI 55 no telefone antes de enviar ao n8n (Evolution exige o número completo).
+  const targets = targetRes.rows.map((t) => ({ ...t, phone: _normalizeBrazilPhone(t.phone) }));
 
   const prodRes = await pool.query(
     `SELECT cp.menu_item_id, mi.name, cp.discount_type, cp.discount_value, cp.price, cp.final_price
@@ -447,6 +477,7 @@ const dispatchCampaign = async (campaignId) => {
       title: campaign.title,
       description: campaign.description,
       image_url: campaign.image_url,
+      image_mimetype: campaign.image_url ? _mimeFromUrl(campaign.image_url) : null,
       period: campaign.period,
       scheduled_date: campaign.scheduled_date,
       schedule_type: campaign.schedule_type,
