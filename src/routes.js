@@ -32,6 +32,7 @@ const productOptions = require("../controllers/productOptionsController");
 const purchaseGoals = require("../controllers/purchaseGoalsController");
 const customerTracking = require("../controllers/customerTrackingController");
 const ifoodImport = require("../controllers/ifoodImportController");
+const ifood = require("../controllers/ifoodController");
 const deliveries = require("../controllers/deliveriesController");
 const deliveryDrivers = require("../controllers/deliveryDriversController");
 const stripe = require("../controllers/stripeController");
@@ -111,6 +112,11 @@ router.delete("/menu_categories/:id", authMiddleware, menu_categories.remove);
 //ifood import (preenchimento automático de cardápio)
 router.post("/ifood/import-preview", authMiddleware, ifoodImport.importPreview);
 router.post("/ifood/import", authMiddleware, ifoodImport.importMenu);
+
+//ifood integração oficial (API de parceiros — perfil, produtos, pedidos)
+router.get("/ifood/merchant/:companyId", authMiddleware, authorizeCompanyParam("companyId"), ifood.getMerchant);
+router.post("/ifood/merchant", authMiddleware, authorizeCompanyBody(), ifood.saveMerchant);
+router.get("/ifood/consult/:companyId", authMiddleware, authorizeCompanyParam("companyId"), ifood.consult);
 
 //menu_items
 router.get("/menu_items", menu_items.findAll);
