@@ -7,14 +7,19 @@ const pool = require("../db");
 const IFOOD_BASE_URL = (process.env.IFOOD_API_URL || "https://merchant-api.ifood.com.br").replace(/\/$/, "");
 const IFOOD_CLIENT_ID = process.env.IFOOD_CLIENT_ID || "";
 const IFOOD_CLIENT_SECRET = process.env.IFOOD_CLIENT_SECRET || "";
-// A borda (Akamai) do iFood BLOQUEIA requisições sem User-Agent reconhecível,
-// respondendo um HTML "Access Denied". Um User-Agent explícito destrava.
-const IFOOD_USER_AGENT = process.env.IFOOD_USER_AGENT || "AutomatizAI/1.0 (+https://iasemburocracia.com.br)";
+// A borda (Akamai/Cloudflare) do iFood bloqueia requisições sem User-Agent OU com
+// UA que "parece bot" (padrão "+http"). Usamos um UA de NAVEGADOR real, que passa
+// pelo bot-management do Cloudflare. Pode ser sobrescrito por IFOOD_USER_AGENT.
+const IFOOD_USER_AGENT =
+  process.env.IFOOD_USER_AGENT ||
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
-// Headers comuns a todas as chamadas (o User-Agent é o que evita o bloqueio Akamai).
+// Headers comuns a todas as chamadas. O User-Agent de navegador + Accept-Language
+// são o que evita o bloqueio de bot-management (Akamai/Cloudflare) do iFood.
 const _baseHeaders = () => ({
   "User-Agent": IFOOD_USER_AGENT,
   Accept: "application/json",
+  "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
 });
 
 // Mascara o secret em logs (mostra só os últimos 4 caracteres).
