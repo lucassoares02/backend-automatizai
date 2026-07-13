@@ -25,6 +25,31 @@ const _baseHeaders = () => ({
 // Mascara o secret em logs (mostra só os últimos 4 caracteres).
 const _mask = (v) => (v ? `${"*".repeat(Math.max(0, v.length - 4))}${v.slice(-4)}` : "(vazio)");
 
+// Proxy opcional para as chamadas ao iFood. A borda Akamai do iFood bloqueia IPs
+// de datacenter/fora do Brasil (HTTP 403 "Access Denied"). Definir um proxy com
+// IP brasileiro/residencial resolve sem migrar o servidor inteiro.
+// Ex.: IFOOD_PROXY_URL=http://user:pass@host:porta
+const IFOOD_PROXY = process.env.IFOOD_PROXY_URL || process.env.IFOOD_HTTPS_PROXY || "";
+let _proxyAgent = null;
+const _getProxyAgent = () => {
+  if (!IFOOD_PROXY) return undefined;
+  if (!_proxyAgent) {
+    // Compatível com v5 (module.exports = classe) e v6+ (named export).
+    const mod = require("https-proxy-agent");
+    const HttpsProxyAgent = mod.HttpsProxyAgent || mod;
+    _proxyAgent = new HttpsProxyAgent(IFOOD_PROXY);
+    console.log(`[iFood] Usando proxy de saída para as chamadas ao iFood.`);
+  }
+  return _proxyAgent;
+};
+
+// Config axios comum: aplica o proxy agent quando configurado. `proxy: false`
+// desliga o tratamento nativo do axios para que o httpsAgent seja usado.
+const _axiosCfg = (extra = {}) => {
+  const agent = _getProxyAgent();
+  return agent ? { ...extra, httpsAgent: agent, proxy: false } : extra;
+};
+
 const _assertConfigured = () => {
   if (!IFOOD_CLIENT_ID || !IFOOD_CLIENT_SECRET) {
     throw Object.assign(new Error("Integração iFood não configurada (IFOOD_CLIENT_ID/IFOOD_CLIENT_SECRET ausentes)."), {
@@ -59,10 +84,14 @@ const getAccessToken = async () => {
       clientId: IFOOD_CLIENT_ID,
       clientSecret: IFOOD_CLIENT_SECRET,
     });
-    const { data, status } = await axios.post(tokenUrl, body.toString(), {
-      headers: { ..._baseHeaders(), "Content-Type": "application/x-www-form-urlencoded" },
-      timeout: 20000,
-    });
+    const { data, status } = await axios.post(
+      tokenUrl,
+      body.toString(),
+      _axiosCfg({
+        headers: { ..._baseHeaders(), "Content-Type": "application/x-www-form-urlencoded" },
+        timeout: 20000,
+      }),
+    );
     const accessToken = data?.accessToken || data?.access_token;
     const expiresIn = Number(data?.expiresIn || data?.expires_in || 3600);
     if (!accessToken) throw new Error("Resposta de token sem accessToken.");
@@ -75,7 +104,11 @@ const getAccessToken = async () => {
     const snippet = typeof raw === "string" ? raw.slice(0, 400) : JSON.stringify(raw).slice(0, 400);
     console.error(`[iFood] FALHA no token (HTTP ${status ?? "s/ status"}): ${snippet}`);
     if (typeof raw === "string" && /access denied/i.test(raw)) {
-      console.error("[iFood] ⚠️ Bloqueio da borda (Akamai). Verifique o User-Agent (IFOOD_USER_AGENT) e se o IP está liberado.");
+      console.error(
+        "[iFood] ⚠️ Bloqueio da borda Akamai (HTTP 403). Com o User-Agent de navegador já correto, " +
+          "a causa é o IP de saída do servidor (datacenter/fora do BR). Configure IFOOD_PROXY_URL com um " +
+          "proxy de IP brasileiro, ou rode a API a partir de um IP no Brasil.",
+      );
     }
     const err = new Error("Falha ao autenticar no iFood.");
     err.code = "IFOOD_AUTH_FAILED";
@@ -91,10 +124,13 @@ const _authGet = async (path) => {
   const url = `${IFOOD_BASE_URL}${path}`;
   console.log(`[iFood] GET ${url}`);
   try {
-    const { data, status } = await axios.get(url, {
-      headers: { ..._baseHeaders(), Authorization: `Bearer ${accessToken}` },
-      timeout: 30000,
-    });
+    const { data, status } = await axios.get(
+      url,
+      _axiosCfg({
+        headers: { ..._baseHeaders(), Authorization: `Bearer ${accessToken}` },
+        timeout: 30000,
+      }),
+    );
     console.log(`[iFood]   ← HTTP ${status} (${Array.isArray(data) ? data.length + " itens" : "objeto"})`);
     return data;
   } catch (error) {
