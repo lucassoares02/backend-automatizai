@@ -7,6 +7,18 @@ const pool = require("../db");
 const IFOOD_BASE_URL = (process.env.IFOOD_API_URL || "https://merchant-api.ifood.com.br").replace(/\/$/, "");
 const IFOOD_CLIENT_ID = process.env.IFOOD_CLIENT_ID || "";
 const IFOOD_CLIENT_SECRET = process.env.IFOOD_CLIENT_SECRET || "";
+// A borda (Akamai) do iFood BLOQUEIA requisições sem User-Agent reconhecível,
+// respondendo um HTML "Access Denied". Um User-Agent explícito destrava.
+const IFOOD_USER_AGENT = process.env.IFOOD_USER_AGENT || "AutomatizAI/1.0 (+https://iasemburocracia.com.br)";
+
+// Headers comuns a todas as chamadas (o User-Agent é o que evita o bloqueio Akamai).
+const _baseHeaders = () => ({
+  "User-Agent": IFOOD_USER_AGENT,
+  Accept: "application/json",
+});
+
+// Mascara o secret em logs (mostra só os últimos 4 caracteres).
+const _mask = (v) => (v ? `${"*".repeat(Math.max(0, v.length - 4))}${v.slice(-4)}` : "(vazio)");
 
 const _assertConfigured = () => {
   if (!IFOOD_CLIENT_ID || !IFOOD_CLIENT_SECRET) {
@@ -27,7 +39,14 @@ let _token = null; // { accessToken, expiresAt }
 const getAccessToken = async () => {
   _assertConfigured();
   const now = Date.now();
-  if (_token && _token.expiresAt - 60_000 > now) return _token.accessToken;
+  if (_token && _token.expiresAt - 60_000 > now) {
+    console.log("[iFood] token em cache reutilizado.");
+    return _token.accessToken;
+  }
+
+  const tokenUrl = `${IFOOD_BASE_URL}/authentication/v1.0/oauth/token`;
+  console.log(`[iFood] Solicitando token → POST ${tokenUrl}`);
+  console.log(`[iFood]   clientId=${IFOOD_CLIENT_ID || "(vazio)"} clientSecret=${_mask(IFOOD_CLIENT_SECRET)} UA="${IFOOD_USER_AGENT}"`);
 
   try {
     const body = new URLSearchParams({
@@ -35,20 +54,28 @@ const getAccessToken = async () => {
       clientId: IFOOD_CLIENT_ID,
       clientSecret: IFOOD_CLIENT_SECRET,
     });
-    const { data } = await axios.post(`${IFOOD_BASE_URL}/authentication/v1.0/oauth/token`, body.toString(), {
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    const { data, status } = await axios.post(tokenUrl, body.toString(), {
+      headers: { ..._baseHeaders(), "Content-Type": "application/x-www-form-urlencoded" },
       timeout: 20000,
     });
     const accessToken = data?.accessToken || data?.access_token;
     const expiresIn = Number(data?.expiresIn || data?.expires_in || 3600);
     if (!accessToken) throw new Error("Resposta de token sem accessToken.");
     _token = { accessToken, expiresAt: now + expiresIn * 1000 };
+    console.log(`[iFood] Token obtido (HTTP ${status}); expira em ${expiresIn}s.`);
     return accessToken;
   } catch (error) {
+    const status = error.response?.status;
+    const raw = error.response?.data ?? error.message;
+    const snippet = typeof raw === "string" ? raw.slice(0, 400) : JSON.stringify(raw).slice(0, 400);
+    console.error(`[iFood] FALHA no token (HTTP ${status ?? "s/ status"}): ${snippet}`);
+    if (typeof raw === "string" && /access denied/i.test(raw)) {
+      console.error("[iFood] ⚠️ Bloqueio da borda (Akamai). Verifique o User-Agent (IFOOD_USER_AGENT) e se o IP está liberado.");
+    }
     const err = new Error("Falha ao autenticar no iFood.");
     err.code = "IFOOD_AUTH_FAILED";
     err.status = 502;
-    err.detail = error.response?.data || error.message;
+    err.detail = snippet;
     throw err;
   }
 };
@@ -56,11 +83,22 @@ const getAccessToken = async () => {
 // Cliente axios autenticado (Bearer) para as APIs do iFood.
 const _authGet = async (path) => {
   const accessToken = await getAccessToken();
-  const { data } = await axios.get(`${IFOOD_BASE_URL}${path}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-    timeout: 30000,
-  });
-  return data;
+  const url = `${IFOOD_BASE_URL}${path}`;
+  console.log(`[iFood] GET ${url}`);
+  try {
+    const { data, status } = await axios.get(url, {
+      headers: { ..._baseHeaders(), Authorization: `Bearer ${accessToken}` },
+      timeout: 30000,
+    });
+    console.log(`[iFood]   ← HTTP ${status} (${Array.isArray(data) ? data.length + " itens" : "objeto"})`);
+    return data;
+  } catch (error) {
+    const status = error.response?.status;
+    const raw = error.response?.data ?? error.message;
+    const snippet = typeof raw === "string" ? raw.slice(0, 400) : JSON.stringify(raw).slice(0, 400);
+    console.error(`[iFood]   ← FALHA GET ${path} (HTTP ${status ?? "s/ status"}): ${snippet}`);
+    throw error;
+  }
 };
 
 // ─── Persistência (companies) ───────────────────────────────────────────────────
