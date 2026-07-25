@@ -54,7 +54,12 @@ const _saveAccountStatus = async (accountId, chargesEnabled, onboardingCompleted
 const createOrGetConnectedAccount = async (companyId) => {
   const company = await _getCompanyStripe(companyId);
   if (!company) throw Object.assign(new Error("Empresa não encontrada."), { status: 404 });
-  if (company.stripe_account_id) return company.stripe_account_id;
+  if (company.stripe_account_id) {
+    // Conta já existe: garante que a capability de Pix foi solicitada (backfill de
+    // contas criadas antes do Pix). Idempotente — se já estiver ativa, não muda nada.
+    await ensurePixCapability(company.stripe_account_id);
+    return company.stripe_account_id;
+  }
 
   const stripe = getStripe();
   const account = await stripe.accounts.create({
@@ -63,6 +68,9 @@ const createOrGetConnectedAccount = async (companyId) => {
     capabilities: {
       card_payments: { requested: true },
       transfers: { requested: true },
+      // Pix (Brasil): habilita a conta conectada a receber via Pix. As exigências
+      // (requirements) do Pix são coletadas no mesmo fluxo de onboarding.
+      pix_payments: { requested: true },
     },
     business_profile: { name: company.name || undefined },
     metadata: { company_id: String(companyId) },
@@ -70,6 +78,21 @@ const createOrGetConnectedAccount = async (companyId) => {
 
   await _saveAccountId(companyId, account.id);
   return account.id;
+};
+
+/**
+ * Solicita a capability `pix_payments` numa conta conectada existente (Express).
+ * Idempotente: se a capability já foi solicitada/ativada, a Stripe apenas devolve
+ * o estado atual. Não lança erro para não quebrar o fluxo de onboarding caso a
+ * conta ainda não suporte Pix — apenas registra em log.
+ */
+const ensurePixCapability = async (accountId) => {
+  const stripe = getStripe();
+  try {
+    await stripe.accounts.updateCapability(accountId, "pix_payments", { requested: true });
+  } catch (err) {
+    console.error(`Stripe: falha ao solicitar pix_payments para ${accountId}:`, err.message);
+  }
 };
 
 /**
@@ -339,6 +362,7 @@ const handleWebhookEvent = async (event) => {
 
 module.exports = {
   createOrGetConnectedAccount,
+  ensurePixCapability,
   createOnboardingLink,
   refreshAccountStatus,
   createCheckoutSessionForOrder,
