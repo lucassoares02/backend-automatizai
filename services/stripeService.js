@@ -203,6 +203,10 @@ const createCheckoutSessionForOrder = async (orderId) => {
     payment_intent_data: {
       application_fee_amount: feeCents,
       transfer_data: { destination: order.stripe_account_id },
+      // A conta conectada (BR) é o Merchant of Record: habilita meios locais como
+      // Pix (a disponibilidade passa a seguir o país/capabilities da conta, não da
+      // plataforma). A application_fee continua retida pela plataforma.
+      on_behalf_of: order.stripe_account_id,
       metadata: { order_id: String(order.id), company_id: String(order.company_id) },
     },
     success_url: `${APP_URL}/pedido/${order.uuid}?pagamento=sucesso`,
@@ -283,6 +287,10 @@ const createPaymentIntentForOrder = async (orderId) => {
     description: `Pedido ${orderRef} — ${order.company_name || "Loja"}`,
     application_fee_amount: feeCents,
     transfer_data: { destination: order.stripe_account_id },
+    // A conta conectada (BR) é o Merchant of Record: habilita Pix (a disponibilidade
+    // segue o país/capabilities da conta conectada, não da plataforma). Sem isto o
+    // Pix não é ofertado numa destination charge, pois a plataforma seria o MoR.
+    on_behalf_of: order.stripe_account_id,
     // Métodos habilitados na conta (cartão, PIX quando ativado no dashboard) SEM
     // nenhum que exija redirect — o cliente nunca sai da plataforma. PIX exibe o
     // QR code em modal na própria página e é confirmado via webhook.
