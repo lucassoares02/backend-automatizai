@@ -36,6 +36,7 @@ const ifood = require("../controllers/ifoodController");
 const deliveries = require("../controllers/deliveriesController");
 const deliveryDrivers = require("../controllers/deliveryDriversController");
 const stripe = require("../controllers/stripeController");
+const pagarme = require("../controllers/pagarmeController");
 
 // ─── Rate limiters ───────────────────────────────────────────────────────────
 // Estritos para autenticação/abuso; generosos para o fluxo público de pedidos
@@ -297,5 +298,16 @@ router.post("/public/stripe/checkout", publicLimiter, stripe.createCheckout);
 router.post("/public/stripe/payment-intent", publicLimiter, stripe.createPaymentIntent);
 // Webhook Stripe (sem auth; assinatura verificada no controller; corpo RAW em index.js).
 router.post("/stripe/webhook", stripe.webhook);
+
+// ─── Pagar.me (pagamentos online — recebedores + split) ───────────────────────
+// Comerciante (autenticado): onboarding do recebedor + KYC + status.
+router.post("/pagarme/connect", authMiddleware, authorizeCompanyBody(), pagarme.connect);
+router.post("/pagarme/kyc", authMiddleware, authorizeCompanyBody(), pagarme.kyc);
+router.get("/pagarme/status/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.status);
+// Cliente (público, rate-limited): pagamento embutido (cartão via token / PIX).
+router.post("/public/pagarme/card", publicLimiter, pagarme.payCard);
+router.post("/public/pagarme/pix", publicLimiter, pagarme.payPix);
+// Webhook Pagar.me (sem auth JWT; Basic auth verificado no controller).
+router.post("/pagarme/webhook", pagarme.webhook);
 
 module.exports = router;

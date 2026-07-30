@@ -3,6 +3,7 @@ const pool = require("../db");
 const productOptionsService = require("./productOptionsService");
 const purchaseGoalsService = require("./purchaseGoalsService");
 const stripeService = require("./stripeService");
+const pagarmeService = require("./pagarmeService");
 const campaignsService = require("./campaignsService");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 
@@ -40,7 +41,8 @@ const getCompanyPublicMenu = async (companyRef) => {
     `SELECT id, uuid, name, description, phone, status,
             logo_url, banner_url, brand_color,
             accepts_delivery, accepts_pickup,
-            stripe_account_id, stripe_charges_enabled
+            stripe_account_id, stripe_charges_enabled,
+            pagarme_recipient_id, pagarme_charges_enabled
      FROM companies WHERE ${byUuid ? "uuid = $1" : "id = $1"}`,
     [ref],
   );
@@ -62,6 +64,19 @@ const getCompanyPublicMenu = async (companyRef) => {
       stripeEnabled = status.charges_enabled === true;
     } catch (_) {
       // Falha ao sincronizar com a Stripe não deve derrubar o menu público.
+    }
+  }
+
+  // Pagar.me (provedor online atual — substitui a Stripe). Mesmo self-heal: se o
+  // recebedor existe mas ainda não está marcado como habilitado localmente,
+  // sincroniza sob demanda com o Pagar.me.
+  let pagarmeEnabled = company.pagarme_charges_enabled === true;
+  if (!pagarmeEnabled && company.pagarme_recipient_id) {
+    try {
+      const status = await pagarmeService.refreshRecipientStatus(companyId);
+      pagarmeEnabled = status.charges_enabled === true;
+    } catch (_) {
+      // Falha ao sincronizar com o Pagar.me não deve derrubar o menu público.
     }
   }
 
@@ -208,11 +223,18 @@ const getCompanyPublicMenu = async (companyRef) => {
     uncategorized,
     promotions: promotionsRes.rows,
     payment_methods: paymentMethodsRes.rows,
-    // Pagamento online via Stripe (contas conectadas). `enabled` reflete se o
-    // comerciante concluiu o onboarding Connect e a conta pode receber cobranças.
+    // Pagamento online via Stripe (contas conectadas). Mantido por compat.; o
+    // provedor ativo passou a ser o Pagar.me.
     stripe: {
       enabled: stripeEnabled,
       publishable_key: stripeEnabled ? (process.env.STRIPE_PUBLISHABLE_KEY || null) : null,
+    },
+    // Pagamento online via Pagar.me (recebedores + split). `enabled` reflete se o
+    // recebedor da loja está ativo. `public_key` (pk_...) é usada no cliente para
+    // tokenizar o cartão (pagarme.js) sem expor a secret key.
+    pagarme: {
+      enabled: pagarmeEnabled,
+      public_key: pagarmeEnabled ? (process.env.PAGARME_PUBLIC_KEY || null) : null,
     },
     company_preferences: prefsRes.rows[0] || null,
     company_address: companyAddress
@@ -435,9 +457,10 @@ const updatePublicClient = async ({ id, name, phone, street, number, complement,
 
 const createPublicOrder = async (data) => {
   const { company_id, client_id, notes, items, scheduled_for, payment_method_id } = data;
-  // Provedor de pagamento online (ex.: 'stripe'). Gravado já na criação para que
-  // o pedido nasça com "pagamento pendente" e o cliente pague pelos detalhes.
-  const payment_provider = data.payment_provider === "stripe" ? "stripe" : null;
+  // Provedor de pagamento online ('pagarme' | 'stripe'). Gravado já na criação
+  // para que o pedido nasça com "pagamento pendente" e o cliente pague online.
+  const ONLINE_PROVIDERS = ["pagarme", "stripe"];
+  const payment_provider = ONLINE_PROVIDERS.includes(data.payment_provider) ? data.payment_provider : null;
 
   // Tipo de entrega — coluna BOOLEAN no DB (TRUE = entrega, FALSE = retirada).
   // O payload da API público continua aceitando "delivery" | "pickup".
@@ -590,7 +613,15 @@ const createPublicOrder = async (data) => {
   // estão embutidos no subtotal por item via goalDiscountPerUnit.
   const manualDiscount = 0;
   const discount = Number((goalsDiscount + manualDiscount).toFixed(2));
-  const total = Number((subtotalOrder + delivery_fee - manualDiscount).toFixed(2));
+
+  // Taxa de serviço: valor fixo cobrado do cliente SOMENTE em pagamento online
+  // (Pagar.me/Stripe). Receita da plataforma — decidida no servidor (não confia no
+  // client). Entra no total (é o que o cliente vê e o que o provedor cobra) e é
+  // guardada em orders.service_fee. No split/application_fee é retida pela plataforma.
+  const SERVICE_FEE_AMOUNT = Number(process.env.PUBLIC_SERVICE_FEE_AMOUNT ?? 1.49);
+  const service_fee = payment_provider ? Number(SERVICE_FEE_AMOUNT.toFixed(2)) : 0;
+
+  const total = Number((subtotalOrder + delivery_fee - manualDiscount + service_fee).toFixed(2));
 
   const client = await pool.connect();
   try {
@@ -599,9 +630,10 @@ const createPublicOrder = async (data) => {
     const orderRes = await client.query(
       `INSERT INTO orders (
          company_id, client_id, status, notes, subtotal, delivery_fee, discount, total,
-         payment_method_id, delivery_address, delivery_type, scheduled_for, tag, payment_provider
+         payment_method_id, delivery_address, delivery_type, scheduled_for, tag, payment_provider,
+         service_fee
        )
-       VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
+       VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
       [
         company_id,
         client_id,
@@ -616,6 +648,7 @@ const createPublicOrder = async (data) => {
         scheduled_for ?? null,
         tag,
         payment_provider,
+        service_fee,
       ],
     );
     const order = orderRes.rows[0];
@@ -696,7 +729,7 @@ const createPublicOrder = async (data) => {
 const _PUBLIC_ORDER_SELECT = `
   SELECT
     o.id, o.uuid, o.company_id, o.client_id, o.status, o.notes,
-    o.subtotal, o.delivery_fee, o.discount, o.total,
+    o.subtotal, o.delivery_fee, o.discount, o.service_fee, o.total,
     o.delivery_address, o.delivery_type, o.tag,
     o.payment_status, o.payment_provider,
     o.scheduled_for, o.created_at, o.updated_at,

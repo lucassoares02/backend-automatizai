@@ -54,12 +54,7 @@ const _saveAccountStatus = async (accountId, chargesEnabled, onboardingCompleted
 const createOrGetConnectedAccount = async (companyId) => {
   const company = await _getCompanyStripe(companyId);
   if (!company) throw Object.assign(new Error("Empresa não encontrada."), { status: 404 });
-  if (company.stripe_account_id) {
-    // Conta já existe: garante que a capability de Pix foi solicitada (backfill de
-    // contas criadas antes do Pix). Idempotente — se já estiver ativa, não muda nada.
-    await ensurePixCapability(company.stripe_account_id);
-    return company.stripe_account_id;
-  }
+  if (company.stripe_account_id) return company.stripe_account_id;
 
   const stripe = getStripe();
   const account = await stripe.accounts.create({
@@ -68,9 +63,6 @@ const createOrGetConnectedAccount = async (companyId) => {
     capabilities: {
       card_payments: { requested: true },
       transfers: { requested: true },
-      // Pix (Brasil): habilita a conta conectada a receber via Pix. As exigências
-      // (requirements) do Pix são coletadas no mesmo fluxo de onboarding.
-      pix_payments: { requested: true },
     },
     business_profile: { name: company.name || undefined },
     metadata: { company_id: String(companyId) },
@@ -78,21 +70,6 @@ const createOrGetConnectedAccount = async (companyId) => {
 
   await _saveAccountId(companyId, account.id);
   return account.id;
-};
-
-/**
- * Solicita a capability `pix_payments` numa conta conectada existente (Express).
- * Idempotente: se a capability já foi solicitada/ativada, a Stripe apenas devolve
- * o estado atual. Não lança erro para não quebrar o fluxo de onboarding caso a
- * conta ainda não suporte Pix — apenas registra em log.
- */
-const ensurePixCapability = async (accountId) => {
-  const stripe = getStripe();
-  try {
-    await stripe.accounts.updateCapability(accountId, "pix_payments", { requested: true });
-  } catch (err) {
-    console.error(`Stripe: falha ao solicitar pix_payments para ${accountId}:`, err.message);
-  }
 };
 
 /**
@@ -150,7 +127,7 @@ const refreshAccountStatus = async (companyId) => {
  */
 const createCheckoutSessionForOrder = async (orderId) => {
   const orderRes = await pool.query(
-    `SELECT o.id, o.uuid, o.total, o.tag, o.company_id, o.payment_status,
+    `SELECT o.id, o.uuid, o.total, o.tag, o.company_id, o.payment_status, o.service_fee,
             c.name AS company_name, c.stripe_account_id, c.stripe_charges_enabled
      FROM orders o
      JOIN companies c ON c.id = o.company_id
@@ -183,7 +160,12 @@ const createCheckoutSessionForOrder = async (orderId) => {
   if (!Number.isFinite(totalCents) || totalCents <= 0) {
     throw Object.assign(new Error("Valor do pedido inválido."), { status: 400 });
   }
-  const feeCents = Math.max(0, Math.round(totalCents * (PLATFORM_FEE_PERCENT / 100)));
+  // A taxa de serviço (order.service_fee) já está embutida em order.total; ela é
+  // 100% da plataforma, então soma inteira ao application_fee. O percentual da
+  // plataforma incide apenas sobre bens/entrega (total − service_fee).
+  const serviceFeeCents = Math.max(0, Math.round(Number(order.service_fee || 0) * 100));
+  const goodsCents = Math.max(0, totalCents - serviceFeeCents);
+  const feeCents = Math.max(0, Math.round(goodsCents * (PLATFORM_FEE_PERCENT / 100)) + serviceFeeCents);
 
   const stripe = getStripe();
   const orderRef = order.tag || `#${order.id}`;
@@ -203,10 +185,6 @@ const createCheckoutSessionForOrder = async (orderId) => {
     payment_intent_data: {
       application_fee_amount: feeCents,
       transfer_data: { destination: order.stripe_account_id },
-      // A conta conectada (BR) é o Merchant of Record: habilita meios locais como
-      // Pix (a disponibilidade passa a seguir o país/capabilities da conta, não da
-      // plataforma). A application_fee continua retida pela plataforma.
-      on_behalf_of: order.stripe_account_id,
       metadata: { order_id: String(order.id), company_id: String(order.company_id) },
     },
     success_url: `${APP_URL}/pedido/${order.uuid}?pagamento=sucesso`,
@@ -231,7 +209,7 @@ const createCheckoutSessionForOrder = async (orderId) => {
  */
 const createPaymentIntentForOrder = async (orderId) => {
   const orderRes = await pool.query(
-    `SELECT o.id, o.uuid, o.total, o.tag, o.company_id, o.payment_status, o.stripe_payment_intent_id,
+    `SELECT o.id, o.uuid, o.total, o.tag, o.company_id, o.payment_status, o.stripe_payment_intent_id, o.service_fee,
             c.name AS company_name, c.stripe_account_id, c.stripe_charges_enabled
      FROM orders o
      JOIN companies c ON c.id = o.company_id
@@ -261,7 +239,10 @@ const createPaymentIntentForOrder = async (orderId) => {
   if (!Number.isFinite(totalCents) || totalCents <= 0) {
     throw Object.assign(new Error("Valor do pedido inválido."), { status: 400 });
   }
-  const feeCents = Math.max(0, Math.round(totalCents * (PLATFORM_FEE_PERCENT / 100)));
+  // Taxa de serviço embutida em order.total, 100% da plataforma (ver checkout acima).
+  const serviceFeeCents = Math.max(0, Math.round(Number(order.service_fee || 0) * 100));
+  const goodsCents = Math.max(0, totalCents - serviceFeeCents);
+  const feeCents = Math.max(0, Math.round(goodsCents * (PLATFORM_FEE_PERCENT / 100)) + serviceFeeCents);
 
   const stripe = getStripe();
   const publishableKey = process.env.STRIPE_PUBLISHABLE_KEY || null;
@@ -287,10 +268,6 @@ const createPaymentIntentForOrder = async (orderId) => {
     description: `Pedido ${orderRef} — ${order.company_name || "Loja"}`,
     application_fee_amount: feeCents,
     transfer_data: { destination: order.stripe_account_id },
-    // A conta conectada (BR) é o Merchant of Record: habilita Pix (a disponibilidade
-    // segue o país/capabilities da conta conectada, não da plataforma). Sem isto o
-    // Pix não é ofertado numa destination charge, pois a plataforma seria o MoR.
-    on_behalf_of: order.stripe_account_id,
     // Métodos habilitados na conta (cartão, PIX quando ativado no dashboard) SEM
     // nenhum que exija redirect — o cliente nunca sai da plataforma. PIX exibe o
     // QR code em modal na própria página e é confirmado via webhook.
@@ -370,7 +347,6 @@ const handleWebhookEvent = async (event) => {
 
 module.exports = {
   createOrGetConnectedAccount,
-  ensurePixCapability,
   createOnboardingLink,
   refreshAccountStatus,
   createCheckoutSessionForOrder,
