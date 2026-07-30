@@ -29,16 +29,94 @@ const getHttp = () => {
   return _http;
 };
 
-// Normaliza erros do axios para o padrão { message, status } do projeto.
+// Achata o objeto/array `errors` do Pagar.me em uma string legível para
+// diagnóstico (ex.: "request.register_information.birthdate: campo inválido").
+const _formatErrors = (errors) => {
+  if (!errors) return "";
+  if (Array.isArray(errors)) {
+    return errors
+      .map((e) => (typeof e === "string" ? e : e?.message || JSON.stringify(e)))
+      .join("; ");
+  }
+  if (typeof errors === "object") {
+    return Object.entries(errors)
+      .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : v}`)
+      .join(" | ");
+  }
+  return String(errors);
+};
+
+// Normaliza erros do axios para o padrão { message, status } do projeto,
+// SEMPRE anexando os detalhes de validação do Pagar.me (data.errors) — sem eles
+// a mensagem "The request is invalid." não diz qual campo falhou.
 const _wrap = (error, fallback) => {
   const status = error?.response?.status || error?.status || 500;
-  const apiMsg =
-    error?.response?.data?.message ||
-    (error?.response?.data?.errors && JSON.stringify(error.response.data.errors)) ||
-    error?.message;
+  const data = error?.response?.data;
+  let apiMsg = data?.message || error?.message;
+  const details = _formatErrors(data?.errors);
+  if (details) apiMsg = apiMsg ? `${apiMsg} — ${details}` : details;
+  // Log completo do corpo de erro para inspeção no servidor.
+  if (data) console.error("Pagar.me API error body:", JSON.stringify(data));
   const err = new Error(apiMsg || fallback || "Erro no Pagar.me");
   err.status = status >= 400 && status < 500 ? status : 502;
   return err;
+};
+
+// Remove recursivamente campos null/undefined/string-vazia de um objeto — o
+// Pagar.me recusa (400 "The request is invalid.") quando campos opcionais chegam
+// com valor null. Arrays são preservados (apenas prunados item a item).
+const _pruneEmpty = (value) => {
+  if (Array.isArray(value)) {
+    return value.map(_pruneEmpty);
+  }
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (v === null || v === undefined) continue;
+      if (typeof v === "string" && v.trim() === "") continue;
+      out[k] = _pruneEmpty(v);
+    }
+    return out;
+  }
+  return value;
+};
+
+// O Pagar.me exige birthdate no formato MM/DD/YYYY. O formulário envia AAAA-MM-DD;
+// converte aqui de forma robusta (aceita AAAA-MM-DD e AAAA/MM/DD; se já vier com
+// barra no formato americano, passa direto).
+const _normalizeBirthdate = (s) => {
+  const v = String(s || "").trim();
+  const m = v.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/); // AAAA-MM-DD
+  if (m) {
+    const mm = m[2].padStart(2, "0");
+    const dd = m[3].padStart(2, "0");
+    return `${mm}/${dd}/${m[1]}`;
+  }
+  return v; // já em MM/DD/YYYY (ou formato que o Pagar.me valida)
+};
+
+// address/main_address: complementary e reference_point são subcampos exigidos
+// pelo Pagar.me quando o endereço é enviado. Preenche placeholder quando vazios.
+const _normalizeAddress = (addr) => {
+  if (!addr || typeof addr !== "object") return addr;
+  const a = { ...addr };
+  const fill = (k) => {
+    if (a[k] == null || String(a[k]).trim() === "") a[k] = "N/A";
+  };
+  fill("complementary");
+  fill("reference_point");
+  return a;
+};
+
+// Normaliza register_information antes de enviar: data no formato do Pagar.me e
+// subcampos obrigatórios do endereço preenchidos.
+const _normalizeRegisterInformation = (ri) => {
+  if (!ri || typeof ri !== "object") return ri;
+  const out = { ...ri };
+  if (out.birthdate) out.birthdate = _normalizeBirthdate(out.birthdate);
+  if (out.address) out.address = _normalizeAddress(out.address);
+  if (out.main_address) out.main_address = _normalizeAddress(out.main_address);
+  return out;
 };
 
 const PLATFORM_FEE_PERCENT = Number(process.env.PAGARME_PLATFORM_FEE_PERCENT ?? 10);
@@ -128,9 +206,13 @@ const createOrUpdateRecipient = async (companyId, payload) => {
   if (!company) throw Object.assign(new Error("Empresa não encontrada."), { status: 404 });
 
   const http = getHttp();
+  // Normaliza (data + subcampos do endereço) e então remove eventuais nulls
+  // remanescentes — sem descartar os subcampos obrigatórios já preenchidos.
+  const registerInformation = _pruneEmpty(_normalizeRegisterInformation(payload.register_information));
+  const defaultBankAccount = _pruneEmpty(payload.default_bank_account);
   const body = {
-    register_information: payload.register_information,
-    default_bank_account: payload.default_bank_account,
+    register_information: registerInformation,
+    default_bank_account: defaultBankAccount,
     code: `company_${companyId}`,
     metadata: { company_id: String(companyId) },
     // Repasse automático diário (padrão sensato; ajustável no dashboard depois).
@@ -143,10 +225,10 @@ const createOrUpdateRecipient = async (companyId, payload) => {
       // Atualiza os dados de cadastro e a conta bancária do recebedor existente.
       const http2 = getHttp();
       await http2.put(`/recipients/${company.pagarme_recipient_id}`, {
-        register_information: payload.register_information,
+        register_information: registerInformation,
       });
       await http2.patch(`/recipients/${company.pagarme_recipient_id}/default-bank-account`, {
-        bank_account: payload.default_bank_account,
+        bank_account: defaultBankAccount,
       });
       const r = await http2.get(`/recipients/${company.pagarme_recipient_id}`);
       recipient = r.data;
