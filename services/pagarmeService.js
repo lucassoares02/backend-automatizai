@@ -497,13 +497,28 @@ const verifyBasicAuth = (authorizationHeader) => {
 };
 
 const _markOrderPaid = async (orderId, chargeId) => {
-  await pool.query(
+  // Marca como pago e, se o pedido estava em "Pagamento Pendente" (10), avança
+  // para "Aguardando" (1) — a partir daí a loja passa a tratar o pedido.
+  const r = await pool.query(
     `UPDATE orders
      SET payment_status = 'paid', payment_provider = 'pagarme',
-         pagarme_charge_id = COALESCE($2, pagarme_charge_id)
-     WHERE id = $1`,
+         pagarme_charge_id = COALESCE($2, pagarme_charge_id),
+         status = CASE WHEN status = '10' THEN '1' ELSE status END
+     WHERE id = $1
+     RETURNING status`,
     [orderId, chargeId || null],
   );
+  // Registra a entrada em "Aguardando" no histórico (sem duplicar se já existir).
+  if (r.rows[0]?.status === "1") {
+    await pool.query(
+      `INSERT INTO order_status_history (order_id, status)
+       SELECT $1, '1'
+       WHERE NOT EXISTS (
+         SELECT 1 FROM order_status_history WHERE order_id = $1 AND status = '1'
+       )`,
+      [orderId],
+    );
+  }
 };
 
 // Extrai o id do nosso pedido do payload (order.code / metadata / charge.metadata).
