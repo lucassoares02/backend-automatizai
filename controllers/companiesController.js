@@ -71,4 +71,22 @@ const update = async (req, res) => {
   }
 };
 
-module.exports = { find, findId, findProvidersCity, update };
+// Abrir/fechar a loja manualmente. Body: { manual_open: true | false | null }
+// true/false forçam o status; null volta a seguir os horários cadastrados.
+const setOpenStatus = async (req, res) => {
+  const companyId = Number(req.params.companyId);
+  const raw = req.body?.manual_open;
+  if (!(raw === true || raw === false || raw === null)) {
+    return res.status(400).json({ error: "manual_open deve ser true, false ou null" });
+  }
+  try {
+    const updated = await service.setOpenStatus(companyId, raw);
+    if (!updated) return res.status(404).json({ error: "Empresa não encontrada" });
+    return res.status(200).json(updated);
+  } catch (error) {
+    console.error("Error setting open status:", error);
+    return res.status(500).json({ error: "Failed to update open status" });
+  }
+};
+
+module.exports = { find, findId, findProvidersCity, update, setOpenStatus };

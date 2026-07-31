@@ -88,6 +88,7 @@ router.get("/cnpj/:cnpj", authLimiter, register.find);
 
 router.get("/companies", authMiddleware, companies.find);
 router.patch("/companies", authMiddleware, authorizeCompanyBody("id"), companies.update);
+router.patch("/companies/:companyId/open-status", authMiddleware, authorizeCompanyParam("companyId"), companies.setOpenStatus);
 router.get("/companies/:company", authMiddleware, authorizeCompanyParam("company"), companies.findId);
 router.get("/providers/city/:company", authMiddleware, authorizeCompanyParam("company"), companies.findProvidersCity);
 

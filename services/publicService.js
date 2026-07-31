@@ -38,7 +38,7 @@ const getCompanyPublicMenu = async (companyRef) => {
   const ref = String(companyRef).trim();
   const byUuid = _UUID_RE.test(ref);
   const companyRes = await pool.query(
-    `SELECT id, uuid, name, description, phone, status,
+    `SELECT id, uuid, name, description, phone, status, manual_open,
             logo_url, banner_url, brand_color,
             accepts_delivery, accepts_pickup,
             stripe_account_id, stripe_charges_enabled,
@@ -90,12 +90,14 @@ const getCompanyPublicMenu = async (companyRef) => {
   const currentMinutes = now.getHours() * 60 + now.getMinutes();
   const todayHours = hoursRes.rows.find((h) => h.weekday === weekday);
 
-  let isOpen = false;
+  let scheduleOpen = false;
   if (todayHours && !todayHours.is_closed) {
     const [oh, om] = String(todayHours.opens_at).split(":").map(Number);
     const [ch, cm] = String(todayHours.closes_at).split(":").map(Number);
-    isOpen = currentMinutes >= oh * 60 + om && currentMinutes <= ch * 60 + cm;
+    scheduleOpen = currentMinutes >= oh * 60 + om && currentMinutes <= ch * 60 + cm;
   }
+  // Override manual (companies.manual_open): TRUE/FALSE forçam; NULL segue horário.
+  const isOpen = company.manual_open === true || company.manual_open === false ? company.manual_open : scheduleOpen;
 
   const menuRes = await pool.query(
     `SELECT mi.id, mi.name, mi.description, mi.price, mi.image_url, mi.category_id,

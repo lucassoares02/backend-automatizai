@@ -342,10 +342,13 @@ const getDashboard = async (companyId) => {
   const ss = String(now.getSeconds()).padStart(2, "0");
   const currentTime = `${hh}:${mm}:${ss}`;
   const todayHours = openingHoursResult.rows.find((h) => h.weekday === weekday);
-  let isOpen = false;
+  let scheduleOpen = false;
   if (todayHours && !todayHours.is_closed && todayHours.opens_at && todayHours.closes_at) {
-    isOpen = currentTime >= todayHours.opens_at && currentTime <= todayHours.closes_at;
+    scheduleOpen = currentTime >= todayHours.opens_at && currentTime <= todayHours.closes_at;
   }
+  // Override manual (companies.manual_open): TRUE/FALSE forçam; NULL segue horário.
+  const manualOpen = company.manual_open;
+  const isOpen = manualOpen === true || manualOpen === false ? manualOpen : scheduleOpen;
 
   const today = todayStatsResult.rows[0];
   const month = monthStatsResult.rows[0];
@@ -453,7 +456,7 @@ const getDashboard = async (companyId) => {
   }
 
   return {
-    company: { ...company, is_open: isOpen },
+    company: { ...company, is_open: isOpen, schedule_open: scheduleOpen, manual_open: manualOpen ?? null },
     today: {
       orders: Number(today.orders) || 0,
       revenue: todayRev,

@@ -79,4 +79,13 @@ const update = async (company) => {
   return result.rows[0];
 };
 
-module.exports = { find, findId, findProvidersCity, update };
+// Override manual de aberto/fechado. `manualOpen`: true|false força; null segue horário.
+const setOpenStatus = async (companyId, manualOpen) => {
+  const result = await pool.query(
+    "UPDATE companies SET manual_open = $1 WHERE id = $2 RETURNING id, manual_open",
+    [manualOpen, companyId],
+  );
+  return result.rows[0] || null;
+};
+
+module.exports = { find, findId, findProvidersCity, update, setOpenStatus };
