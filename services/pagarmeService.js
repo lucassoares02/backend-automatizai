@@ -626,9 +626,9 @@ const getPaymentsSummary = async (companyId, { days = 0 } = {}) => {
   const d = Number(days) || 0;
   const periodClause = d > 0 ? `AND o.created_at >= NOW() - INTERVAL '${d} days'` : "";
 
-  // O banco é apenas o ÍNDICE de quais pedidos/charges são da empresa no período.
-  // Os STATUS e valores vêm AO VIVO da Pagar.me (GET /charges/:id). Cap em 120
-  // p/ não explodir a latência; o filtro de período mantém isso pequeno na prática.
+  // O banco é o ÍNDICE dos pedidos/charges da empresa no período (paid/failed já
+  // vêm confirmados pela Pagar.me via webhook). Só os PENDENTES são reconsultados
+  // ao vivo abaixo. Cap em 120; o filtro de período mantém isso pequeno.
   const ordersRes = await pool.query(
     `SELECT o.id, o.tag, o.total, o.service_fee, o.created_at,
             o.pagarme_charge_id, o.online_payment_method, o.payment_status,
@@ -650,10 +650,14 @@ const getPaymentsSummary = async (companyId, { days = 0 } = {}) => {
     http = null; // Pagar.me não configurado → cai 100% no fallback interno.
   }
 
-  const withCharge = rows.filter((r) => r.pagarme_charge_id);
+  // Otimização: `paid` e `failed` são estados TERMINAIS já confirmados pelo
+  // webhook — não mudam. Só os PENDENTES podem estar desatualizados (webhook
+  // atrasado/perdido), então apenas eles são verificados ao vivo na Pagar.me.
+  // Reduz drasticamente as chamadas mantendo o painel preciso.
+  const needsLive = rows.filter((r) => r.pagarme_charge_id && r.payment_status === "pending");
   const live = new Map();
   if (http) {
-    const results = await _mapLimit(withCharge, 6, async (r) => {
+    const results = await _mapLimit(needsLive, 6, async (r) => {
       try {
         const { data } = await http.get(`/charges/${r.pagarme_charge_id}`);
         return { id: r.id, status: data?.status || null, amount: data?.amount };
@@ -707,8 +711,11 @@ const getPaymentsSummary = async (companyId, { days = 0 } = {}) => {
 
   return {
     period_days: d,
-    source: liveCount > 0 ? "pagarme_live" : "internal",
-    live_count: liveCount,
+    // Os dados refletem a Pagar.me: pendentes verificados AO VIVO agora;
+    // paid/failed são estados terminais já confirmados pela Pagar.me via webhook.
+    source: "pagarme",
+    live_checked: needsLive.length, // quantos pendentes foram consultados ao vivo
+    live_applied: liveCount, // quantos tiveram status resolvido pela consulta
     totals,
     recent,
   };
