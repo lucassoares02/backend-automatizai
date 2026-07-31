@@ -9,6 +9,8 @@ const ORDER_SELECT = `
   SELECT o.*,
          c.name  AS client_name,
          c.phone AS client_phone,
+         pm.label AS payment_method_label,
+         pm.type  AS payment_method_type,
          COALESCE(
            (SELECT json_agg(
               json_build_object(
@@ -44,13 +46,14 @@ const ORDER_SELECT = `
           WHERE m.order_id = o.id AND m.sender_type = 'customer' AND m.is_read = false) AS unread_messages_count
   FROM orders o
   JOIN clients c ON c.id = o.client_id
+  LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id
 `;
 
 const findByCompany = async (companyId) => {
   const result = await pool.query(
     `${ORDER_SELECT}
      WHERE o.company_id = $1
-     GROUP BY o.id, c.name, c.phone
+     GROUP BY o.id, c.name, c.phone, pm.label, pm.type
      ORDER BY o.created_at DESC`,
     [companyId],
   );
@@ -62,7 +65,7 @@ const findTodayByCompany = async (companyId) => {
     `${ORDER_SELECT}
      WHERE o.company_id = $1
        AND o.created_at::date = CURRENT_DATE
-     GROUP BY o.id, c.name, c.phone
+     GROUP BY o.id, c.name, c.phone, pm.label, pm.type
      ORDER BY o.created_at DESC`,
     [companyId],
   );
@@ -73,7 +76,7 @@ const find = async (id) => {
   const result = await pool.query(
     `${ORDER_SELECT}
      WHERE o.id = $1
-     GROUP BY o.id, c.name, c.phone`,
+     GROUP BY o.id, c.name, c.phone, pm.label, pm.type`,
     [id],
   );
   return result.rows[0] || null;

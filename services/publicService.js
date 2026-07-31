@@ -633,13 +633,18 @@ const createPublicOrder = async (data) => {
     // (10) e só vão para "Aguardando" (1) quando o pagamento é confirmado. Pedidos
     // sem provedor online (dinheiro/na entrega) começam direto em "Aguardando".
     const initialStatus = payment_provider ? 10 : 1;
+    // Sub-método online escolhido pelo cliente ('pix' | 'card'). Só faz sentido
+    // quando há provedor online; caso contrário fica NULL.
+    const onlineMethod = payment_provider && ["pix", "card"].includes(data.online_payment_method)
+      ? data.online_payment_method
+      : null;
     const orderRes = await client.query(
       `INSERT INTO orders (
          company_id, client_id, status, notes, subtotal, delivery_fee, discount, total,
          payment_method_id, delivery_address, delivery_type, scheduled_for, tag, payment_provider,
-         service_fee
+         service_fee, online_payment_method
        )
-       VALUES ($1, $2, ${initialStatus}, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
+       VALUES ($1, $2, ${initialStatus}, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *`,
       [
         company_id,
         client_id,
@@ -655,6 +660,7 @@ const createPublicOrder = async (data) => {
         tag,
         payment_provider,
         service_fee,
+        onlineMethod,
       ],
     );
     const order = orderRes.rows[0];
@@ -737,7 +743,7 @@ const _PUBLIC_ORDER_SELECT = `
     o.id, o.uuid, o.company_id, o.client_id, o.status, o.notes,
     o.subtotal, o.delivery_fee, o.discount, o.service_fee, o.total,
     o.delivery_address, o.delivery_type, o.tag,
-    o.payment_status, o.payment_provider,
+    o.payment_status, o.payment_provider, o.online_payment_method,
     o.scheduled_for, o.created_at, o.updated_at,
     c.name AS client_name, c.phone AS client_phone,
     co.name AS company_name, co.brand_color, co.logo_url, co.phone AS company_phone,
