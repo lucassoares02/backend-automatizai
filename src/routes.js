@@ -305,6 +305,7 @@ router.post("/stripe/webhook", stripe.webhook);
 router.post("/pagarme/connect", authMiddleware, authorizeCompanyBody(), pagarme.connect);
 router.post("/pagarme/kyc", authMiddleware, authorizeCompanyBody(), pagarme.kyc);
 router.get("/pagarme/status/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.status);
+router.get("/pagarme/recipient/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.recipient);
 // Cliente (público, rate-limited): pagamento embutido (cartão via token / PIX).
 router.post("/public/pagarme/card", publicLimiter, pagarme.payCard);
 router.post("/public/pagarme/pix", publicLimiter, pagarme.payPix);

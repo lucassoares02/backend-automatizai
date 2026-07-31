@@ -589,9 +589,6 @@ const createPublicOrder = async (data) => {
           : Number(item.unit_price ?? 0);
         const ratio = promoInfo.original > 0 ? promoInfo.final / promoInfo.original : 1;
         baseUnit = Number((weight * ratio).toFixed(2));
-        console.log(
-          `[combo pricing] promo=${item.promotion_id} item=${item.menu_item_id} weight=${weight} ratio=${ratio.toFixed(4)} baseUnit=${baseUnit}`,
-        );
       } else {
         // Combo em LINHA ÚNICA (sem menu_item_id): cobra o preço do combo.
         baseUnit = promoInfo.final;

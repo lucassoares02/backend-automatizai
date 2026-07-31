@@ -63,6 +63,24 @@ const status = async (req, res) => {
   }
 };
 
+/**
+ * Dados já cadastrados do recebedor, para pré-preencher o formulário de
+ * "Atualizar dados". Param: :companyId
+ */
+const recipient = async (req, res) => {
+  const companyId = req.params.companyId;
+  if (!companyId || isNaN(companyId)) {
+    return res.status(400).json({ error: "companyId inválido" });
+  }
+  try {
+    const result = await service.getRecipientDetails(Number(companyId));
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error("Pagar.me recipient error:", error.message);
+    return res.status(error.status || 500).json({ error: error.message || "Falha ao carregar dados do recebedor" });
+  }
+};
+
 // ─── Cliente (público) ─────────────────────────────────────────────────────────
 
 /**
@@ -147,4 +165,4 @@ const webhook = async (req, res) => {
   }
 };
 
-module.exports = { connect, kyc, status, payCard, payPix, webhook };
+module.exports = { connect, kyc, status, recipient, payCard, payPix, webhook };

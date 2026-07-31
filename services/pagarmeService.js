@@ -291,6 +291,34 @@ const refreshRecipientStatus = async (companyId) => {
   }
 };
 
+/**
+ * Retorna os dados já cadastrados do recebedor (para pré-preencher o formulário
+ * "Atualizar dados"). A plataforma não armazena esses dados localmente — eles
+ * são buscados sob demanda no Pagar.me. Se ainda não há recebedor, devolve
+ * `{ connected: false }`.
+ */
+const getRecipientDetails = async (companyId) => {
+  const company = await _getCompany(companyId);
+  if (!company) throw Object.assign(new Error("Empresa não encontrada."), { status: 404 });
+  if (!company.pagarme_recipient_id) {
+    return { connected: false, register_information: null, default_bank_account: null };
+  }
+  try {
+    const http = getHttp();
+    const r = await http.get(`/recipients/${company.pagarme_recipient_id}`);
+    const rec = r.data || {};
+    return {
+      connected: true,
+      status: rec.status || null,
+      charges_enabled: _isActiveStatus(rec.status),
+      register_information: rec.register_information || null,
+      default_bank_account: rec.default_bank_account || null,
+    };
+  } catch (error) {
+    throw _wrap(error, "Falha ao carregar os dados do recebedor");
+  }
+};
+
 // ─── Cobrança do cliente (order + split) ────────────────────────────────────────
 
 // Carrega o pedido + empresa + cliente e valida que o recebedor está ativo.
@@ -568,6 +596,7 @@ module.exports = {
   createOrUpdateRecipient,
   createKycLink,
   refreshRecipientStatus,
+  getRecipientDetails,
   createCardCharge,
   createPixCharge,
   verifyBasicAuth,
