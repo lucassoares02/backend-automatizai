@@ -577,14 +577,21 @@ const createPublicOrder = async (data) => {
       if (!promoInfo) {
         throw new Error("Promoção inválida para esta empresa.");
       }
-      if (item.menu_item_id != null && rawMenuPriceById.has(Number(item.menu_item_id))) {
+      if (item.menu_item_id != null) {
         // Combo no formato EXPANDIDO (um pedido-item por produto do combo): o
         // final_price é o preço do combo INTEIRO, então rateamos entre os itens
         // proporcionalmente ao preço cheio de cada um. Assim a soma do grupo é o
         // preço do combo (× quantidade), e não o preço do combo em CADA item.
-        const menuPrice = rawMenuPriceById.get(Number(item.menu_item_id));
+        // Peso = preço do servidor; cai para o unit_price enviado só como
+        // PROPORÇÃO (o total do grupo é fixado pelo ratio, sem risco de fraude).
+        const weight = rawMenuPriceById.has(Number(item.menu_item_id))
+          ? rawMenuPriceById.get(Number(item.menu_item_id))
+          : Number(item.unit_price ?? 0);
         const ratio = promoInfo.original > 0 ? promoInfo.final / promoInfo.original : 1;
-        baseUnit = Number((menuPrice * ratio).toFixed(2));
+        baseUnit = Number((weight * ratio).toFixed(2));
+        console.log(
+          `[combo pricing] promo=${item.promotion_id} item=${item.menu_item_id} weight=${weight} ratio=${ratio.toFixed(4)} baseUnit=${baseUnit}`,
+        );
       } else {
         // Combo em LINHA ÚNICA (sem menu_item_id): cobra o preço do combo.
         baseUnit = promoInfo.final;
