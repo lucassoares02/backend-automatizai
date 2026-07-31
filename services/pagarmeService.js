@@ -592,11 +592,80 @@ const handleWebhookEvent = async (event) => {
   }
 };
 
+// ─── Dashboard de recebimentos (pagamentos online) ─────────────────────────────
+
+/**
+ * Resumo dos pagamentos ONLINE (payment_provider preenchido) da empresa,
+ * agrupados por payment_status: paid | pending | failed. Retorna KPIs (contagem,
+ * valor bruto e líquido estimado — total menos a taxa da plataforma) e as
+ * transações mais recentes. `days` filtra o período (0/undefined = tudo).
+ */
+const getPaymentsSummary = async (companyId, { days = 0 } = {}) => {
+  const cid = Number(companyId);
+  if (!cid) return null;
+  const d = Number(days) || 0;
+  const periodClause = d > 0 ? `AND o.created_at >= NOW() - INTERVAL '${d} days'` : "";
+
+  const totalsRes = await pool.query(
+    `SELECT
+        o.payment_status,
+        COUNT(*)::int                                   AS count,
+        COALESCE(SUM(o.total), 0)                        AS amount,
+        COALESCE(SUM(o.service_fee), 0)                  AS service_fee
+       FROM orders o
+      WHERE o.company_id = $1
+        AND o.payment_provider IS NOT NULL
+        ${periodClause}
+      GROUP BY o.payment_status`,
+    [cid],
+  );
+
+  const empty = () => ({ count: 0, amount: 0, net: 0 });
+  const totals = { paid: empty(), pending: empty(), failed: empty() };
+  for (const row of totalsRes.rows) {
+    const key = row.payment_status === "paid" ? "paid" : row.payment_status === "failed" ? "failed" : "pending";
+    totals[key].count += Number(row.count);
+    totals[key].amount += Number(row.amount);
+    // Líquido = bruto − taxa da plataforma (o repasse efetivo ao lojista).
+    totals[key].net += Number(row.amount) - Number(row.service_fee);
+  }
+
+  const recentRes = await pool.query(
+    `SELECT o.id, o.tag, o.total, o.service_fee, o.payment_status,
+            o.online_payment_method, o.created_at,
+            c.name AS client_name
+       FROM orders o
+       JOIN clients c ON c.id = o.client_id
+      WHERE o.company_id = $1
+        AND o.payment_provider IS NOT NULL
+        ${periodClause}
+      ORDER BY o.created_at DESC
+      LIMIT 20`,
+    [cid],
+  );
+
+  return {
+    period_days: d,
+    totals,
+    recent: recentRes.rows.map((r) => ({
+      id: r.id,
+      tag: r.tag,
+      total: Number(r.total),
+      net: Number(r.total) - Number(r.service_fee || 0),
+      payment_status: r.payment_status,
+      online_payment_method: r.online_payment_method,
+      client_name: r.client_name,
+      created_at: r.created_at,
+    })),
+  };
+};
+
 module.exports = {
   createOrUpdateRecipient,
   createKycLink,
   refreshRecipientStatus,
   getRecipientDetails,
+  getPaymentsSummary,
   createCardCharge,
   createPixCharge,
   verifyBasicAuth,

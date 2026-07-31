@@ -81,6 +81,25 @@ const recipient = async (req, res) => {
   }
 };
 
+/**
+ * Resumo de recebimentos (pagamentos online) para o dashboard do lojista.
+ * Param: :companyId. Query opcional: ?days=30 (0/ausente = tudo).
+ */
+const payments = async (req, res) => {
+  const companyId = req.params.companyId;
+  if (!companyId || isNaN(companyId)) {
+    return res.status(400).json({ error: "companyId inválido" });
+  }
+  try {
+    const days = Number(req.query.days) || 0;
+    const result = await service.getPaymentsSummary(Number(companyId), { days });
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error("Pagar.me payments error:", error.message);
+    return res.status(error.status || 500).json({ error: error.message || "Falha ao carregar recebimentos" });
+  }
+};
+
 // ─── Cliente (público) ─────────────────────────────────────────────────────────
 
 /**
@@ -165,4 +184,4 @@ const webhook = async (req, res) => {
   }
 };
 
-module.exports = { connect, kyc, status, recipient, payCard, payPix, webhook };
+module.exports = { connect, kyc, status, recipient, payments, payCard, payPix, webhook };
