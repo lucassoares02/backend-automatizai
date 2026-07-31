@@ -498,6 +498,9 @@ const createPublicOrder = async (data) => {
   const promotionIds = [...new Set(items.map((i) => i.promotion_id).filter(Boolean).map(Number))];
 
   const menuPriceById = new Map();
+  // Preço "cheio" (sem campanha) por item — usado para ratear o desconto do combo
+  // proporcionalmente, coerente com como `promotions.original_price` foi calculado.
+  const rawMenuPriceById = new Map();
   if (menuItemIds.length) {
     // Preço autoritativo com desconto de campanha aplicado quando ativo — é isso
     // que faz o desconto "valer de verdade" no valor cobrado do cliente.
@@ -509,16 +512,24 @@ const createPublicOrder = async (data) => {
     for (const row of r.rows) {
       const base = Number(row.price ?? 0);
       const camp = activeCampaignPrices.get(Number(row.id));
+      rawMenuPriceById.set(Number(row.id), base);
       menuPriceById.set(Number(row.id), camp ? Math.min(base, camp.final_price) : base);
     }
   }
-  const promoPriceById = new Map();
+  // Combo: guarda final_price E original_price para ratear o desconto entre os
+  // itens do combo (o final_price é o preço do COMBO INTEIRO, não de cada item).
+  const promoInfoById = new Map();
   if (promotionIds.length) {
     const r = await pool.query(
-      "SELECT id, final_price FROM promotions WHERE company_id = $1 AND id = ANY($2::int[])",
+      "SELECT id, final_price, original_price FROM promotions WHERE company_id = $1 AND id = ANY($2::int[])",
       [company_id, promotionIds],
     );
-    for (const row of r.rows) promoPriceById.set(Number(row.id), Number(row.final_price ?? 0));
+    for (const row of r.rows) {
+      promoInfoById.set(Number(row.id), {
+        final: Number(row.final_price ?? 0),
+        original: Number(row.original_price ?? 0),
+      });
+    }
   }
 
   // Validate purchase goal discounts the client is asking for
@@ -562,10 +573,22 @@ const createPublicOrder = async (data) => {
     // Preço base resolvido no servidor (ignora o unit_price do cliente).
     let baseUnit;
     if (item.promotion_id) {
-      if (!promoPriceById.has(Number(item.promotion_id))) {
+      const promoInfo = promoInfoById.get(Number(item.promotion_id));
+      if (!promoInfo) {
         throw new Error("Promoção inválida para esta empresa.");
       }
-      baseUnit = promoPriceById.get(Number(item.promotion_id));
+      if (item.menu_item_id != null && rawMenuPriceById.has(Number(item.menu_item_id))) {
+        // Combo no formato EXPANDIDO (um pedido-item por produto do combo): o
+        // final_price é o preço do combo INTEIRO, então rateamos entre os itens
+        // proporcionalmente ao preço cheio de cada um. Assim a soma do grupo é o
+        // preço do combo (× quantidade), e não o preço do combo em CADA item.
+        const menuPrice = rawMenuPriceById.get(Number(item.menu_item_id));
+        const ratio = promoInfo.original > 0 ? promoInfo.final / promoInfo.original : 1;
+        baseUnit = Number((menuPrice * ratio).toFixed(2));
+      } else {
+        // Combo em LINHA ÚNICA (sem menu_item_id): cobra o preço do combo.
+        baseUnit = promoInfo.final;
+      }
     } else if (item.menu_item_id) {
       if (!menuPriceById.has(Number(item.menu_item_id))) {
         throw new Error("Item inválido para esta empresa.");
