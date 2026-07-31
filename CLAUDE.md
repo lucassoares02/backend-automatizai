@@ -4,7 +4,8 @@
 
 - Runtime: Node.js + Express 5
 - Banco: PostgreSQL via `pg` (pool em `db.js`)
-- Autenticação: JWT (`helpers/jwt.js`) + middleware `src/middlewares/middleware.js`
+- Autenticação: JWT (`helpers/jwt.js`) + middleware `src/middlewares/middleware.js` (aceita também API Key de serviço via header `x-api-key` / `N8N_API_KEY`)
+- Documentação: Swagger UI em `GET /api/docs` (spec OpenAPI em `GET /api/docs.json`), gerada por introspecção do router em `src/swagger.js` — cobre todas as rotas automaticamente. Desative com `DOCS_ENABLED=false`.
 - Hash de senha: `bcrypt` (`helpers/hash.js`)
 - Email: Nodemailer (`services/mailerService.js` + `controllers/maillerController.js`)
 - Integrações externas: N8N, Evolution, Google Geocoding, MinIO

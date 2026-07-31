@@ -13,6 +13,7 @@ const express = require("express");
 const app = express();
 const cors = require("cors");
 const routes = require("./src/routes");
+const swagger = require("./src/swagger");
 const watchdogService = require("./services/watchdogService");
 const cartAbandonmentService = require("./services/cartAbandonmentService");
 const campaignSchedulerService = require("./services/campaignSchedulerService");
@@ -51,6 +52,9 @@ app.use("/api/stripe/webhook", express.raw({ type: "*/*" }));
 // usam multer (limite próprio de 10MB), não passam por aqui.
 app.use(express.urlencoded({ extended: true, limit: "256kb" }));
 app.use(express.json({ limit: "256kb" }));
+
+// Documentação Swagger/OpenAPI (/api/docs e /api/docs.json).
+swagger.mount(app);
 
 app.use("/api/", routes);
 

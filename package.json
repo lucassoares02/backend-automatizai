@@ -25,6 +25,7 @@
     "node-cron": "^4.2.1",
     "nodemailer": "^7.0.3",
     "pg": "^8.14.1",
-    "stripe": "^17.5.0"
+    "stripe": "^17.5.0",
+    "swagger-ui-express": "^5.0.1"
   }
 }
