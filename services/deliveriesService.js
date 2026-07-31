@@ -259,9 +259,17 @@ const _requestOptimizedRoute = async (origin, stops) => {
   }
 
   // Sequência final: intermediates na ordem otimizada + destino por último.
-  // Sem índice de otimização (ex.: 1 parada), mantém a ordem enviada.
-  const waypointOrder = route.optimizedIntermediateWaypointIndex || [];
-  const orderedWaypoints = waypointOrder.length ? waypointOrder.map((i) => waypoints[i]) : waypoints;
+  // A otimização só é aplicada quando os índices são válidos (mesma quantidade
+  // dos intermediates e dentro do intervalo). Caso contrário — índice vazio,
+  // incompleto ou fora do intervalo — mantém a ordem enviada. Isso evita paradas
+  // `undefined` (que gerariam order_id/lat/lng nulos no banco).
+  const waypointOrder = Array.isArray(route.optimizedIntermediateWaypointIndex)
+    ? route.optimizedIntermediateWaypointIndex
+    : [];
+  const indicesValid =
+    waypointOrder.length === waypoints.length &&
+    waypointOrder.every((i) => Number.isInteger(i) && i >= 0 && i < waypoints.length);
+  const orderedWaypoints = indicesValid ? waypointOrder.map((i) => waypoints[i]) : waypoints;
   const orderedStops = [...orderedWaypoints, destination];
 
   const legs = route.legs || [];
@@ -359,6 +367,13 @@ const createRoute = async ({ company_id, driver_id, order_ids }) => {
 
     for (let i = 0; i < optimized.stops.length; i++) {
       const s = optimized.stops[i];
+      // Proteção: nunca inserir uma parada sem pedido/coordenada (evita violar a
+      // constraint NOT NULL e mantém a rota consistente).
+      if (!s || s.order_id == null || s.lat == null || s.lng == null) {
+        const err = new Error("Falha ao montar a rota (parada inválida). Tente novamente.");
+        err.code = "route_stop_invalid";
+        throw err;
+      }
       await client.query(
         `INSERT INTO delivery_route_orders (route_id, order_id, stop_order, lat, lng, distance_meters, duration_seconds)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,

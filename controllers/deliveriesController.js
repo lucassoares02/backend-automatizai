@@ -8,6 +8,7 @@ const BUSINESS_ERROR_CODES = new Set([
   "driver_not_found",
   "orders_not_found",
   "order_without_location",
+  "route_stop_invalid",
 ]);
 
 const getActive = async (req, res) => {
