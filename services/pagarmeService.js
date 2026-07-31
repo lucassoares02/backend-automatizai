@@ -600,63 +600,117 @@ const handleWebhookEvent = async (event) => {
  * valor bruto e líquido estimado — total menos a taxa da plataforma) e as
  * transações mais recentes. `days` filtra o período (0/undefined = tudo).
  */
+// Mapeia o status de um charge/order do Pagar.me para os 3 buckets do painel.
+const _paymentBucket = (pmStatus) => {
+  const s = String(pmStatus || "").toLowerCase();
+  if (["paid", "overpaid", "underpaid"].includes(s)) return "paid";
+  if (["pending", "processing", "waiting_payment", "authorized_pending_capture", "generated"].includes(s)) return "pending";
+  if (!s) return null; // sem status → deixa o chamador usar o fallback interno
+  return "failed"; // failed, refused, not_authorized, canceled, voided, refunded, chargedback…
+};
+
+// Executa `fn` sobre `items` com concorrência limitada (evita estourar rate limit
+// da Pagar.me ao consultar vários charges ao mesmo tempo).
+const _mapLimit = async (items, limit, fn) => {
+  const out = [];
+  for (let i = 0; i < items.length; i += limit) {
+    const batch = items.slice(i, i + limit);
+    out.push(...(await Promise.all(batch.map(fn))));
+  }
+  return out;
+};
+
 const getPaymentsSummary = async (companyId, { days = 0 } = {}) => {
   const cid = Number(companyId);
   if (!cid) return null;
   const d = Number(days) || 0;
   const periodClause = d > 0 ? `AND o.created_at >= NOW() - INTERVAL '${d} days'` : "";
 
-  const totalsRes = await pool.query(
-    `SELECT
-        o.payment_status,
-        COUNT(*)::int                                   AS count,
-        COALESCE(SUM(o.total), 0)                        AS amount,
-        COALESCE(SUM(o.service_fee), 0)                  AS service_fee
-       FROM orders o
-      WHERE o.company_id = $1
-        AND o.payment_provider IS NOT NULL
-        ${periodClause}
-      GROUP BY o.payment_status`,
-    [cid],
-  );
-
-  const empty = () => ({ count: 0, amount: 0, net: 0 });
-  const totals = { paid: empty(), pending: empty(), failed: empty() };
-  for (const row of totalsRes.rows) {
-    const key = row.payment_status === "paid" ? "paid" : row.payment_status === "failed" ? "failed" : "pending";
-    totals[key].count += Number(row.count);
-    totals[key].amount += Number(row.amount);
-    // Líquido = bruto − taxa da plataforma (o repasse efetivo ao lojista).
-    totals[key].net += Number(row.amount) - Number(row.service_fee);
-  }
-
-  const recentRes = await pool.query(
-    `SELECT o.id, o.tag, o.total, o.service_fee, o.payment_status,
-            o.online_payment_method, o.created_at,
+  // O banco é apenas o ÍNDICE de quais pedidos/charges são da empresa no período.
+  // Os STATUS e valores vêm AO VIVO da Pagar.me (GET /charges/:id). Cap em 120
+  // p/ não explodir a latência; o filtro de período mantém isso pequeno na prática.
+  const ordersRes = await pool.query(
+    `SELECT o.id, o.tag, o.total, o.service_fee, o.created_at,
+            o.pagarme_charge_id, o.online_payment_method, o.payment_status,
             c.name AS client_name
        FROM orders o
        JOIN clients c ON c.id = o.client_id
-      WHERE o.company_id = $1
-        AND o.payment_provider IS NOT NULL
-        ${periodClause}
+      WHERE o.company_id = $1 AND o.payment_provider = 'pagarme' ${periodClause}
       ORDER BY o.created_at DESC
-      LIMIT 20`,
+      LIMIT 120`,
     [cid],
   );
+  const rows = ordersRes.rows;
+
+  // Consulta o status/valor ao vivo de cada charge existente.
+  let http = null;
+  try {
+    http = getHttp();
+  } catch (_) {
+    http = null; // Pagar.me não configurado → cai 100% no fallback interno.
+  }
+
+  const withCharge = rows.filter((r) => r.pagarme_charge_id);
+  const live = new Map();
+  if (http) {
+    const results = await _mapLimit(withCharge, 6, async (r) => {
+      try {
+        const { data } = await http.get(`/charges/${r.pagarme_charge_id}`);
+        return { id: r.id, status: data?.status || null, amount: data?.amount };
+      } catch (_) {
+        return { id: r.id, status: null, amount: null };
+      }
+    });
+    for (const res of results) live.set(res.id, res);
+  }
+
+  const empty = () => ({ count: 0, amount: 0, net: 0 });
+  const totals = { paid: empty(), pending: empty(), failed: empty() };
+  const recent = [];
+  let liveCount = 0;
+
+  for (const r of rows) {
+    const l = live.get(r.id);
+    let bucket = l ? _paymentBucket(l.status) : null;
+    if (bucket) {
+      liveCount++;
+    } else {
+      // Fallback interno (sem charge, Pagar.me offline, ou status desconhecido).
+      const ps = r.payment_status;
+      bucket = ps === "paid" ? "paid" : ps === "failed" ? "failed" : "pending";
+    }
+    const amount = l && l.amount != null ? Number(l.amount) / 100 : Number(r.total);
+    const net = amount - Number(r.service_fee || 0);
+
+    totals[bucket].count += 1;
+    totals[bucket].amount += amount;
+    totals[bucket].net += net;
+
+    if (recent.length < 20) {
+      recent.push({
+        id: r.id,
+        tag: r.tag,
+        total: amount,
+        net,
+        payment_status: bucket, // paid | pending | failed (já mapeado)
+        online_payment_method: r.online_payment_method,
+        client_name: r.client_name,
+        created_at: r.created_at,
+      });
+    }
+  }
+
+  for (const k of Object.keys(totals)) {
+    totals[k].amount = Number(totals[k].amount.toFixed(2));
+    totals[k].net = Number(totals[k].net.toFixed(2));
+  }
 
   return {
     period_days: d,
+    source: liveCount > 0 ? "pagarme_live" : "internal",
+    live_count: liveCount,
     totals,
-    recent: recentRes.rows.map((r) => ({
-      id: r.id,
-      tag: r.tag,
-      total: Number(r.total),
-      net: Number(r.total) - Number(r.service_fee || 0),
-      payment_status: r.payment_status,
-      online_payment_method: r.online_payment_method,
-      client_name: r.client_name,
-      created_at: r.created_at,
-    })),
+    recent,
   };
 };
 
