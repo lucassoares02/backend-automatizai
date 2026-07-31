@@ -239,24 +239,31 @@ const listSessions = async (companyId, opts = {}) => {
   const includeFinished = opts.include_finished !== false;
   const sinceMinutes = parseInt(opts.since_minutes) || 120;
 
+  // DISTINCT ON: 1 linha por cliente (customer_id → telefone → token da sessão),
+  // mantendo a atividade mais recente. Evita o mesmo cliente listado várias vezes.
   const res = await pool.query(
-    `SELECT s.id, s.session_id, s.company_id, s.customer_id,
-            s.customer_name, s.customer_phone,
-            s.status, s.current_step,
-            s.cart_items_count, s.subtotal,
-            s.latitude, s.longitude, s.address,
-            s.order_id, s.device_type,
-            s.is_active, s.last_activity_at, s.created_at, s.updated_at,
-            o.status AS order_status
-       FROM customer_tracking_sessions s
-       LEFT JOIN orders o ON o.id = s.order_id
-      WHERE s.company_id = $1
-        AND (
-              s.is_active = TRUE
-           OR ($2::boolean AND s.last_activity_at >= NOW() - ($3 || ' minutes')::interval)
-        )
-      ORDER BY s.last_activity_at DESC
-      LIMIT 300`,
+    `SELECT * FROM (
+       SELECT DISTINCT ON (COALESCE(s.customer_id::text, NULLIF(s.customer_phone, ''), s.session_id))
+              s.id, s.session_id, s.company_id, s.customer_id,
+              s.customer_name, s.customer_phone,
+              s.status, s.current_step,
+              s.cart_items_count, s.subtotal,
+              s.latitude, s.longitude, s.address,
+              s.order_id, s.device_type,
+              s.is_active, s.last_activity_at, s.created_at, s.updated_at,
+              o.status AS order_status
+         FROM customer_tracking_sessions s
+         LEFT JOIN orders o ON o.id = s.order_id
+        WHERE s.company_id = $1
+          AND (
+                s.is_active = TRUE
+             OR ($2::boolean AND s.last_activity_at >= NOW() - ($3 || ' minutes')::interval)
+          )
+        ORDER BY COALESCE(s.customer_id::text, NULLIF(s.customer_phone, ''), s.session_id),
+                 s.last_activity_at DESC
+     ) d
+     ORDER BY d.last_activity_at DESC
+     LIMIT 300`,
     [cid, includeFinished, sinceMinutes],
   );
   return res.rows;
@@ -270,26 +277,34 @@ const listMapPoints = async (companyId) => {
   if (!cid) return [];
   await _expireStale(cid);
 
+  // DISTINCT ON garante 1 ponto por cliente: agrupa por customer_id, ou telefone,
+  // ou (anônimo) pelo token persistente da sessão — mantendo o registro mais
+  // recente. Assim o mesmo cliente nunca aparece duplicado no mapa.
   const res = await pool.query(
-    `SELECT s.id, s.session_id, s.customer_name, s.customer_phone,
-            s.status, s.current_step,
-            s.cart_items_count, s.subtotal,
-            s.latitude, s.longitude, s.address,
-            s.order_id, s.last_activity_at, s.created_at,
-            o.status AS order_status,
-            o.delivery_type AS order_delivery_type
-       FROM customer_tracking_sessions s
-       LEFT JOIN orders o ON o.id = s.order_id
-      WHERE s.company_id = $1
-        AND s.latitude IS NOT NULL
-        AND s.longitude IS NOT NULL
-        AND (s.order_id IS NULL OR COALESCE(o.delivery_type, TRUE) = TRUE)
-        AND (
-              s.is_active = TRUE
-           OR s.last_activity_at >= NOW() - INTERVAL '2 hours'
-        )
-      ORDER BY s.last_activity_at DESC
-      LIMIT 500`,
+    `SELECT * FROM (
+       SELECT DISTINCT ON (COALESCE(s.customer_id::text, NULLIF(s.customer_phone, ''), s.session_id))
+              s.id, s.session_id, s.customer_name, s.customer_phone,
+              s.status, s.current_step,
+              s.cart_items_count, s.subtotal,
+              s.latitude, s.longitude, s.address,
+              s.order_id, s.last_activity_at, s.created_at,
+              o.status AS order_status,
+              o.delivery_type AS order_delivery_type
+         FROM customer_tracking_sessions s
+         LEFT JOIN orders o ON o.id = s.order_id
+        WHERE s.company_id = $1
+          AND s.latitude IS NOT NULL
+          AND s.longitude IS NOT NULL
+          AND (s.order_id IS NULL OR COALESCE(o.delivery_type, TRUE) = TRUE)
+          AND (
+                s.is_active = TRUE
+             OR s.last_activity_at >= NOW() - INTERVAL '2 hours'
+          )
+        ORDER BY COALESCE(s.customer_id::text, NULLIF(s.customer_phone, ''), s.session_id),
+                 s.last_activity_at DESC
+     ) d
+     ORDER BY d.last_activity_at DESC
+     LIMIT 500`,
     [cid],
   );
   return res.rows;
