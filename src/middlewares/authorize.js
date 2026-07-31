@@ -34,6 +34,7 @@ const _deny = (res) => res.status(403).json({ error: "Acesso negado a esta empre
  * Ex.: router.get("/orders/company/:id", authMiddleware, authorizeCompanyParam("id"), ...)
  */
 const authorizeCompanyParam = (paramName = "companyId") => (req, res, next) => {
+  if (req.isService) return next();
   const companyId = req.params[paramName];
   if (!companyId || !_isMember(req, companyId)) return _deny(res);
   next();
@@ -43,6 +44,7 @@ const authorizeCompanyParam = (paramName = "companyId") => (req, res, next) => {
  * Autoriza quando o company_id vem do corpo da requisição (create).
  */
 const authorizeCompanyBody = (field = "company_id") => (req, res, next) => {
+  if (req.isService) return next();
   const companyId = req.body?.[field] ?? req.body?.companyId;
   if (!companyId || !_isMember(req, companyId)) return _deny(res);
   next();
@@ -55,6 +57,7 @@ const authorizeCompanyBody = (field = "company_id") => (req, res, next) => {
  */
 const authorizeByLookup = (sql, paramName = "id") => async (req, res, next) => {
   try {
+    if (req.isService) return next();
     const id = req.params[paramName];
     if (!id) return _deny(res);
     const result = await pool.query(sql, [id]);

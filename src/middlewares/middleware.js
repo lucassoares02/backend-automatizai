@@ -1,8 +1,31 @@
 const { verifyToken } = require('../../helpers/jwt');
 const { logAccess } = require('../../services/logService');
 const { getUserCompanyIds } = require('./authorize');
+const { isValidServiceKey, SERVICE_PRINCIPAL } = require('../../helpers/serviceAuth');
 
 const authMiddleware = async (req, res, next) => {
+    // Autenticação de serviço (n8n): API Key via header `x-api-key`. Quando
+    // presente, dispensa o JWT. Principal de serviço confiável = escopo global,
+    // então não carregamos `userCompanies` (o authorize libera por `isService`).
+    const apiKey = req.headers['x-api-key'];
+    if (apiKey !== undefined) {
+        if (!isValidServiceKey(apiKey)) {
+            return res.status(401).json({ error: 'Invalid API key' });
+        }
+        req.user = { ...SERVICE_PRINCIPAL };
+        req.isService = true;
+        req.userCompanies = [];
+
+        logAccess({
+            userId: SERVICE_PRINCIPAL.id,
+            email: SERVICE_PRINCIPAL.email,
+            path: req.path,
+            method: req.method,
+        });
+
+        return next();
+    }
+
     const authHeader = req.headers.authorization;
 
     if (!authHeader) return res.status(401).json({ error: 'No token provided' });
