@@ -146,7 +146,8 @@ const _onlyDigits = (v) => String(v || "").replace(/\D/g, "");
 // Monta o objeto customer do pedido a partir do cliente + dados informados no
 // checkout embutido (CPF é opcional; e-mail é sintetizado quando ausente).
 const _buildCustomer = (client, extra = {}) => {
-  const doc = _onlyDigits(extra.document);
+  // Documento informado no pagamento OU o já salvo no cadastro do cliente.
+  const doc = _onlyDigits(extra.document || client.client_document || client.document);
   const phone = _parsePhone(extra.phone || client.client_phone || client.phone);
   const emailSafe =
     extra.email ||
@@ -326,7 +327,7 @@ const _loadOrderForCharge = async (orderId) => {
   const orderRes = await pool.query(
     `SELECT o.id, o.uuid, o.total, o.tag, o.company_id, o.client_id, o.payment_status, o.service_fee,
             c.name AS company_name, c.pagarme_recipient_id, c.pagarme_charges_enabled,
-            cl.name AS client_name, cl.phone AS client_phone
+            cl.name AS client_name, cl.phone AS client_phone, cl.document AS client_document
      FROM orders o
      JOIN companies c ON c.id = o.company_id
      JOIN clients cl ON cl.id = o.client_id
@@ -467,11 +468,20 @@ const createPixCharge = async (orderId, extra = {}) => {
   const orderRef = order.tag || `#${order.id}`;
   const expiresIn = Number(process.env.PAGARME_PIX_EXPIRES_IN || 3600);
 
+  // A Pagar.me EXIGE o documento (CPF/CNPJ) do pagador para PIX. Sem ele a
+  // cobrança nasce "failed" sem QR Code. Usa o CPF informado no pagamento ou o
+  // já salvo no cadastro do cliente; se não houver nenhum, recusa com mensagem
+  // clara (o cliente precisa informar o CPF na tela de pagamento).
+  const customer = _buildCustomer(order, extra);
+  if (!customer.document) {
+    throw Object.assign(new Error("Informe o CPF do pagador para pagar com PIX."), { status: 400 });
+  }
+
   try {
     const http = getHttp();
     const { data } = await http.post("/orders", {
       code: String(order.id),
-      customer: _buildCustomer(order, extra),
+      customer,
       items: [{ amount: totalCents, description: `Pedido ${orderRef}`.slice(0, 64), quantity: 1 }],
       payments: [
         {
@@ -487,8 +497,31 @@ const createPixCharge = async (orderId, extra = {}) => {
     const tx = charge.last_transaction || {};
     await _persistOrderCharge(order.id, data.id, charge.id);
 
+    const status = charge.status || data.status;
+    // PIX bem-sucedido nasce "pending"/"waiting_payment" COM QR Code. Se veio
+    // "failed" ou sem QR, a Pagar.me recusou — logamos o motivo real e devolvemos
+    // um erro claro (em vez de um "200" com QR nulo que trava o cliente).
+    if (!tx.qr_code || status === "failed") {
+      console.error(
+        "Pagar.me PIX recusado:",
+        JSON.stringify({
+          order_id: order.id,
+          charge_status: status,
+          tx_status: tx.status,
+          gateway_response: tx.gateway_response,
+          acquirer_message: tx.acquirer_message,
+        }),
+      );
+      await pool.query("UPDATE orders SET payment_status = 'failed' WHERE id = $1", [order.id]);
+      const reason = tx.acquirer_message || tx.gateway_response?.errors?.[0]?.message;
+      throw Object.assign(
+        new Error(reason ? `PIX recusado: ${reason}` : "Não foi possível gerar o PIX. Revise os dados e tente novamente."),
+        { status: 422 },
+      );
+    }
+
     return {
-      status: charge.status || data.status,
+      status,
       order_id: order.id,
       pagarme_order_id: data.id,
       charge_id: charge.id,
@@ -497,6 +530,7 @@ const createPixCharge = async (orderId, extra = {}) => {
       expires_at: tx.expires_at || null,
     };
   } catch (error) {
+    if (error.status === 422) throw error; // erro de recusa já formatado acima
     throw _wrap(error, "Falha ao gerar o PIX");
   }
 };

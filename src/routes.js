@@ -37,6 +37,7 @@ const deliveries = require("../controllers/deliveriesController");
 const deliveryDrivers = require("../controllers/deliveryDriversController");
 const stripe = require("../controllers/stripeController");
 const pagarme = require("../controllers/pagarmeController");
+const n8n = require("../controllers/n8nController");
 
 // ─── Rate limiters ───────────────────────────────────────────────────────────
 // Estritos para autenticação/abuso; generosos para o fluxo público de pedidos
@@ -312,5 +313,10 @@ router.post("/public/pagarme/card", publicLimiter, pagarme.payCard);
 router.post("/public/pagarme/pix", publicLimiter, pagarme.payPix);
 // Webhook Pagar.me (sem auth JWT; Basic auth verificado no controller).
 router.post("/pagarme/webhook", pagarme.webhook);
+
+// ─── n8n (consumo pelo n8n via API Key de serviço `x-api-key`) ────────────────
+// authMiddleware aceita a service key; authorizeCompanyParam é bypassado para o
+// principal de serviço e restringe usuários JWT à própria empresa.
+router.get("/n8n/company/:companyId/daily-summary", authMiddleware, authorizeCompanyParam("companyId"), n8n.dailySummary);
 
 module.exports = router;
