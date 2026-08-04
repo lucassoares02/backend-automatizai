@@ -676,7 +676,7 @@ const getPaymentsSummary = async (companyId, { days = 0 } = {}) => {
   );
   const rows = ordersRes.rows;
 
-  // Consulta o status/valor ao vivo de cada charge existente.
+  // Conexão com a Pagar.me (chave da conta ATUAL).
   let http = null;
   try {
     http = getHttp();
@@ -684,39 +684,62 @@ const getPaymentsSummary = async (companyId, { days = 0 } = {}) => {
     http = null; // Pagar.me não configurado → cai 100% no fallback interno.
   }
 
-  // Otimização: `paid` e `failed` são estados TERMINAIS já confirmados pelo
-  // webhook — não mudam. Só os PENDENTES podem estar desatualizados (webhook
-  // atrasado/perdido), então apenas eles são verificados ao vivo na Pagar.me.
-  // Reduz drasticamente as chamadas mantendo o painel preciso.
-  const needsLive = rows.filter((r) => r.pagarme_charge_id && r.payment_status === "pending");
+  // Fonte da verdade = Pagar.me da CONTA ATUAL. Verificamos AO VIVO todas as
+  // cobranças (não só as pendentes): assim, ao trocar de conta, os valores
+  // refletem a conta nova. Cada charge é consultado com a chave atual —
+  //  • encontrado  → usamos status/valor REAIS do Pagar.me;
+  //  • 404 (não existe na conta atual) → é de uma CONTA ANTIGA e fica de FORA;
+  //  • erro de rede (sem resposta) → não descartamos: caímos no valor do banco.
+  // O custo é limitado (cap de 120 pedidos, concorrência 6, com botão "Atualizar").
+  const withCharge = rows.filter((r) => r.pagarme_charge_id);
   const live = new Map();
+  const staleIds = new Set(); // charges que não pertencem à conta Pagar.me atual
   if (http) {
-    const results = await _mapLimit(needsLive, 6, async (r) => {
+    const results = await _mapLimit(withCharge, 6, async (r) => {
       try {
         const { data } = await http.get(`/charges/${r.pagarme_charge_id}`);
-        return { id: r.id, status: data?.status || null, amount: data?.amount };
-      } catch (_) {
-        return { id: r.id, status: null, amount: null };
+        return { id: r.id, status: data?.status || null, amount: data?.amount, found: true };
+      } catch (e) {
+        // 404 = a cobrança não existe nesta conta (conta antiga) → descartar.
+        // Qualquer outro erro (timeout/5xx) mantém o pedido via fallback do banco.
+        const isNotFound = e?.response?.status === 404;
+        return { id: r.id, status: null, amount: null, found: !isNotFound };
       }
     });
-    for (const res of results) live.set(res.id, res);
+    for (const res of results) {
+      live.set(res.id, res);
+      if (!res.found) staleIds.add(res.id);
+    }
   }
 
   const empty = () => ({ count: 0, amount: 0, net: 0 });
   const totals = { paid: empty(), pending: empty(), failed: empty() };
   const recent = [];
   let liveCount = 0;
+  let excluded = 0; // pedidos ignorados por serem de conta antiga / não verificáveis
 
   for (const r of rows) {
+    // Modo AO VIVO (Pagar.me configurado): só entram pedidos cuja cobrança foi
+    // confirmada na conta ATUAL. Descartamos:
+    //  • cobranças 404 (conta antiga);
+    //  • pedidos sem charge_id (não há como validar contra a conta atual).
+    if (http) {
+      if (!r.pagarme_charge_id || staleIds.has(r.id)) {
+        excluded++;
+        continue;
+      }
+    }
+
     const l = live.get(r.id);
-    let bucket = l ? _paymentBucket(l.status) : null;
+    let bucket = l && l.status ? _paymentBucket(l.status) : null;
     if (bucket) {
       liveCount++;
     } else {
-      // Fallback interno (sem charge, Pagar.me offline, ou status desconhecido).
+      // Fallback interno (Pagar.me offline, ou charge encontrado sem status).
       const ps = r.payment_status;
       bucket = ps === "paid" ? "paid" : ps === "failed" ? "failed" : "pending";
     }
+    // Valor SEMPRE do Pagar.me quando disponível (o total do banco pode divergir).
     const amount = l && l.amount != null ? Number(l.amount) / 100 : Number(r.total);
     const net = amount - Number(r.service_fee || 0);
 
@@ -745,11 +768,12 @@ const getPaymentsSummary = async (companyId, { days = 0 } = {}) => {
 
   return {
     period_days: d,
-    // Os dados refletem a Pagar.me: pendentes verificados AO VIVO agora;
-    // paid/failed são estados terminais já confirmados pela Pagar.me via webhook.
-    source: "pagarme",
-    live_checked: needsLive.length, // quantos pendentes foram consultados ao vivo
+    // Valores refletem a CONTA ATUAL do Pagar.me: cada cobrança é validada ao
+    // vivo agora; cobranças de contas antigas (404) não entram nos totais.
+    source: http ? "pagarme_live" : "local",
+    live_checked: http ? withCharge.length : 0, // charges consultados ao vivo
     live_applied: liveCount, // quantos tiveram status resolvido pela consulta
+    excluded, // pedidos descartados (conta antiga / sem charge) no modo ao vivo
     totals,
     recent,
   };
