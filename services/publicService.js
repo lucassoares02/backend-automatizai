@@ -4,6 +4,7 @@ const productOptionsService = require("./productOptionsService");
 const purchaseGoalsService = require("./purchaseGoalsService");
 const stripeService = require("./stripeService");
 const pagarmeService = require("./pagarmeService");
+const ordersService = require("./ordersService");
 const campaignsService = require("./campaignsService");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 
@@ -874,6 +875,62 @@ const getPublicOrder = async ({ id, phone }) => {
   return row;
 };
 
+// Status que o cliente ainda pode cancelar: antes de "Saiu para entrega" (4).
+//  1 = aguardando  · 2 = confirmado · 3 = preparando · 10 = pagamento pendente
+// Bloqueado a partir de 4 (em entrega), 8 (pronto p/ retirada) e finais (5/6/7/9).
+const _CLIENT_CANCELLABLE_STATUSES = [1, 2, 3, 10];
+
+/**
+ * Cancelamento do pedido PELO CLIENTE (fluxo público). Valida a posse do pedido
+ * (reusa a mesma regra do getPublicOrder: UUID dispensa telefone; id numérico
+ * exige telefone correspondente), garante que o pedido ainda não saiu para
+ * entrega e, quando houve pagamento ONLINE confirmado via Pagar.me, solicita o
+ * estorno antes de marcar o pedido como cancelado (status 6, com o motivo).
+ *
+ * Retorna { ok, code?, message?, refunded, paidOnline }.
+ */
+const cancelPublicOrder = async ({ id, phone, reason }) => {
+  const order = await getPublicOrder({ id, phone });
+  if (!order) return { ok: false, code: 404, message: "Pedido não encontrado." };
+
+  const status = Number(order.status);
+  if (status === 6 || status === 7) {
+    return { ok: false, code: 409, message: "Este pedido já foi cancelado." };
+  }
+  if (!_CLIENT_CANCELLABLE_STATUSES.includes(status)) {
+    return {
+      ok: false,
+      code: 409,
+      message: "Este pedido já está em preparo avançado/entrega e não pode mais ser cancelado por aqui. Fale com o estabelecimento.",
+    };
+  }
+
+  // Estorno: apenas quando houve pagamento ONLINE confirmado via Pagar.me.
+  let refunded = false;
+  const paidOnline = order.payment_provider === "pagarme" && order.payment_status === "paid";
+  if (paidOnline) {
+    // getPublicOrder não expõe o charge id (dado interno) — busca sob demanda.
+    const chg = await pool.query("SELECT pagarme_charge_id FROM orders WHERE id = $1", [order.id]);
+    const chargeId = chg.rows[0]?.pagarme_charge_id;
+    if (chargeId) {
+      try {
+        await pagarmeService.refundCharge(chargeId);
+        refunded = true;
+        await pool.query("UPDATE orders SET payment_status = 'refunded' WHERE id = $1", [order.id]);
+      } catch (err) {
+        // Não bloqueia o cancelamento: o pedido é cancelado mesmo se o estorno
+        // falhar (o lojista consegue estornar manualmente no painel Pagar.me).
+        console.error("Falha ao solicitar estorno Pagar.me (pedido " + order.id + "):", err.message);
+      }
+    }
+  }
+
+  // Marca como cancelado (status 6) com o motivo; dispara webhook + histórico.
+  await ordersService.updateStatus(order.id, 6, reason || null);
+
+  return { ok: true, refunded, paidOnline };
+};
+
 const findPublicOrdersByPhone = async ({ company_id, phone }) => {
   const normalized = _normalizePhone(phone);
   if (!normalized) return [];
@@ -981,6 +1038,7 @@ module.exports = {
   createPublicOrder,
   calculatePublicDeliveryFee,
   getPublicOrder,
+  cancelPublicOrder,
   findPublicOrdersByPhone,
   listPublicRestaurants,
 };

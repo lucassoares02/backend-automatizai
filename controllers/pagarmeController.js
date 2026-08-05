@@ -100,6 +100,42 @@ const payments = async (req, res) => {
   }
 };
 
+/**
+ * Saldo do recebedor (disponível / a liberar / transferido). Param: :companyId
+ */
+const balance = async (req, res) => {
+  const companyId = req.params.companyId;
+  if (!companyId || isNaN(companyId)) {
+    return res.status(400).json({ error: "companyId inválido" });
+  }
+  try {
+    const result = await service.getRecipientBalance(Number(companyId));
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error("Pagar.me balance error:", error.message);
+    return res.status(error.status || 500).json({ error: error.message || "Falha ao consultar saldo" });
+  }
+};
+
+/**
+ * Solicita um saque do saldo disponível para a conta bancária do recebedor.
+ * Body: { company_id, amount? } — amount em reais; ausente = total disponível.
+ */
+const withdraw = async (req, res) => {
+  const companyId = req.body?.company_id ?? req.body?.companyId;
+  if (!companyId || isNaN(companyId)) {
+    return res.status(400).json({ error: "company_id é obrigatório" });
+  }
+  try {
+    const amount = req.body?.amount != null && req.body.amount !== "" ? Number(req.body.amount) : null;
+    const result = await service.requestWithdrawal(Number(companyId), amount);
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error("Pagar.me withdraw error:", error.message);
+    return res.status(error.status || 500).json({ error: error.message || "Falha ao solicitar saque" });
+  }
+};
+
 // ─── Cliente (público) ─────────────────────────────────────────────────────────
 
 /**
@@ -184,4 +220,4 @@ const webhook = async (req, res) => {
   }
 };
 
-module.exports = { connect, kyc, status, recipient, payments, payCard, payPix, webhook };
+module.exports = { connect, kyc, status, recipient, payments, balance, withdraw, payCard, payPix, webhook };

@@ -163,6 +163,32 @@ const reorder = async (req, res) => {
   }
 };
 
+const cancelOrder = async (req, res) => {
+  const { id } = req.params;
+  const { phone, reason } = req.body || {};
+  if (!id || !String(id).trim()) {
+    return res.status(400).json({ error: "Invalid order id" });
+  }
+  try {
+    const result = await service.cancelPublicOrder({
+      id: String(id).trim(),
+      phone: phone ? String(phone) : null,
+      reason: reason ? String(reason).slice(0, 500) : null,
+    });
+    if (!result.ok) {
+      return res.status(result.code || 400).json({ error: result.message });
+    }
+    return res.status(200).json({
+      cancelled: true,
+      refunded: result.refunded,
+      paid_online: result.paidOnline,
+    });
+  } catch (error) {
+    console.error("Error cancelling public order:", error);
+    return res.status(500).json({ error: "Failed to cancel order" });
+  }
+};
+
 module.exports = {
   listRestaurants,
   getCompanyMenu,
@@ -174,4 +200,5 @@ module.exports = {
   getOrder,
   listOrdersByPhone,
   reorder,
+  cancelOrder,
 };

@@ -128,6 +128,39 @@ const APP_URL = (process.env.PUBLIC_APP_URL || process.env.ORIGIN || "").replace
 // "active" é o único status em que o recebedor pode transacionar.
 const _isActiveStatus = (status) => String(status || "").toLowerCase() === "active";
 
+// A Pagar.me exige um SEGUNDO FATOR de autenticação para alterações sensíveis do
+// recebedor (troca de conta bancária, principalmente). Detecta essa recusa para
+// tratá-la de forma amigável, em vez de propagar
+// "Request_denied. Second authentication factor is necessary".
+const _is2FAError = (error) => {
+  const data = error?.response?.data;
+  const parts = [data?.message, _formatErrors(data?.errors), error?.message]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return parts.includes("second authentication factor") || parts.includes("segundo fator");
+};
+
+// Compara os campos que identificam a conta bancária. Serve para NÃO refazer o
+// PATCH da conta (e disparar o 2FA) quando o comerciante só editou nome/endereço.
+const _bankAccountChanged = (current, next) => {
+  if (!next) return false;
+  if (!current) return true;
+  const digits = (v) => String(v ?? "").replace(/\D/g, "");
+  const eqDigits = (a, b) => digits(a) === digits(b);
+  const eqText = (a, b) => String(a ?? "").trim().toLowerCase() === String(b ?? "").trim().toLowerCase();
+  return (
+    !eqDigits(current.bank, next.bank) ||
+    !eqDigits(current.branch_number, next.branch_number) ||
+    !eqDigits(current.branch_check_digit, next.branch_check_digit) ||
+    !eqDigits(current.account_number, next.account_number) ||
+    !eqDigits(current.account_check_digit, next.account_check_digit) ||
+    !eqText(current.type, next.type) ||
+    !eqDigits(current.holder_document, next.holder_document) ||
+    !eqText(current.holder_type, next.holder_type)
+  );
+};
+
 // Quebra um telefone brasileiro em { country_code, area_code, number }.
 const _parsePhone = (raw) => {
   const digits = String(raw || "").replace(/\D/g, "");
@@ -222,16 +255,38 @@ const createOrUpdateRecipient = async (companyId, payload) => {
 
   try {
     let recipient;
+    let warning = null; // aviso não-fatal (ex.: conta bancária exige 2FA)
     if (company.pagarme_recipient_id) {
-      // Atualiza os dados de cadastro e a conta bancária do recebedor existente.
-      const http2 = getHttp();
-      await http2.put(`/recipients/${company.pagarme_recipient_id}`, {
+      // ── Atualização de um recebedor existente ──────────────────────────────
+      // Estado atual: usado para só alterar a conta bancária quando ela mudou.
+      const currentRes = await http.get(`/recipients/${company.pagarme_recipient_id}`);
+      const current = currentRes.data || {};
+
+      // 1) Dados cadastrais (nome/endereço/etc.) — não mexem na conta bancária.
+      await http.put(`/recipients/${company.pagarme_recipient_id}`, {
         register_information: registerInformation,
       });
-      await http2.patch(`/recipients/${company.pagarme_recipient_id}/default-bank-account`, {
-        bank_account: defaultBankAccount,
-      });
-      const r = await http2.get(`/recipients/${company.pagarme_recipient_id}`);
+
+      // 2) Conta bancária: só refaz o PATCH se REALMENTE mudou. A Pagar.me exige
+      //    2º fator para trocar a conta; evitamos disparar isso à toa (o erro
+      //    aparecia mesmo quando o comerciante só editava o cadastro).
+      if (_bankAccountChanged(current.default_bank_account, defaultBankAccount)) {
+        try {
+          await http.patch(`/recipients/${company.pagarme_recipient_id}/default-bank-account`, {
+            bank_account: defaultBankAccount,
+          });
+        } catch (bankErr) {
+          if (_is2FAError(bankErr)) {
+            // Não derruba a atualização: os dados cadastrais já foram salvos.
+            warning =
+              "Seus dados foram atualizados, mas a troca da CONTA BANCÁRIA precisa ser confirmada com o segundo fator de autenticação no painel da Pagar.me (por segurança). A conta anterior continua ativa até você confirmar lá.";
+          } else {
+            throw bankErr;
+          }
+        }
+      }
+
+      const r = await http.get(`/recipients/${company.pagarme_recipient_id}`);
       recipient = r.data;
     } else {
       const r = await http.post("/recipients", body);
@@ -242,8 +297,18 @@ const createOrUpdateRecipient = async (companyId, payload) => {
       recipient_id: recipient.id,
       status: recipient.status,
       charges_enabled: _isActiveStatus(recipient.status),
+      warning,
     };
   } catch (error) {
+    // 2FA em outras operações (ex.: PUT dos dados cadastrais): mensagem clara.
+    if (_is2FAError(error)) {
+      throw Object.assign(
+        new Error(
+          "A Pagar.me exige um segundo fator de autenticação para esta alteração. Confirme a operação no painel da Pagar.me e tente novamente.",
+        ),
+        { status: 409 },
+      );
+    }
     throw _wrap(error, "Falha ao criar o recebedor no Pagar.me");
   }
 };
@@ -317,6 +382,85 @@ const getRecipientDetails = async (companyId) => {
     };
   } catch (error) {
     throw _wrap(error, "Falha ao carregar os dados do recebedor");
+  }
+};
+
+// ─── Saldo e saque (o comerciante recebe as próprias vendas) ────────────────────
+
+/**
+ * Consulta o saldo do recebedor no Pagar.me. Valores em REAIS.
+ *  • available      — disponível para saque agora;
+ *  • waiting_funds  — a liberar (vendas ainda não liquidadas);
+ *  • transferred    — já transferido.
+ */
+const getRecipientBalance = async (companyId) => {
+  const company = await _getCompany(companyId);
+  if (!company) throw Object.assign(new Error("Empresa não encontrada."), { status: 404 });
+  if (!company.pagarme_recipient_id) {
+    return { connected: false, currency: "BRL", available: 0, waiting_funds: 0, transferred: 0 };
+  }
+  try {
+    const http = getHttp();
+    const r = await http.get(`/recipients/${company.pagarme_recipient_id}/balance`);
+    const d = r.data || {};
+    return {
+      connected: true,
+      currency: d.currency || "BRL",
+      available: (Number(d.available_amount) || 0) / 100,
+      waiting_funds: (Number(d.waiting_funds_amount) || 0) / 100,
+      transferred: (Number(d.transferred_amount) || 0) / 100,
+    };
+  } catch (error) {
+    throw _wrap(error, "Falha ao consultar o saldo");
+  }
+};
+
+/**
+ * Solicita um SAQUE (withdrawal) do saldo disponível do recebedor para a conta
+ * bancária cadastrada. `amount` em REAIS (omitido/0 = saca o total disponível).
+ * Valida contra o saldo disponível antes de enviar.
+ */
+const requestWithdrawal = async (companyId, amount) => {
+  const company = await _getCompany(companyId);
+  if (!company) throw Object.assign(new Error("Empresa não encontrada."), { status: 404 });
+  if (!company.pagarme_recipient_id) {
+    throw Object.assign(new Error("Recebedor ainda não cadastrado."), { status: 409 });
+  }
+  const http = getHttp();
+
+  // Saldo disponível (centavos) para validar o valor pedido.
+  let availableCents = 0;
+  try {
+    const b = await http.get(`/recipients/${company.pagarme_recipient_id}/balance`);
+    availableCents = Number(b.data?.available_amount) || 0;
+  } catch (error) {
+    throw _wrap(error, "Falha ao consultar o saldo");
+  }
+
+  const cents = amount ? Math.round(Number(amount) * 100) : availableCents;
+  if (!Number.isFinite(cents) || cents <= 0) {
+    throw Object.assign(new Error("Não há saldo disponível para saque."), { status: 422 });
+  }
+  if (cents > availableCents) {
+    throw Object.assign(new Error("O valor solicitado é maior que o saldo disponível."), { status: 422 });
+  }
+
+  try {
+    const r = await http.post(`/recipients/${company.pagarme_recipient_id}/withdrawals`, { amount: cents });
+    const d = r.data || {};
+    return {
+      id: d.id || null,
+      status: d.status || null,
+      amount: (Number(d.amount) || cents) / 100,
+    };
+  } catch (error) {
+    if (_is2FAError(error)) {
+      throw Object.assign(
+        new Error("A Pagar.me exige um segundo fator de autenticação para o saque. Confirme a operação no painel da Pagar.me."),
+        { status: 409 },
+      );
+    }
+    throw _wrap(error, "Falha ao solicitar o saque");
   }
 };
 
@@ -532,6 +676,29 @@ const createPixCharge = async (orderId, extra = {}) => {
   } catch (error) {
     if (error.status === 422) throw error; // erro de recusa já formatado acima
     throw _wrap(error, "Falha ao gerar o PIX");
+  }
+};
+
+// ─── Estorno / cancelamento de cobrança ────────────────────────────────────────
+
+/**
+ * Solicita o estorno (refund) de uma cobrança. Na Pagar.me v5, o cancelamento de
+ * um charge PAGO (`DELETE /charges/{id}`) dispara o reembolso ao cliente (PIX ou
+ * cartão); se ainda não foi capturado, apenas cancela. `amountCents` permite
+ * estorno parcial (omitido = valor integral). Retorna o status resultante.
+ */
+const refundCharge = async (chargeId, amountCents) => {
+  if (!chargeId) {
+    throw Object.assign(new Error("charge id é obrigatório para o estorno."), { status: 400 });
+  }
+  try {
+    const http = getHttp();
+    const body = amountCents ? { amount: Math.round(amountCents) } : undefined;
+    // axios envia corpo no DELETE via `data`.
+    const { data } = await http.delete(`/charges/${chargeId}`, body ? { data: body } : undefined);
+    return { status: data?.status || null };
+  } catch (error) {
+    throw _wrap(error, "Falha ao solicitar o estorno no Pagar.me");
   }
 };
 
@@ -784,9 +951,12 @@ module.exports = {
   createKycLink,
   refreshRecipientStatus,
   getRecipientDetails,
+  getRecipientBalance,
+  requestWithdrawal,
   getPaymentsSummary,
   createCardCharge,
   createPixCharge,
+  refundCharge,
   verifyBasicAuth,
   handleWebhookEvent,
 };

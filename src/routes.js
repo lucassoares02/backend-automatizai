@@ -278,6 +278,7 @@ router.post("/public/orders", publicLimiter, publicCtrl.createOrder);
 router.get("/public/orders", publicLimiter, publicCtrl.listOrdersByPhone);
 router.get("/public/orders/:id/reorder", publicLimiter, publicCtrl.reorder);
 router.get("/public/orders/:id", publicLimiter, publicCtrl.getOrder);
+router.post("/public/orders/:id/cancel", publicLimiter, publicCtrl.cancelOrder);
 
 // customer tracking — público (fire-and-forget) e admin (com auth)
 router.post("/public/customer-tracking/session", publicLimiter, customerTracking.upsertSession);
@@ -308,6 +309,8 @@ router.post("/pagarme/kyc", authMiddleware, authorizeCompanyBody(), pagarme.kyc)
 router.get("/pagarme/status/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.status);
 router.get("/pagarme/recipient/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.recipient);
 router.get("/pagarme/payments/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.payments);
+router.get("/pagarme/balance/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.balance);
+router.post("/pagarme/withdraw", authMiddleware, authorizeCompanyBody(), pagarme.withdraw);
 // Cliente (público, rate-limited): pagamento embutido (cartão via token / PIX).
 router.post("/public/pagarme/card", publicLimiter, pagarme.payCard);
 router.post("/public/pagarme/pix", publicLimiter, pagarme.payPix);
