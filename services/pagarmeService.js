@@ -122,6 +122,9 @@ const _normalizeRegisterInformation = (ri) => {
 const PLATFORM_FEE_PERCENT = Number(process.env.PAGARME_PLATFORM_FEE_PERCENT ?? 10);
 const PLATFORM_RECIPIENT_ID = process.env.PAGARME_PLATFORM_RECIPIENT_ID || null;
 const APP_URL = (process.env.PUBLIC_APP_URL || process.env.ORIGIN || "").replace(/\/$/, "");
+// Valor mínimo de saque (em REAIS). Configurável — ajuste para o mínimo real da
+// sua conta Pagar.me. Default conservador de R$ 1,00.
+const MIN_WITHDRAWAL = Number(process.env.PAGARME_MIN_WITHDRAWAL_AMOUNT ?? 1);
 
 // ─── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -397,7 +400,7 @@ const getRecipientBalance = async (companyId) => {
   const company = await _getCompany(companyId);
   if (!company) throw Object.assign(new Error("Empresa não encontrada."), { status: 404 });
   if (!company.pagarme_recipient_id) {
-    return { connected: false, currency: "BRL", available: 0, waiting_funds: 0, transferred: 0 };
+    return { connected: false, currency: "BRL", available: 0, waiting_funds: 0, transferred: 0, min_withdrawal: MIN_WITHDRAWAL };
   }
   try {
     const http = getHttp();
@@ -409,6 +412,7 @@ const getRecipientBalance = async (companyId) => {
       available: (Number(d.available_amount) || 0) / 100,
       waiting_funds: (Number(d.waiting_funds_amount) || 0) / 100,
       transferred: (Number(d.transferred_amount) || 0) / 100,
+      min_withdrawal: MIN_WITHDRAWAL, // saque mínimo (reais)
     };
   } catch (error) {
     throw _wrap(error, "Falha ao consultar o saldo");
@@ -441,8 +445,13 @@ const requestWithdrawal = async (companyId, amount) => {
   if (!Number.isFinite(cents) || cents <= 0) {
     throw Object.assign(new Error("Não há saldo disponível para saque."), { status: 422 });
   }
+  const minCents = Math.round(MIN_WITHDRAWAL * 100);
+  if (cents < minCents) {
+    const min = MIN_WITHDRAWAL.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+    throw Object.assign(new Error(`O saque mínimo é ${min}.`), { status: 422 });
+  }
   if (cents > availableCents) {
-    throw Object.assign(new Error("O valor solicitado é maior que o saldo disponível."), { status: 422 });
+    throw Object.assign(new Error("O valor solicitado é maior que o saldo disponível para saque."), { status: 422 });
   }
 
   try {

@@ -5,15 +5,20 @@ const pool = require("../db");
 // leituras que o n8n SOLICITA à nossa API para montar mensagens/relatórios.
 // Novas requisições do n8n devem ser adicionadas aqui (uma função por payload).
 
-// Rótulos de dia da semana em pt-BR indexados por DOW do PostgreSQL (0 = domingo).
+// Rótulos de dia da semana em pt-BR, cobrindo as DUAS convenções usadas no app:
+//  • DOW do PostgreSQL (EXTRACT(DOW)): 0=domingo … 6=sábado — usado em sales_average;
+//  • company_opening_hours.weekday (portal): 1=segunda … 7=domingo — usado em opening_hours.
+// Segunda–sábado (1–6) coincidem nas duas; domingo aparece como 0 (DOW) OU 7 (portal),
+// por isso o índice 7 também mapeia para "domingo" (antes vinha null no domingo).
 const WEEKDAY_LABELS = [
-  "domingo",
-  "segunda-feira",
-  "terça-feira",
-  "quarta-feira",
-  "quinta-feira",
-  "sexta-feira",
-  "sábado",
+  "domingo", // 0 (DOW)
+  "segunda-feira", // 1
+  "terça-feira", // 2
+  "quarta-feira", // 3
+  "quinta-feira", // 4
+  "sexta-feira", // 5
+  "sábado", // 6
+  "domingo", // 7 (opening_hours: domingo)
 ];
 
 const weekdayLabel = (dow) => (dow == null ? null : WEEKDAY_LABELS[Number(dow)] ?? null);

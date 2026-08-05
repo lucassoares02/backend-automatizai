@@ -1,5 +1,15 @@
 const pool = require("../db");
 
+// company_opening_hours.weekday usa a convenção do portal (1=segunda … 7=domingo),
+// enquanto Date.getDay() usa 0=domingo … 6=sábado. Segunda–sábado coincidem (1–6);
+// só o domingo diverge (getDay()=0 vs weekday=7). Casa o dia atual de forma robusta
+// às duas convenções — antes o painel mostrava a loja FECHADA aos domingos.
+const _isTodayWeekday = (rowWeekday, jsDay) => {
+  const wd = Number(rowWeekday);
+  if (jsDay === 0) return wd === 0 || wd === 7; // domingo
+  return wd === jsDay; // segunda(1) … sábado(6)
+};
+
 // Lateral join that resolves the latest status from order_status_history.
 // Orders without history are treated as status 1 (AGUARDANDO).
 const STATUS_JOIN = `
@@ -341,7 +351,7 @@ const getDashboard = async (companyId) => {
   const mm = String(now.getMinutes()).padStart(2, "0");
   const ss = String(now.getSeconds()).padStart(2, "0");
   const currentTime = `${hh}:${mm}:${ss}`;
-  const todayHours = openingHoursResult.rows.find((h) => h.weekday === weekday);
+  const todayHours = openingHoursResult.rows.find((h) => _isTodayWeekday(h.weekday, weekday));
   let scheduleOpen = false;
   if (todayHours && !todayHours.is_closed && todayHours.opens_at && todayHours.closes_at) {
     scheduleOpen = currentTime >= todayHours.opens_at && currentTime <= todayHours.closes_at;

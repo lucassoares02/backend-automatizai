@@ -16,6 +16,17 @@ const toNumber = (value) => {
   return Number.isFinite(n) ? n : null;
 };
 
+// company_opening_hours.weekday segue a convenção do portal: 1=segunda … 7=domingo.
+// JS Date.getDay() usa 0=domingo … 6=sábado. Segunda–sábado coincidem (1–6); só o
+// DOMINGO diverge (getDay()=0 vs weekday=7). Este helper casa a linha do dia atual
+// de forma robusta às duas convenções (aceita domingo como 0 OU 7) — antes a loja
+// aparecia sempre FECHADA aos domingos.
+const _isTodayWeekday = (rowWeekday, jsDay) => {
+  const wd = Number(rowWeekday);
+  if (jsDay === 0) return wd === 0 || wd === 7; // domingo
+  return wd === jsDay; // segunda(1) … sábado(6)
+};
+
 const _buildAddressLine = (row) => {
   if (!row) return null;
   const parts = [];
@@ -89,7 +100,7 @@ const getCompanyPublicMenu = async (companyRef) => {
   const now = new Date();
   const weekday = now.getDay(); // 0=Sun…6=Sat
   const currentMinutes = now.getHours() * 60 + now.getMinutes();
-  const todayHours = hoursRes.rows.find((h) => h.weekday === weekday);
+  const todayHours = hoursRes.rows.find((h) => _isTodayWeekday(h.weekday, weekday));
 
   let scheduleOpen = false;
   if (todayHours && !todayHours.is_closed) {
@@ -954,7 +965,7 @@ const _isOpenNow = (hours) => {
   const now = new Date();
   const weekday = now.getDay();
   const currentMinutes = now.getHours() * 60 + now.getMinutes();
-  const today = hours.find((h) => h.weekday === weekday);
+  const today = hours.find((h) => _isTodayWeekday(h.weekday, weekday));
   if (!today || today.is_closed) return false;
   const [oh, om] = String(today.opens_at).split(":").map(Number);
   const [ch, cm] = String(today.closes_at).split(":").map(Number);
