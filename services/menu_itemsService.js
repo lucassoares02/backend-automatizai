@@ -1,7 +1,8 @@
 const pool = require("../db");
 
 const findAll = async () => {
-  const result = await pool.query("SELECT * FROM menu_items ORDER BY id");
+  // Exclui produtos removidos logicamente (soft delete).
+  const result = await pool.query("SELECT * FROM menu_items WHERE deleted_at IS NULL ORDER BY id");
   return result.rows;
 };
 
@@ -15,7 +16,7 @@ const findByCompany = async (id) => {
     `SELECT mi.*, mc.name AS category_name
      FROM menu_items mi
      LEFT JOIN menu_categories mc ON mc.id = mi.category_id
-     WHERE mi.company_id = $1
+     WHERE mi.company_id = $1 AND mi.deleted_at IS NULL
      ORDER BY
        CASE
          WHEN mi.available = false THEN 2
@@ -55,7 +56,13 @@ const update = async (data) => {
 };
 
 const remove = async (id) => {
-  const result = await pool.query("DELETE FROM menu_items WHERE id = $1 RETURNING *", [id]);
+  // Soft delete: o produto pode ter pedidos (FK em order_items), então não pode
+  // ser apagado. Marca deleted_at — some do catálogo e do cardápio, mas continua
+  // disponível para histórico/relatórios. Idempotente (só marca se ainda ativo).
+  const result = await pool.query(
+    "UPDATE menu_items SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL RETURNING *",
+    [id],
+  );
   return result.rows[0];
 };
 

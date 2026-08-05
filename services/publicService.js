@@ -118,7 +118,7 @@ const getCompanyPublicMenu = async (companyRef) => {
             ), 0) AS sales_count
      FROM menu_items mi
      LEFT JOIN menu_categories mc ON mc.id = mi.category_id
-     WHERE mi.company_id = $1 AND mi.available = true
+     WHERE mi.company_id = $1 AND mi.available = true AND mi.deleted_at IS NULL
      ORDER BY COALESCE(mc.sort_order, 9999), mc.id NULLS LAST, COALESCE(mi.display_order, mi.id)`,
     [companyId],
   );
@@ -973,10 +973,10 @@ const listPublicRestaurants = async () => {
             (SELECT COALESCE(SUM(o.total), 0)::float FROM orders o
               WHERE o.company_id = c.id AND o.status NOT IN (6, 7)) AS revenue_total,
             (SELECT ROUND(AVG(mi.prep_time_minutes))::int FROM menu_items mi
-              WHERE mi.company_id = c.id AND mi.available = true
+              WHERE mi.company_id = c.id AND mi.available = true AND mi.deleted_at IS NULL
                 AND mi.prep_time_minutes IS NOT NULL AND mi.prep_time_minutes > 0) AS avg_prep_minutes,
             (SELECT COUNT(*)::int FROM menu_items mi
-              WHERE mi.company_id = c.id AND mi.available = true) AS items_count,
+              WHERE mi.company_id = c.id AND mi.available = true AND mi.deleted_at IS NULL) AS items_count,
             (SELECT cp.min_price_order FROM company_preferences cp
               WHERE cp.company_id = c.id ORDER BY cp.id DESC LIMIT 1) AS min_price_order,
             (SELECT cp.min_tax_delivery FROM company_preferences cp
@@ -985,7 +985,7 @@ const listPublicRestaurants = async () => {
               WHERE p.company_id = c.id AND p.active = true) AS has_promotions
      FROM companies c
      WHERE EXISTS (SELECT 1 FROM menu_items mi
-                   WHERE mi.company_id = c.id AND mi.available = true)
+                   WHERE mi.company_id = c.id AND mi.available = true AND mi.deleted_at IS NULL)
      ORDER BY orders_count DESC, revenue_total DESC, c.id DESC`,
   );
   const restaurants = restaurantsRes.rows;
@@ -1022,7 +1022,7 @@ const listPublicRestaurants = async () => {
      JOIN companies c ON c.id = p.company_id
      WHERE p.active = true
        AND EXISTS (SELECT 1 FROM menu_items mi
-                   WHERE mi.company_id = p.company_id AND mi.available = true)
+                   WHERE mi.company_id = p.company_id AND mi.available = true AND mi.deleted_at IS NULL)
      ORDER BY p.updated_at DESC NULLS LAST, p.id DESC
      LIMIT 12`,
   );

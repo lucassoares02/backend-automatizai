@@ -304,6 +304,7 @@ const _pickProductForCategory = async (companyId, categoryId, excludedSet) => {
      WHERE mi.company_id = $1
        AND mi.category_id = $2
        AND COALESCE(mi.available, true) = true
+       AND mi.deleted_at IS NULL
      ORDER BY mi.featured DESC, mi.price ASC, mi.id ASC`,
     [companyId, categoryId],
   );
