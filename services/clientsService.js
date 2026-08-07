@@ -1,4 +1,5 @@
 const pool = require("../db");
+const identityService = require("./identityService");
 
 const findAllWithStats = async (companyId, search = "", filter = "all") => {
   const searchParam = search.trim() ? `%${search.trim()}%` : "";
@@ -133,24 +134,82 @@ const find = async (id) => {
   return result.rows[0] || null;
 };
 
-const create = async ({ company_id, name, phone, street, number, complement, neighborhood, city, state, zip_code, note }) => {
-  const result = await pool.query(
-    `INSERT INTO clients (company_id, name, phone, street, number, complement, neighborhood, city, state, zip_code, note)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
-    [company_id, name, phone ?? null, street ?? null, number ?? null, complement ?? null, neighborhood ?? null, city ?? null, state ?? null, zip_code ?? null, note ?? null],
-  );
-  return result.rows[0];
+const create = async (data) => {
+  const { company_id, name, phone } = data;
+
+  // Sem telefone não há como resolver identidade → client "solto" (user_id NULL).
+  // A constraint parcial uq_client_company_user ignora user_id NULL, então é permitido.
+  // Endereço NÃO mora mais em clients (removido na FASE E); vive em user_addresses.
+  if (!phone) {
+    const result = await pool.query(
+      `INSERT INTO clients (company_id, name, phone, note)
+       VALUES ($1, $2, NULL, $3) RETURNING *`,
+      [company_id, name ?? "Cliente", data.note ?? null],
+    );
+    return result.rows[0];
+  }
+
+  // Resolve/cria a identidade global e o client (company_id, user_id) — o mesmo
+  // ponto único usado pelo fluxo público. Se já existir client para essa
+  // identidade na empresa, ele é REUTILIZADO (não duplica).
+  const { client } = await identityService.resolveClientByPhone({
+    companyId: Number(company_id),
+    phone: String(phone),
+    name: name ? String(name) : null,
+  });
+
+  // Aplica os demais campos informados pelo admin sobre o client resolvido.
+  return await update({ id: client.id, ...data });
 };
 
-const update = async ({ id, name, phone, street, number, complement, neighborhood, city, state, zip_code, note }) => {
+const update = async ({ id, name, phone, note }) => {
+  // Endereço saiu de clients (FASE E) → só nome/telefone/nota aqui.
   const result = await pool.query(
     `UPDATE clients
-     SET name = $2, phone = $3, street = $4, number = $5, complement = $6,
-         neighborhood = $7, city = $8, state = $9, zip_code = $10, note = $11, updated_at = NOW()
+     SET name = $2, phone = $3, note = $4, updated_at = NOW()
      WHERE id = $1 RETURNING *`,
-    [id, name, phone ?? null, street ?? null, number ?? null, complement ?? null, neighborhood ?? null, city ?? null, state ?? null, zip_code ?? null, note ?? null],
+    [id, name, phone ?? null, note ?? null],
   );
-  return result.rows[0];
+  const row = result.rows[0];
+  if (!row) return row;
+
+  // Garante o vínculo de identidade quando há telefone. Só grava user_id se NÃO
+  // colidir com a unique (company_id, user_id) — se outro client ativo da empresa
+  // já tiver essa identidade, mantém como está (caso de borda do admin).
+  if (phone) {
+    try {
+      const db = await pool.connect();
+      try {
+        await db.query("BEGIN");
+        const { userId } = await identityService.resolveUserByPhone(db, String(phone), { name });
+        await db.query(
+          `UPDATE clients c
+             SET user_id = $2
+           WHERE c.id = $1
+             AND c.user_id IS DISTINCT FROM $2
+             AND NOT EXISTS (
+               SELECT 1 FROM clients c2
+               WHERE c2.company_id = c.company_id AND c2.user_id = $2
+                 AND c2.id <> c.id AND c2.deactivated_at IS NULL
+             )`,
+          [id, userId],
+        );
+        await db.query("COMMIT");
+      } catch (e) {
+        await db.query("ROLLBACK");
+        throw e;
+      } finally {
+        db.release();
+      }
+    } catch (e) {
+      // Telefone inválido ou colisão: não bloqueia o update do cadastro.
+      console.error("clients.update: falha ao vincular identidade:", e.message);
+    }
+    const fresh = await pool.query("SELECT * FROM clients WHERE id = $1", [id]);
+    return fresh.rows[0] || row;
+  }
+
+  return row;
 };
 
 const remove = async (id) => {

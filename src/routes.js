@@ -38,6 +38,7 @@ const deliveryDrivers = require("../controllers/deliveryDriversController");
 const stripe = require("../controllers/stripeController");
 const pagarme = require("../controllers/pagarmeController");
 const n8n = require("../controllers/n8nController");
+const identity = require("../controllers/identityController");
 
 // ─── Rate limiters ───────────────────────────────────────────────────────────
 // Estritos para autenticação/abuso; generosos para o fluxo público de pedidos
@@ -245,6 +246,15 @@ router.get("/search-analytics/no-results/:companyId", authMiddleware, authorizeC
 // address (Google Places autocomplete/details — público, rate-limited p/ proteger cota)
 router.get("/address/autocomplete", googleLimiter, address.autocomplete);
 router.get("/address/details/:placeId", googleLimiter, address.details);
+
+// ─── Identidade de cliente (camada global) ────────────────────────────────────
+// Resolução de identidade para o n8n (aceita service key `x-api-key` via authMiddleware).
+router.post("/identity/resolve", authMiddleware, identity.resolve);
+// Endereços salvos do usuário (público — prova de posse via telefone, rate-limited).
+router.get("/public/addresses", publicLimiter, identity.listAddresses);
+router.post("/public/addresses", publicLimiter, identity.createAddress);
+router.patch("/public/addresses/:id", publicLimiter, identity.updateAddress);
+router.delete("/public/addresses/:id", publicLimiter, identity.deleteAddress);
 
 // order messages (public — phone-verified)
 router.get("/public/orders/:orderId/messages", publicLimiter, orderMessages.publicList);

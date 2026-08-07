@@ -6,6 +6,8 @@ const stripeService = require("./stripeService");
 const pagarmeService = require("./pagarmeService");
 const ordersService = require("./ordersService");
 const campaignsService = require("./campaignsService");
+const identityService = require("./identityService");
+const { normalizePhone } = require("../helpers/phone");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 
 const MAPS_KEY = process.env.GOOGLE_API_KEY;
@@ -407,62 +409,77 @@ const calculatePublicDeliveryFee = async ({ company_id, destination_lat, destina
   };
 };
 
+// Busca o client da empresa por telefone, comparando pela forma CANÔNICA
+// (55+DDD+número) — assim "27998219176" e "5527998219176" batem no mesmo cadastro.
 const findClientByPhone = async (phone, companyId) => {
-  const result = await pool.query("SELECT * FROM clients WHERE phone = $1 AND company_id = $2 LIMIT 1", [phone, companyId]);
+  const norm = normalizePhone(phone);
+  if (!norm) {
+    // Telefone fora do padrão: cai no match exato (retrocompatível).
+    const r = await pool.query(
+      "SELECT * FROM clients WHERE phone = $1 AND company_id = $2 AND deactivated_at IS NULL LIMIT 1",
+      [phone, companyId],
+    );
+    return r.rows[0] || null;
+  }
+  const result = await pool.query(
+    `SELECT * FROM clients
+     WHERE company_id = $2 AND deactivated_at IS NULL
+       AND normalize_phone(phone) = $1
+     ORDER BY id ASC LIMIT 1`,
+    [norm, companyId],
+  );
   return result.rows[0] || null;
 };
 
-const createPublicClient = async ({ company_id, name, phone, street, number, complement, neighborhood, city, state, zip_code }) => {
-  if (phone) {
-    const existing = await findClientByPhone(phone, company_id);
-    if (existing) return existing;
+// Cadastro no fluxo público: NÃO cria mais um client por endereço.
+// Resolve a identidade global pelo telefone e devolve o client (company_id, user_id)
+// — criando-o só se ainda não existir. O endereço, quando enviado, é salvo na
+// camada global (user_addresses), nunca em clients.
+const createPublicClient = async ({ company_id, name, phone, street, number, complement, neighborhood, city, state, zip_code, latitude, longitude }) => {
+  if (!phone) {
+    // Sem telefone não há como resolver identidade; mantém client "solto" (raro).
+    const r = await pool.query(
+      `INSERT INTO clients (company_id, name, phone) VALUES ($1, $2, NULL) RETURNING *`,
+      [company_id, name ?? "Cliente"],
+    );
+    return r.rows[0];
   }
-  const result = await pool.query(
-    `INSERT INTO clients (company_id, name, phone, street, number, complement, neighborhood, city, state, zip_code)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-    [
-      company_id,
-      name,
-      phone ?? null,
-      street ?? null,
-      number ?? null,
-      complement ?? null,
-      neighborhood ?? null,
-      city ?? null,
-      state ?? null,
-      zip_code ?? null,
-    ],
-  );
-  return result.rows[0];
+
+  const { client, userId } = await identityService.resolveClientByPhone({
+    companyId: Number(company_id),
+    phone: String(phone),
+    name: name ? String(name) : null,
+  });
+
+  // Se veio endereço junto do cadastro, persiste como endereço salvo do usuário.
+  if (street) {
+    try {
+      await identityService.createAddress(userId, {
+        label: "Casa", street, number, complement, neighborhood,
+        city, state, zip: zip_code, latitude, longitude,
+      });
+    } catch (e) {
+      console.error("createPublicClient: falha ao salvar endereço do usuário:", e.message);
+    }
+  }
+  return client;
 };
 
-const updatePublicClient = async ({ id, name, phone, street, number, complement, neighborhood, city, state, zip_code }) => {
+const updatePublicClient = async ({ id, name, phone }) => {
   // Prova de posse: o cliente só pode editar o próprio cadastro provando conhecer
   // o telefone atualmente registrado (o app público sempre envia o telefone do
   // próprio cliente). Impede IDOR — editar o cadastro de outro cliente por id.
+  // Endereço saiu de clients (FASE E) → é gerido por /public/addresses (user_addresses).
   const normalized = _normalizePhone(phone);
   if (!normalized) return { _forbidden: true };
 
   const result = await pool.query(
     `UPDATE clients
-     SET name = $2, phone = $3, street = $4, number = $5, complement = $6,
-         neighborhood = $7, city = $8, state = $9, zip_code = $10, updated_at = NOW()
+     SET name = $2, phone = $3, updated_at = NOW()
      WHERE id = $1
-       AND REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g') = $11
+       AND REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g') = $4
      RETURNING *`,
-    [
-      id,
-      name,
-      phone ?? null,
-      street ?? null,
-      number ?? null,
-      complement ?? null,
-      neighborhood ?? null,
-      city ?? null,
-      state ?? null,
-      zip_code ?? null,
-      normalized,
-    ],
+    [id, name, phone ?? null, normalized],
   );
   // Nenhuma linha → id inexistente OU telefone não confere (acesso negado).
   if (!result.rows[0]) return { _forbidden: true };
