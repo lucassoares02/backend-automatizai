@@ -80,7 +80,8 @@ const _haversineKm = (lat1, lng1, lat2, lng2) => {
 // ─── Compatibilidade de schema ───────────────────────────────────────────────
 // As colunas orders.delivery_lat/delivery_lng vêm de uma migration anterior
 // ("orders — Coordenadas de entrega" no DB_CHANGES_NEEDED.md) que pode não
-// estar aplicada. Detecta uma vez e degrada para clients.latitude/longitude.
+// estar aplicada. Detecta uma vez; sem elas, geocodifica delivery_address a cada
+// carga (sem cache) — não há mais fallback em clients (endereço migrou p/ user_addresses).
 let _ordersHasCoordColumns = null;
 
 const _checkOrdersCoordColumns = async () => {
@@ -111,10 +112,7 @@ const _selectInRouteOrders = async (companyId, orderIds = null) => {
             ${coordFields} o.estimated_delivery_minutes,
             c.id    AS client_id,
             c.name  AS client_name,
-            c.phone AS client_phone,
-            c.neighborhood,
-            c.latitude  AS client_lat,
-            c.longitude AS client_lng
+            c.phone AS client_phone
      FROM orders o
      JOIN clients c ON c.id = o.client_id
      WHERE o.company_id = $1
@@ -127,12 +125,13 @@ const _selectInRouteOrders = async (companyId, orderIds = null) => {
   return result.rows || [];
 };
 
-// Resolve coordenadas do pedido: snapshot do pedido → cliente → geocode do
-// endereço textual. O geocode é persistido em orders.delivery_lat/lng quando
-// as colunas existem; senão, em clients.latitude/longitude (fallback).
+// Resolve coordenadas do pedido a partir do snapshot orders.delivery_address
+// (o endereço não vive mais em clients — migrou para user_addresses). Usa
+// orders.delivery_lat/lng quando as colunas existem; senão, geocodifica o texto.
+// O geocode é persistido em orders.delivery_lat/lng só se essas colunas existirem.
 const _resolveOrderCoords = async (row) => {
-  let lat = toNumber(row.delivery_lat) ?? toNumber(row.client_lat);
-  let lng = toNumber(row.delivery_lng) ?? toNumber(row.client_lng);
+  let lat = toNumber(row.delivery_lat);
+  let lng = toNumber(row.delivery_lng);
   if ((lat === null || lng === null) && row.delivery_address) {
     const geo = await _geocodeAddress(row.delivery_address);
     if (geo) {
@@ -141,8 +140,6 @@ const _resolveOrderCoords = async (row) => {
       try {
         if (await _checkOrdersCoordColumns()) {
           await pool.query(`UPDATE orders SET delivery_lat = $1, delivery_lng = $2 WHERE id = $3`, [lat, lng, row.id]);
-        } else if (row.client_id) {
-          await pool.query(`UPDATE clients SET latitude = $1, longitude = $2 WHERE id = $3`, [lat, lng, row.client_id]);
         }
       } catch (_) {
         // não-fatal
@@ -164,7 +161,7 @@ const getActiveDeliveries = async (companyId) => {
       tag: row.tag,
       client_name: row.client_name,
       client_phone: row.client_phone,
-      neighborhood: row.neighborhood,
+      neighborhood: row.neighborhood ?? null,
       delivery_address: row.delivery_address,
       total: toNumber(row.total),
       status: row.status,
