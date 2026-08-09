@@ -198,31 +198,38 @@ const _buildCustomer = (client, extra = {}) => {
   return customer;
 };
 
-// Monta o billing_address exigido pelo antifraude do Pagar.me em cobranças no
-// cartão (sem ele a cobrança nasce "failed" com
-// `validation_error | billing | "value" is required`). Como o checkout não coleta
-// endereço de cobrança do cartão, usamos o endereço cadastrado da empresa — ele
-// sempre existe para um recebedor ativo. O Pagar.me exige line_1, zip_code, city,
-// state (UF) e country; se algum faltar, retorna null e não envia billing_address.
-const _buildBillingAddress = (order) => {
-  const zip = _onlyDigits(order.addr_zip).slice(0, 8);
-  const state = String(order.addr_state || "").trim().toUpperCase().slice(0, 2);
-  const city = String(order.addr_city || "").trim().slice(0, 64);
+// Converte um conjunto de campos (rua/número/bairro/cidade/UF/CEP) no formato
+// billing_address do Pagar.me. Retorna null se faltar algum campo obrigatório
+// (line_1, zip_code, city, state) — evita enviar um endereço incompleto.
+const _toBillingAddress = ({ street, number, neighborhood, city, state, zip }) => {
+  const zipDigits = _onlyDigits(zip).slice(0, 8);
+  const uf = String(state || "").trim().toUpperCase().slice(0, 2);
+  const cityName = String(city || "").trim().slice(0, 64);
   // line_1 no formato do Pagar.me: "número, rua, bairro".
-  const line1 = [order.addr_number, order.addr_street, order.addr_neighborhood]
+  const line1 = [number, street, neighborhood]
     .map((v) => String(v || "").trim())
     .filter(Boolean)
     .join(", ");
-  // Sem os campos mínimos não há como montar um endereço válido — deixa o
-  // Pagar.me recusar com mensagem clara em vez de enviar lixo.
-  if (!zip || !state || !city || !line1) return null;
-  return {
-    line_1: line1,
-    zip_code: zip,
-    city,
-    state,
-    country: "BR",
-  };
+  if (!zipDigits || !uf || !cityName || !line1) return null;
+  return { line_1: line1, zip_code: zipDigits, city: cityName, state: uf, country: "BR" };
+};
+
+// Monta o billing_address exigido pelo antifraude do Pagar.me em cobranças no
+// cartão (sem ele a cobrança nasce "failed" com
+// `validation_error | billing | "value" is required`). Prioriza o endereço do
+// CLIENTE (endereço salvo em user_addresses, mais relevante para o antifraude) e
+// recorre ao endereço cadastrado da empresa quando o cliente não tem um endereço
+// estruturado. Retorna null se nenhum dos dois estiver completo.
+const _buildBillingAddress = (order) => {
+  const client = _toBillingAddress({
+    street: order.cli_street, number: order.cli_number, neighborhood: order.cli_neighborhood,
+    city: order.cli_city, state: order.cli_state, zip: order.cli_zip,
+  });
+  if (client) return client;
+  return _toBillingAddress({
+    street: order.addr_street, number: order.addr_number, neighborhood: order.addr_neighborhood,
+    city: order.addr_city, state: order.addr_state, zip: order.addr_zip,
+  });
 };
 
 // ─── Persistência (companies / orders) ─────────────────────────────────────────
@@ -509,7 +516,9 @@ const _loadOrderForCharge = async (orderId) => {
             c.name AS company_name, c.pagarme_recipient_id, c.pagarme_charges_enabled,
             cl.name AS client_name, cl.phone AS client_phone, cl.document AS client_document,
             ca.street AS addr_street, ca.number AS addr_number, ca.neighborhood AS addr_neighborhood,
-            ca.city AS addr_city, ca.state AS addr_state, ca.zip_code AS addr_zip
+            ca.city AS addr_city, ca.state AS addr_state, ca.zip_code AS addr_zip,
+            ua.street AS cli_street, ua.number AS cli_number, ua.neighborhood AS cli_neighborhood,
+            ua.city AS cli_city, ua.state AS cli_state, ua.zip AS cli_zip
      FROM orders o
      JOIN companies c ON c.id = o.company_id
      JOIN clients cl ON cl.id = o.client_id
@@ -520,6 +529,13 @@ const _loadOrderForCharge = async (orderId) => {
        ORDER BY id DESC
        LIMIT 1
      ) ca ON true
+     LEFT JOIN LATERAL (
+       SELECT street, number, neighborhood, city, state, zip
+       FROM user_addresses
+       WHERE user_id = cl.user_id AND deleted_at IS NULL
+       ORDER BY is_default DESC, created_at DESC
+       LIMIT 1
+     ) ua ON cl.user_id IS NOT NULL
      WHERE o.id = $1`,
     [orderId],
   );
