@@ -1,6 +1,30 @@
 const pool = require("../db");
 const { normalizePhone } = require("../helpers/phone");
 
+// user_addresses.state é varchar(2) (UF). O Google Places (/address/details)
+// devolve o nome completo do estado ("Espírito Santo"), que estoura a coluna.
+// Este helper converte nome completo -> sigla; se já vier sigla, normaliza; se
+// não reconhecer, corta em 2 (evita quebrar o insert). Sem acento e case-insensitive.
+const _UF_BY_NAME = {
+  acre: "AC", alagoas: "AL", amapa: "AP", amazonas: "AM", bahia: "BA",
+  ceara: "CE", "distrito federal": "DF", "espirito santo": "ES", goias: "GO",
+  maranhao: "MA", "mato grosso": "MT", "mato grosso do sul": "MS", "minas gerais": "MG",
+  para: "PA", paraiba: "PB", parana: "PR", pernambuco: "PE", piaui: "PI",
+  "rio de janeiro": "RJ", "rio grande do norte": "RN", "rio grande do sul": "RS",
+  rondonia: "RO", roraima: "RR", "santa catarina": "SC", "sao paulo": "SP",
+  sergipe: "SE", tocantins: "TO",
+};
+const _toUf = (state) => {
+  const raw = String(state ?? "").trim();
+  if (!raw) return null;
+  if (raw.length === 2) return raw.toUpperCase();
+  const key = raw
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "") // remove acentos
+    .toLowerCase();
+  return _UF_BY_NAME[key] || raw.slice(0, 2).toUpperCase();
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Camada de IDENTIDADE (global) — separa "quem é a pessoa" do "relacionamento
 // com um restaurante" (clients) e dos "endereços salvos" (user_addresses).
@@ -149,7 +173,7 @@ const createAddress = async (userId, data) => {
          latitude, longitude, is_default)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
       [userId, label ?? null, street, number ?? null, complement ?? null, neighborhood ?? null,
-       city ?? null, state ?? null, zip ?? null, latitude ?? null, longitude ?? null, makeDefault],
+       city ?? null, _toUf(state), zip ?? null, latitude ?? null, longitude ?? null, makeDefault],
     );
     await db.query("COMMIT");
     return r.rows[0];
@@ -180,7 +204,7 @@ const updateAddress = async (id, userId, data) => {
        WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
        RETURNING *`,
       [id, userId, label ?? null, street, number ?? null, complement ?? null, neighborhood ?? null,
-       city ?? null, state ?? null, zip ?? null, latitude ?? null, longitude ?? null,
+       city ?? null, _toUf(state), zip ?? null, latitude ?? null, longitude ?? null,
        is_default ?? null],
     );
     await db.query("COMMIT");
