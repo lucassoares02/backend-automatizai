@@ -198,6 +198,33 @@ const _buildCustomer = (client, extra = {}) => {
   return customer;
 };
 
+// Monta o billing_address exigido pelo antifraude do Pagar.me em cobranças no
+// cartão (sem ele a cobrança nasce "failed" com
+// `validation_error | billing | "value" is required`). Como o checkout não coleta
+// endereço de cobrança do cartão, usamos o endereço cadastrado da empresa — ele
+// sempre existe para um recebedor ativo. O Pagar.me exige line_1, zip_code, city,
+// state (UF) e country; se algum faltar, retorna null e não envia billing_address.
+const _buildBillingAddress = (order) => {
+  const zip = _onlyDigits(order.addr_zip).slice(0, 8);
+  const state = String(order.addr_state || "").trim().toUpperCase().slice(0, 2);
+  const city = String(order.addr_city || "").trim().slice(0, 64);
+  // line_1 no formato do Pagar.me: "número, rua, bairro".
+  const line1 = [order.addr_number, order.addr_street, order.addr_neighborhood]
+    .map((v) => String(v || "").trim())
+    .filter(Boolean)
+    .join(", ");
+  // Sem os campos mínimos não há como montar um endereço válido — deixa o
+  // Pagar.me recusar com mensagem clara em vez de enviar lixo.
+  if (!zip || !state || !city || !line1) return null;
+  return {
+    line_1: line1,
+    zip_code: zip,
+    city,
+    state,
+    country: "BR",
+  };
+};
+
 // ─── Persistência (companies / orders) ─────────────────────────────────────────
 
 const _getCompany = async (companyId) => {
@@ -480,10 +507,19 @@ const _loadOrderForCharge = async (orderId) => {
   const orderRes = await pool.query(
     `SELECT o.id, o.uuid, o.total, o.tag, o.company_id, o.client_id, o.payment_status, o.service_fee,
             c.name AS company_name, c.pagarme_recipient_id, c.pagarme_charges_enabled,
-            cl.name AS client_name, cl.phone AS client_phone, cl.document AS client_document
+            cl.name AS client_name, cl.phone AS client_phone, cl.document AS client_document,
+            ca.street AS addr_street, ca.number AS addr_number, ca.neighborhood AS addr_neighborhood,
+            ca.city AS addr_city, ca.state AS addr_state, ca.zip_code AS addr_zip
      FROM orders o
      JOIN companies c ON c.id = o.company_id
      JOIN clients cl ON cl.id = o.client_id
+     LEFT JOIN LATERAL (
+       SELECT street, number, neighborhood, city, state, zip_code
+       FROM company_addresses
+       WHERE company_id = o.company_id
+       ORDER BY id DESC
+       LIMIT 1
+     ) ca ON true
      WHERE o.id = $1`,
     [orderId],
   );
@@ -566,6 +602,7 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
   const { totalCents, split } = _computeSplit(order);
   const orderRef = order.tag || `#${order.id}`;
   const installments = Math.min(12, Math.max(1, Number(extra.installments) || 1));
+  const billingAddress = _buildBillingAddress(order);
 
   try {
     const http = getHttp();
@@ -581,6 +618,9 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
             installments,
             statement_descriptor: (order.company_name || "Loja").replace(/[^a-zA-Z0-9 ]/g, "").slice(0, 13),
             card_token: cardToken,
+            // O antifraude do Pagar.me exige billing_address no cartão; sem ele a
+            // cobrança falha com `billing | "value" is required`.
+            ...(billingAddress ? { card: { billing_address: billingAddress } } : {}),
           },
           split,
         },
