@@ -572,7 +572,7 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
     const { data } = await http.post("/orders", {
       code: String(order.id),
       customer: _buildCustomer(order, extra),
-      items: [{ amount: totalCents, description: `Pedido ${orderRef}`.slice(0, 64), quantity: 1 }],
+      items: [{ code: String(order.id), amount: totalCents, description: `Pedido ${orderRef}`.slice(0, 64), quantity: 1 }],
       payments: [
         {
           payment_method: "credit_card",
@@ -604,7 +604,13 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
       order_id: order.id,
       pagarme_order_id: data.id,
       charge_id: charge.id,
-      message: charge.last_transaction?.acquirer_message || null,
+      // Em falha, o Pagar.me costuma pôr a razão em acquirer_message; quando é
+      // rejeição de validação (ex.: "The item Code is required.") ela vem em
+      // gateway_response.errors. Surfaceamos ambas para não retornar message:null.
+      message:
+        charge.last_transaction?.acquirer_message ||
+        _formatErrors(charge.last_transaction?.gateway_response?.errors) ||
+        null,
     };
   } catch (error) {
     throw _wrap(error, "Falha ao processar o pagamento com cartão");
@@ -635,7 +641,7 @@ const createPixCharge = async (orderId, extra = {}) => {
     const { data } = await http.post("/orders", {
       code: String(order.id),
       customer,
-      items: [{ amount: totalCents, description: `Pedido ${orderRef}`.slice(0, 64), quantity: 1 }],
+      items: [{ code: String(order.id), amount: totalCents, description: `Pedido ${orderRef}`.slice(0, 64), quantity: 1 }],
       payments: [
         {
           payment_method: "pix",
