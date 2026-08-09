@@ -598,6 +598,23 @@ const _computeSplit = (order) => {
   return { totalCents, split };
 };
 
+// Salva o CPF/CNPJ informado no pagamento no cadastro do cliente (clients.document)
+// para pré-preencher em pedidos futuros. Só grava quando ainda não há documento
+// salvo — evita sobrescrever o CPF do titular por um de um pagador eventual.
+const _persistClientDocument = async (clientId, document) => {
+  const doc = _onlyDigits(document);
+  if (!clientId || (doc.length !== 11 && doc.length !== 14)) return;
+  try {
+    await pool.query(
+      `UPDATE clients SET document = $2
+       WHERE id = $1 AND (document IS NULL OR document = '')`,
+      [clientId, doc],
+    );
+  } catch (e) {
+    console.error("pagarme: falha ao salvar o documento do cliente:", e.message);
+  }
+};
+
 const _persistOrderCharge = async (orderId, pmOrderId, chargeId) => {
   await pool.query(
     `UPDATE orders
@@ -619,6 +636,8 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
   const orderRef = order.tag || `#${order.id}`;
   const installments = Math.min(12, Math.max(1, Number(extra.installments) || 1));
   const billingAddress = _buildBillingAddress(order);
+  // Persiste o CPF informado para pré-preencher nos próximos pedidos.
+  await _persistClientDocument(order.client_id, extra.document);
 
   try {
     const http = getHttp();
@@ -691,6 +710,8 @@ const createPixCharge = async (orderId, extra = {}) => {
   if (!customer.document) {
     throw Object.assign(new Error("Informe o CPF do pagador para pagar com PIX."), { status: 400 });
   }
+  // Persiste o CPF informado para pré-preencher nos próximos pedidos.
+  await _persistClientDocument(order.client_id, customer.document);
 
   try {
     const http = getHttp();
