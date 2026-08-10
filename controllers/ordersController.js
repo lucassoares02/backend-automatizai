@@ -64,6 +64,57 @@ const create = async (req, res) => {
   }
 };
 
+/**
+ * Cria (order nula) ou edita (order = id) um pedido a partir de uma lista enxuta
+ * de itens do cardápio. O preço é resolvido no servidor (menu_items + campanha).
+ * Body: { order: number|null, company_id, client_id?, items: [{ id, quantity }] }
+ * Retorna: { order_id, tag, products, total }
+ */
+const upsert = async (req, res) => {
+  const body = req.body || {};
+  const orderId = body.order ?? body.order_id ?? null;
+  if (orderId != null && (isNaN(orderId) || Number(orderId) <= 0)) {
+    return res.status(400).json({ error: "order deve ser nulo (criar) ou um id válido (editar)" });
+  }
+  if (!Array.isArray(body.items) || body.items.length === 0) {
+    return res.status(400).json({ error: "items é obrigatório e deve ter ao menos um item" });
+  }
+  try {
+    const result = await service.upsertCart({
+      order: orderId == null ? null : Number(orderId),
+      company_id: body.company_id ?? body.companyId,
+      client_id: body.client_id ?? body.clientId,
+      items: body.items,
+    });
+    return res.status(orderId == null ? 201 : 200).json(result);
+  } catch (error) {
+    console.error("Error upserting order:", error.message);
+    return res.status(error.status || 500).json({ error: error.message || "Failed to upsert order" });
+  }
+};
+
+/**
+ * Orçamento (preview): calcula os valores de uma lista de itens SEM criar/editar
+ * pedido. Não escreve no banco. Body: { company_id, items: [{ id, quantity }] }
+ * Retorna: { products, subtotal, total, items_count }
+ */
+const quote = async (req, res) => {
+  const body = req.body || {};
+  if (!Array.isArray(body.items) || body.items.length === 0) {
+    return res.status(400).json({ error: "items é obrigatório e deve ter ao menos um item" });
+  }
+  try {
+    const result = await service.quoteCart({
+      company_id: body.company_id ?? body.companyId,
+      items: body.items,
+    });
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error("Error quoting order:", error.message);
+    return res.status(error.status || 500).json({ error: error.message || "Failed to quote order" });
+  }
+};
+
 const updateStatus = async (req, res) => {
   const { id } = req.params;
   const { cancel_reason } = req.body;
@@ -95,4 +146,4 @@ const remove = async (req, res) => {
   }
 };
 
-module.exports = { findByCompany, findTodayByCompany, find, summarize, create, updateStatus, remove };
+module.exports = { findByCompany, findTodayByCompany, find, summarize, create, upsert, quote, updateStatus, remove };

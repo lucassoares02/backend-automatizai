@@ -55,6 +55,7 @@ const getCompanyPublicMenu = async (companyRef) => {
     `SELECT id, uuid, name, description, phone, status, manual_open,
             logo_url, banner_url, brand_color,
             accepts_delivery, accepts_pickup,
+            cuisine_type, dietary_restrictions, custom_dietary_restrictions,
             stripe_account_id, stripe_charges_enabled,
             pagarme_recipient_id, pagarme_charges_enabled
      FROM companies WHERE ${byUuid ? "uuid = $1" : "id = $1"}`,
@@ -115,7 +116,7 @@ const getCompanyPublicMenu = async (companyRef) => {
 
   const menuRes = await pool.query(
     `SELECT mi.id, mi.name, mi.description, mi.price, mi.image_url, mi.category_id,
-            mi.prep_time_minutes, mi.featured,
+            mi.prep_time_minutes, mi.featured, mi.dietary_restrictions,
             mc.name AS category_name, mc.sort_order AS cat_sort,
             EXISTS(
               SELECT 1 FROM product_option_groups pog

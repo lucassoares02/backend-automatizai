@@ -191,6 +191,13 @@ router.get("/orders/today/:id", authMiddleware, authorizeCompanyParam("id"), ord
 router.get("/orders/summary/:id", authMiddleware, authorizeCompanyParam("id"), orders.summarize);
 router.get("/orders/:id", authMiddleware, authorizeOrder, orders.find);
 router.post("/orders", authMiddleware, authorizeCompanyBody(), orders.create);
+// Cria/edita pedido a partir de { order, company_id, client_id?, items:[{id,quantity}] }.
+// Consumido pelo n8n (x-api-key). authorizeCompanyBody libera serviço e valida o
+// vínculo da empresa para usuários JWT.
+router.post("/orders/upsert", authMiddleware, authorizeCompanyBody(), orders.upsert);
+// Orçamento/preview: calcula os valores de { company_id, items:[{id,quantity}] }
+// sem gravar nada no banco. Mesmo esquema de auth do upsert.
+router.post("/orders/quote", authMiddleware, authorizeCompanyBody(), orders.quote);
 router.patch("/orders/:id/status", authMiddleware, authorizeOrder, orders.updateStatus);
 router.delete("/orders/:id", authMiddleware, authorizeOrder, orders.remove);
 
