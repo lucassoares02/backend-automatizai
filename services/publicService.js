@@ -9,6 +9,7 @@ const campaignsService = require("./campaignsService");
 const identityService = require("./identityService");
 const { normalizePhone } = require("../helpers/phone");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
+const { columnExists } = require("../helpers/schema");
 
 const MAPS_KEY = process.env.GOOGLE_API_KEY;
 
@@ -114,9 +115,16 @@ const getCompanyPublicMenu = async (companyRef) => {
   // Override manual (companies.manual_open): TRUE/FALSE forçam; NULL segue horário.
   const isOpen = company.manual_open === true || company.manual_open === false ? company.manual_open : scheduleOpen;
 
+  // Selos do produto: só seleciona a coluna se ela já existir (a migration em
+  // DB_CHANGES_NEEDED.md pode não ter sido aplicada). Sem ela, devolve array vazio.
+  const hasItemSelos = await columnExists("menu_items", "dietary_restrictions");
+  const selosSelect = hasItemSelos
+    ? "mi.dietary_restrictions,"
+    : "NULL::text[] AS dietary_restrictions,";
+
   const menuRes = await pool.query(
     `SELECT mi.id, mi.name, mi.description, mi.price, mi.image_url, mi.category_id,
-            mi.prep_time_minutes, mi.featured, mi.dietary_restrictions,
+            mi.prep_time_minutes, mi.featured, ${selosSelect}
             mc.name AS category_name, mc.sort_order AS cat_sort,
             EXISTS(
               SELECT 1 FROM product_option_groups pog

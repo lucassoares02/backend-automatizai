@@ -1,4 +1,5 @@
 const pool = require("../db");
+const { columnExists } = require("../helpers/schema");
 
 // Normaliza a lista de selos (restrições alimentares) do produto: só strings,
 // trim, sem vazios nem duplicatas (case-insensitive). Retorna null quando vazia
@@ -50,26 +51,34 @@ const findByCompany = async (id) => {
 
 const create = async (data) => {
   const { company_id, category_id, name, description, price, available, image_url, featured, display_order, prep_time_minutes, sku, dietary_restrictions } = data;
+  // Só grava os selos se a coluna já existir (migration em DB_CHANGES_NEEDED.md).
+  const hasSelos = await columnExists("menu_items", "dietary_restrictions");
+  const cols = ["company_id", "category_id", "name", "description", "price", "available", "image_url", "featured", "display_order", "prep_time_minutes", "sku"];
+  const vals = [company_id, category_id, name, description, price, available, image_url ?? null, featured ?? false, display_order ?? null, prep_time_minutes ?? null, sku ?? null];
+  if (hasSelos) {
+    cols.push("dietary_restrictions");
+    vals.push(normalizeDietaryRestrictions(dietary_restrictions));
+  }
+  const placeholders = vals.map((_, i) => `$${i + 1}`).join(", ");
   const result = await pool.query(
-    `INSERT INTO menu_items
-       (company_id, category_id, name, description, price, available, image_url, featured, display_order, prep_time_minutes, sku, dietary_restrictions)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-     RETURNING *`,
-    [company_id, category_id, name, description, price, available, image_url ?? null, featured ?? false, display_order ?? null, prep_time_minutes ?? null, sku ?? null, normalizeDietaryRestrictions(dietary_restrictions)],
+    `INSERT INTO menu_items (${cols.join(", ")}) VALUES (${placeholders}) RETURNING *`,
+    vals,
   );
   return result.rows[0];
 };
 
 const update = async (data) => {
   const { id, company_id, category_id, name, description, price, available, image_url, featured, display_order, prep_time_minutes, sku, dietary_restrictions } = data;
+  const hasSelos = await columnExists("menu_items", "dietary_restrictions");
+  const sets = ["company_id = $2", "category_id = $3", "name = $4", "description = $5", "price = $6", "available = $7", "image_url = $8", "featured = $9", "display_order = $10", "prep_time_minutes = $11", "sku = $12"];
+  const vals = [id, company_id, category_id, name, description, price, available, image_url ?? null, featured ?? false, display_order ?? null, prep_time_minutes ?? null, sku ?? null];
+  if (hasSelos) {
+    sets.push(`dietary_restrictions = $${vals.length + 1}`);
+    vals.push(normalizeDietaryRestrictions(dietary_restrictions));
+  }
   const result = await pool.query(
-    `UPDATE menu_items
-     SET company_id = $2, category_id = $3, name = $4, description = $5, price = $6,
-         available = $7, image_url = $8, featured = $9, display_order = $10,
-         prep_time_minutes = $11, sku = $12, dietary_restrictions = $13
-     WHERE id = $1
-     RETURNING *`,
-    [id, company_id, category_id, name, description, price, available, image_url ?? null, featured ?? false, display_order ?? null, prep_time_minutes ?? null, sku ?? null, normalizeDietaryRestrictions(dietary_restrictions)],
+    `UPDATE menu_items SET ${sets.join(", ")} WHERE id = $1 RETURNING *`,
+    vals,
   );
   return result.rows[0];
 };
