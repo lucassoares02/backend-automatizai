@@ -200,6 +200,17 @@ const replaceCompanyId = (nodes, company) => {
     if (node.parameters?.operation === "executeQuery" && node.parameters?.query) {
       node.parameters.query = node.parameters.query.replace(/c\.id\s*=\s*\d+/, `c.id = ${company}`);
     }
+    // Nó "Fields" (n8n-nodes-base.set): o parâmetro `company_id` vem fixo no
+    // template (ex.: "24"). Torna dinâmico substituindo pelo id da empresa desta
+    // instância — mesmo tratamento dado ao c.id da query acima.
+    const assignments = node.parameters?.assignments?.assignments;
+    if (Array.isArray(assignments)) {
+      for (const assignment of assignments) {
+        if (assignment && assignment.name === "company_id") {
+          assignment.value = String(company);
+        }
+      }
+    }
     return node;
   });
 };
