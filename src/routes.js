@@ -331,6 +331,9 @@ router.post("/pagarme/withdraw", authMiddleware, authorizeCompanyBody(), pagarme
 // Cliente (público, rate-limited): pagamento embutido (cartão via token / PIX).
 router.post("/public/pagarme/card", publicLimiter, pagarme.payCard);
 router.post("/public/pagarme/pix", publicLimiter, pagarme.payPix);
+// Cartões salvos do cliente (cofre Pagar.me) — prova de posse pelo telefone.
+router.get("/public/pagarme/cards", publicLimiter, pagarme.listCards);
+router.delete("/public/pagarme/cards/:id", publicLimiter, pagarme.deleteCard);
 // Webhook Pagar.me (sem auth JWT; Basic auth verificado no controller).
 router.post("/pagarme/webhook", pagarme.webhook);
 

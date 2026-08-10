@@ -1,5 +1,7 @@
 const axios = require("axios");
 const pool = require("../db");
+const identityService = require("./identityService");
+const { columnExists } = require("../helpers/schema");
 
 // ─── Cliente Pagar.me (API v5 — "Core API") ────────────────────────────────────
 // Modelo marketplace: cada empresa é um RECEBEDOR (recipient) no Pagar.me; o
@@ -179,22 +181,54 @@ const _parsePhone = (raw) => {
 
 const _onlyDigits = (v) => String(v || "").replace(/\D/g, "");
 
+// E-mail simples e válido? O antifraude penaliza fortemente e-mail de domínio
+// inexistente (o antigo `@sem-email.automatizai` derrubava toda cobrança de
+// cartão). Só aceitamos um e-mail com cara de real.
+const _isPlausibleEmail = (v) => /^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(String(v || "").trim());
+
+// Domínio real usado para sintetizar o e-mail do cliente quando ele não informa
+// um (o checkout NÃO pede e-mail). Um domínio real (arbian.com.br) evita a
+// reprovação do antifraude que acontecia com o domínio inexistente antigo.
+const SYNTHETIC_EMAIL_DOMAIN = (process.env.PAGARME_SYNTHETIC_EMAIL_DOMAIN || "arbian.com.br").replace(/^@/, "");
+
+// Gera um e-mail plausível a partir do NOME: "João da Silva" -> joao.silva@arbian.com.br.
+// Usa primeiro + último nome; um só nome vira o local-part; sem nome cai em
+// "cliente{id}". Remove acentos e caracteres inválidos de e-mail.
+const _emailFromName = (name, fallbackId) => {
+  const parts = String(name || "")
+    .normalize("NFD").replace(/[̀-ͯ]/g, "") // remove acentos
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  let local;
+  if (parts.length >= 2) local = `${parts[0]}.${parts[parts.length - 1]}`;
+  else if (parts.length === 1) local = parts[0];
+  else local = `cliente${fallbackId || ""}`;
+  return `${local}@${SYNTHETIC_EMAIL_DOMAIN}`;
+};
+
 // Monta o objeto customer do pedido a partir do cliente + dados informados no
-// checkout embutido (CPF é opcional; e-mail é sintetizado quando ausente).
-const _buildCustomer = (client, extra = {}) => {
+// checkout. `billingAddress` (quando disponível) vai também em customer.address —
+// o antifraude usa o endereço do titular para pontuar a transação.
+const _buildCustomer = (client, extra = {}, billingAddress = null) => {
   // Documento informado no pagamento OU o já salvo no cadastro do cliente.
   const doc = _onlyDigits(extra.document || client.client_document || client.document);
   const phone = _parsePhone(extra.phone || client.client_phone || client.phone);
-  const emailSafe =
-    extra.email ||
-    `cliente${client.client_id || client.id || ""}@sem-email.automatizai`;
+  const rawEmail = extra.email || client.client_email || client.email;
   const customer = {
     name: (extra.name || client.client_name || client.name || "Cliente").slice(0, 64),
-    email: emailSafe,
     type: doc.length > 11 ? "company" : "individual",
   };
+  // E-mail real quando existir; senão sintetiza a partir do nome (domínio real).
+  customer.email = _isPlausibleEmail(rawEmail)
+    ? String(rawEmail).trim().toLowerCase()
+    : _emailFromName(customer.name, client.client_id || client.id);
   if (doc.length === 11 || doc.length === 14) customer.document = doc;
   if (phone) customer.phones = { mobile_phone: phone };
+  // Endereço do titular para o antifraude (mesmo shape do billing_address).
+  if (billingAddress) customer.address = billingAddress;
   return customer;
 };
 
@@ -515,6 +549,8 @@ const _loadOrderForCharge = async (orderId) => {
     `SELECT o.id, o.uuid, o.total, o.tag, o.company_id, o.client_id, o.payment_status, o.service_fee,
             c.name AS company_name, c.pagarme_recipient_id, c.pagarme_charges_enabled,
             cl.name AS client_name, cl.phone AS client_phone, cl.document AS client_document,
+            cl.user_id AS client_user_id,
+            em.value_norm AS client_email,
             ca.street AS addr_street, ca.number AS addr_number, ca.neighborhood AS addr_neighborhood,
             ca.city AS addr_city, ca.state AS addr_state, ca.zip_code AS addr_zip,
             ua.street AS cli_street, ua.number AS cli_number, ua.neighborhood AS cli_neighborhood,
@@ -522,6 +558,12 @@ const _loadOrderForCharge = async (orderId) => {
      FROM orders o
      JOIN companies c ON c.id = o.company_id
      JOIN clients cl ON cl.id = o.client_id
+     LEFT JOIN LATERAL (
+       SELECT value_norm FROM user_identifiers
+       WHERE user_id = cl.user_id AND type = 'email' AND revoked_at IS NULL
+       ORDER BY verified_at DESC NULLS LAST, last_seen_at DESC NULLS LAST, id DESC
+       LIMIT 1
+     ) em ON cl.user_id IS NOT NULL
      LEFT JOIN LATERAL (
        SELECT street, number, neighborhood, city, state, zip_code
        FROM company_addresses
@@ -624,44 +666,189 @@ const _persistOrderCharge = async (orderId, pmOrderId, chargeId) => {
   );
 };
 
+// ─── Cartão salvo (cofre Pagar.me) ───────────────────────────────────────────
+// Guardamos SÓ a referência tokenizada (card_id) — nunca número/CVV. O cartão
+// vive no cofre da Pagar.me, vinculado a um customer do usuário.
+
+// A coluna platform_users.pagarme_customer_id pode não ter sido migrada ainda.
+const _savedCardsEnabled = () => columnExists("platform_users", "pagarme_customer_id");
+
+const _getUserPagarmeCustomerId = async (userId) => {
+  if (!userId || !(await _savedCardsEnabled())) return null;
+  const r = await pool.query("SELECT pagarme_customer_id FROM platform_users WHERE id = $1", [userId]);
+  return r.rows[0]?.pagarme_customer_id || null;
+};
+
+// Garante um customer no Pagar.me para o usuário (cria e persiste se faltar).
+const _ensurePagarmeCustomer = async (userId, customerObj) => {
+  if (!userId) throw Object.assign(new Error("Cliente sem identidade para salvar o cartão."), { status: 400 });
+  if (!(await _savedCardsEnabled())) {
+    throw Object.assign(new Error("Salvar cartão indisponível (migração pendente)."), { status: 503 });
+  }
+  const existing = await _getUserPagarmeCustomerId(userId);
+  if (existing) return existing;
+  const { data } = await getHttp().post("/customers", customerObj);
+  const id = data?.id;
+  if (id) await pool.query("UPDATE platform_users SET pagarme_customer_id = $2 WHERE id = $1", [userId, id]);
+  return id;
+};
+
+// Cria o cartão no cofre e devolve { id, brand, last4 }.
+const _createVaultCard = async (customerId, cardToken, billingAddress) => {
+  const body = { token: cardToken };
+  if (billingAddress) body.billing_address = billingAddress;
+  const { data } = await getHttp().post(`/customers/${customerId}/cards`, body);
+  return { id: data.id, brand: data.brand || null, last4: data.last_four_digits || data.last_four || null };
+};
+
+// Persiste o cartão salvo (user_payment_tokens). Primeiro cartão vira default.
+const _persistSavedCard = async (userId, card) => {
+  const count = await pool.query(
+    "SELECT count(*)::int n FROM user_payment_tokens WHERE user_id = $1 AND provider = 'pagarme' AND revoked_at IS NULL",
+    [userId],
+  );
+  await pool.query(
+    `INSERT INTO user_payment_tokens (user_id, provider, token, brand, last4, is_default)
+     VALUES ($1, 'pagarme', $2, $3, $4, $5)`,
+    [userId, card.id, card.brand, card.last4, count.rows[0].n === 0],
+  );
+};
+
+// Valida que o card_id pertence ao usuário (evita usar cartão de outra pessoa).
+const _assertOwnedCard = async (userId, cardId) => {
+  const r = await pool.query(
+    "SELECT 1 FROM user_payment_tokens WHERE user_id = $1 AND token = $2 AND provider = 'pagarme' AND revoked_at IS NULL LIMIT 1",
+    [userId, cardId],
+  );
+  if (!r.rows[0]) throw Object.assign(new Error("Cartão salvo inválido."), { status: 400 });
+};
+
+const listSavedCards = async (userId) => {
+  if (!userId) return [];
+  const r = await pool.query(
+    `SELECT id, token AS card_id, brand, last4, is_default
+     FROM user_payment_tokens
+     WHERE user_id = $1 AND provider = 'pagarme' AND revoked_at IS NULL
+     ORDER BY is_default DESC, id DESC`,
+    [userId],
+  );
+  return r.rows;
+};
+
+// Revoga (soft) e tenta remover do cofre. Só age no cartão do próprio usuário.
+const deleteSavedCard = async (userId, tokenRowId) => {
+  const r = await pool.query(
+    "SELECT id, token FROM user_payment_tokens WHERE id = $1 AND user_id = $2 AND provider = 'pagarme' AND revoked_at IS NULL",
+    [tokenRowId, userId],
+  );
+  const row = r.rows[0];
+  if (!row) throw Object.assign(new Error("Cartão não encontrado."), { status: 404 });
+  await pool.query("UPDATE user_payment_tokens SET revoked_at = now() WHERE id = $1", [row.id]);
+  const customerId = await _getUserPagarmeCustomerId(userId);
+  if (customerId) {
+    try { await getHttp().delete(`/customers/${customerId}/cards/${row.token}`); } catch (_) { /* best-effort */ }
+  }
+  return { deleted: true };
+};
+
+// Versões que resolvem o usuário pelo telefone (rotas públicas). O telefone é a
+// prova de posse já usada no fluxo público.
+const listSavedCardsByPhone = async (phone) => {
+  const userId = await identityService.lookupUserIdByPhone(phone);
+  return userId ? listSavedCards(userId) : [];
+};
+
+const deleteSavedCardByPhone = async (phone, tokenRowId) => {
+  const userId = await identityService.lookupUserIdByPhone(phone);
+  if (!userId) throw Object.assign(new Error("Cartão não encontrado."), { status: 404 });
+  return deleteSavedCard(userId, tokenRowId);
+};
+
 /**
- * Cria um pedido com pagamento no CARTÃO usando o card_token gerado no cliente
- * (pagarme.js). Como o cartão é síncrono, devolve o status final da cobrança.
- * `extra` carrega dados do checkout embutido: { document, email, name, phone, installments }.
+ * Cria um pedido com pagamento no CARTÃO. Suporta 3 modos (via `extra`):
+ *  • cartão novo (card_token) — cobrança avulsa (comportamento padrão);
+ *  • cartão novo + `saveCard:true` — salva no cofre e cobra pelo card_id;
+ *  • `cardId` — cobra um cartão já salvo do usuário (sem redigitar).
+ * `extra`: { document, email, name, phone, installments, cardId, saveCard }.
  */
 const createCardCharge = async (orderId, cardToken, extra = {}) => {
-  if (!cardToken) throw Object.assign(new Error("card_token é obrigatório."), { status: 400 });
+  const cardId = extra.cardId || null;
+  const saveCard = extra.saveCard === true;
+  if (!cardToken && !cardId) {
+    throw Object.assign(new Error("card_token ou card_id é obrigatório."), { status: 400 });
+  }
   const order = await _loadOrderForCharge(orderId);
   const { totalCents, split } = _computeSplit(order);
   const orderRef = order.tag || `#${order.id}`;
   const installments = Math.min(12, Math.max(1, Number(extra.installments) || 1));
   const billingAddress = _buildBillingAddress(order);
-  // Persiste o CPF informado para pré-preencher nos próximos pedidos.
+  const userId = order.client_user_id;
+
+  // O e-mail do titular é montado no _buildCustomer (real quando existe, senão
+  // sintetizado do nome com domínio real — importante p/ o antifraude). O
+  // checkout NÃO pede e-mail.
   await _persistClientDocument(order.client_id, extra.document);
+
+  const creditCardBase = {
+    operation_type: "auth_and_capture",
+    installments,
+    statement_descriptor: (order.company_name || "Loja").replace(/[^a-zA-Z0-9 ]/g, "").slice(0, 13),
+  };
+  const items = [{ code: String(order.id), amount: totalCents, description: `Pedido ${orderRef}`.slice(0, 64), quantity: 1 }];
+  const metadata = { order_id: String(order.id), company_id: String(order.company_id) };
 
   try {
     const http = getHttp();
-    const { data } = await http.post("/orders", {
-      code: String(order.id),
-      customer: _buildCustomer(order, extra),
-      items: [{ code: String(order.id), amount: totalCents, description: `Pedido ${orderRef}`.slice(0, 64), quantity: 1 }],
-      payments: [
-        {
+
+    // Monta o payload do pedido conforme o modo (cartão salvo / salvar / avulso).
+    let orderPayload;
+    if (cardId) {
+      // Pagar com cartão SALVO — precisa do customer dono do card_id.
+      await _assertOwnedCard(userId, cardId);
+      const customerId = await _getUserPagarmeCustomerId(userId);
+      if (!customerId) throw Object.assign(new Error("Cartão salvo inválido."), { status: 400 });
+      orderPayload = {
+        code: String(order.id),
+        customer_id: customerId,
+        items,
+        payments: [{ payment_method: "credit_card", credit_card: { ...creditCardBase, card_id: cardId }, split }],
+        metadata,
+      };
+    } else if (saveCard) {
+      // Cartão NOVO + salvar: cria customer + cartão no cofre e cobra pelo card_id.
+      const customerObj = _buildCustomer(order, extra, billingAddress);
+      const customerId = await _ensurePagarmeCustomer(userId, customerObj);
+      const card = await _createVaultCard(customerId, cardToken, billingAddress);
+      await _persistSavedCard(userId, card);
+      orderPayload = {
+        code: String(order.id),
+        customer_id: customerId,
+        items,
+        payments: [{ payment_method: "credit_card", credit_card: { ...creditCardBase, card_id: card.id }, split }],
+        metadata,
+      };
+    } else {
+      // Cartão NOVO avulso (padrão): cobra direto pelo card_token.
+      orderPayload = {
+        code: String(order.id),
+        customer: _buildCustomer(order, extra, billingAddress),
+        items,
+        payments: [{
           payment_method: "credit_card",
           credit_card: {
-            operation_type: "auth_and_capture",
-            installments,
-            statement_descriptor: (order.company_name || "Loja").replace(/[^a-zA-Z0-9 ]/g, "").slice(0, 13),
+            ...creditCardBase,
             card_token: cardToken,
-            // O antifraude do Pagar.me exige billing_address no cartão; sem ele a
-            // cobrança falha com `billing | "value" is required`.
+            // O antifraude exige billing_address no cartão; sem ele a cobrança
+            // falha com `billing | "value" is required`.
             ...(billingAddress ? { card: { billing_address: billingAddress } } : {}),
           },
           split,
-        },
-      ],
-      metadata: { order_id: String(order.id), company_id: String(order.company_id) },
-    });
+        }],
+        metadata,
+      };
+    }
+
+    const { data } = await http.post("/orders", orderPayload);
 
     const charge = (data.charges && data.charges[0]) || {};
     await _persistOrderCharge(order.id, data.id, charge.id);
@@ -1049,6 +1236,8 @@ module.exports = {
   createCardCharge,
   createPixCharge,
   refundCharge,
+  listSavedCardsByPhone,
+  deleteSavedCardByPhone,
   verifyBasicAuth,
   handleWebhookEvent,
 };

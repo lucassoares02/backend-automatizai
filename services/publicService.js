@@ -421,20 +421,31 @@ const calculatePublicDeliveryFee = async ({ company_id, destination_lat, destina
 // Busca o client da empresa por telefone, comparando pela forma CANÔNICA
 // (55+DDD+número) — assim "27998219176" e "5527998219176" batem no mesmo cadastro.
 const findClientByPhone = async (phone, companyId) => {
+  // Anexa o e-mail salvo (user_identifiers) para pré-preencher no pagamento.
+  const emailJoin = `
+    LEFT JOIN LATERAL (
+      SELECT value_norm FROM user_identifiers
+      WHERE user_id = cl.user_id AND type = 'email' AND revoked_at IS NULL
+      ORDER BY verified_at DESC NULLS LAST, last_seen_at DESC NULLS LAST, id DESC
+      LIMIT 1
+    ) em ON cl.user_id IS NOT NULL`;
   const norm = normalizePhone(phone);
   if (!norm) {
     // Telefone fora do padrão: cai no match exato (retrocompatível).
     const r = await pool.query(
-      "SELECT * FROM clients WHERE phone = $1 AND company_id = $2 AND deactivated_at IS NULL LIMIT 1",
+      `SELECT cl.*, em.value_norm AS email
+       FROM clients cl ${emailJoin}
+       WHERE cl.phone = $1 AND cl.company_id = $2 AND cl.deactivated_at IS NULL LIMIT 1`,
       [phone, companyId],
     );
     return r.rows[0] || null;
   }
   const result = await pool.query(
-    `SELECT * FROM clients
-     WHERE company_id = $2 AND deactivated_at IS NULL
-       AND normalize_phone(phone) = $1
-     ORDER BY id ASC LIMIT 1`,
+    `SELECT cl.*, em.value_norm AS email
+     FROM clients cl ${emailJoin}
+     WHERE cl.company_id = $2 AND cl.deactivated_at IS NULL
+       AND normalize_phone(cl.phone) = $1
+     ORDER BY cl.id ASC LIMIT 1`,
     [norm, companyId],
   );
   return result.rows[0] || null;

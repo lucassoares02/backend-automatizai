@@ -145,11 +145,12 @@ const withdraw = async (req, res) => {
 const payCard = async (req, res) => {
   const orderId = req.body?.order_id ?? req.body?.orderId;
   const cardToken = req.body?.card_token;
+  const cardId = req.body?.card_id;
   if (!orderId || isNaN(orderId)) {
     return res.status(400).json({ error: "order_id é obrigatório" });
   }
-  if (!cardToken) {
-    return res.status(400).json({ error: "card_token é obrigatório" });
+  if (!cardToken && !cardId) {
+    return res.status(400).json({ error: "card_token ou card_id é obrigatório" });
   }
   try {
     const result = await service.createCardCharge(Number(orderId), cardToken, {
@@ -158,11 +159,47 @@ const payCard = async (req, res) => {
       name: req.body?.name,
       phone: req.body?.phone,
       installments: req.body?.installments,
+      cardId,
+      saveCard: req.body?.save_card === true,
     });
     return res.status(200).json(result);
   } catch (error) {
     console.error("Pagar.me card error:", error.message);
     return res.status(error.status || 500).json({ error: error.message || "Falha ao processar o pagamento" });
+  }
+};
+
+/**
+ * Lista os cartões salvos do cliente (prova de posse pelo telefone).
+ * Query: ?phone=...
+ */
+const listCards = async (req, res) => {
+  const phone = req.query?.phone;
+  if (!phone) return res.status(400).json({ error: "phone é obrigatório" });
+  try {
+    const cards = await service.listSavedCardsByPhone(String(phone));
+    return res.status(200).json(cards);
+  } catch (error) {
+    console.error("Pagar.me listCards error:", error.message);
+    return res.status(error.status || 500).json({ error: error.message || "Falha ao listar cartões" });
+  }
+};
+
+/**
+ * Remove um cartão salvo do cliente. Param :id (linha em user_payment_tokens);
+ * body.phone comprova a posse.
+ */
+const deleteCard = async (req, res) => {
+  const id = req.params?.id;
+  const phone = req.body?.phone ?? req.query?.phone;
+  if (!id || isNaN(id)) return res.status(400).json({ error: "id inválido" });
+  if (!phone) return res.status(400).json({ error: "phone é obrigatório" });
+  try {
+    const result = await service.deleteSavedCardByPhone(String(phone), Number(id));
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error("Pagar.me deleteCard error:", error.message);
+    return res.status(error.status || 500).json({ error: error.message || "Falha ao remover cartão" });
   }
 };
 
@@ -220,4 +257,4 @@ const webhook = async (req, res) => {
   }
 };
 
-module.exports = { connect, kyc, status, recipient, payments, balance, withdraw, payCard, payPix, webhook };
+module.exports = { connect, kyc, status, recipient, payments, balance, withdraw, payCard, payPix, listCards, deleteCard, webhook };
