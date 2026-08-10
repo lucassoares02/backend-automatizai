@@ -3,13 +3,24 @@ const pool = require("../db");
 // Cache de existência de colunas — tolera migrations ainda NÃO aplicadas
 // manualmente (ex.: `menu_items.dietary_restrictions` antes da FASE do
 // DB_CHANGES_NEEDED.md). Assim uma coluna nova referenciada no código não
-// quebra as queries em produção enquanto o ALTER não roda; quando a coluna
-// passar a existir, basta reiniciar o processo para o cache refletir.
-const _cache = new Map();
+// quebra as queries em produção enquanto o ALTER não roda.
+//
+// IMPORTANTE — assimetria de cache:
+//   • "existe" (true)  → estado PERMANENTE: cacheia para sempre.
+//   • "não existe" (false) → estado TRANSITÓRIO: alguém pode rodar o ALTER a
+//     qualquer momento. Cacheamos só por um curto TTL e re-consultamos depois,
+//     para o código passar a usar a coluna sozinho (sem reiniciar o processo)
+//     assim que a migration for aplicada.
+const _positive = new Set(); // colunas confirmadas como existentes
+const _negativeUntil = new Map(); // coluna -> timestamp até quando "não existe" vale
+const NEGATIVE_TTL_MS = 30_000;
 
 const columnExists = async (table, column) => {
   const key = `${table}.${column}`;
-  if (_cache.has(key)) return _cache.get(key);
+  if (_positive.has(key)) return true;
+  const until = _negativeUntil.get(key);
+  if (until && Date.now() < until) return false;
+
   let exists = false;
   try {
     const r = await pool.query(
@@ -21,7 +32,13 @@ const columnExists = async (table, column) => {
   } catch (_) {
     exists = false;
   }
-  _cache.set(key, exists);
+
+  if (exists) {
+    _positive.add(key);
+    _negativeUntil.delete(key);
+  } else {
+    _negativeUntil.set(key, Date.now() + NEGATIVE_TTL_MS);
+  }
   return exists;
 };
 
