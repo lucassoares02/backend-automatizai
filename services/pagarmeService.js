@@ -809,6 +809,20 @@ const _ensurePagarmeCustomer = async (userId, customerObj) => {
   return id;
 };
 
+// Atualiza o cadastro de um customer existente na Pagar.me (PUT /customers/{id}).
+// Usado quando o cliente informa um e-mail novo e a cobrança reutiliza o
+// customer_id (nesse caso o customer inline com o e-mail não é enviado). Enviamos
+// o customer COMPLETO (com o e-mail novo) para não perder os demais dados.
+// Best-effort: nunca derruba a cobrança.
+const _updatePagarmeCustomer = async (customerId, customerObj) => {
+  if (!customerId || !customerObj) return;
+  try {
+    await getHttp().put(`/customers/${customerId}`, customerObj);
+  } catch (e) {
+    console.error("pagarme: falha ao atualizar o cadastro do customer:", e.message);
+  }
+};
+
 // Cria o cartão no cofre e devolve { id, brand, last4 }.
 // `verify_card: false` — NÃO faz o Zero-Dollar-Auth de verificação (que retorna
 // 412 "Could not create credit card. The card verification failed." quando o
@@ -921,6 +935,11 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
   // sob o MESMO cadastro). Se ainda não houver, manda o customer inline e salva o
   // id que a Pagar.me retornar (após criar o pedido).
   const existingCustomerId = await _getUserPagarmeCustomerId(userId);
+  // Se o cliente DIGITOU um e-mail e o customer é reutilizado, atualiza o cadastro
+  // dele na Pagar.me — com customer_id o e-mail inline não seria enviado na cobrança.
+  if (existingCustomerId && _isPlausibleEmail(extra.email)) {
+    await _updatePagarmeCustomer(existingCustomerId, _buildCustomer(order, extra, billingAddress));
+  }
   const customerField = existingCustomerId
     ? { customer_id: existingCustomerId }
     : { customer: _buildCustomer(order, extra, billingAddress) };
