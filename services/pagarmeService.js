@@ -394,8 +394,44 @@ const createKycLink = async (companyId) => {
   if (!company.pagarme_recipient_id) {
     throw Object.assign(new Error("Recebedor ainda não cadastrado."), { status: 409 });
   }
+  const http = getHttp();
+
+  // Lê o estado ATUAL na Pagar.me (o status no banco pode estar defasado se o
+  // webhook ainda não chegou) e sincroniza de passagem.
+  let status = null;
   try {
-    const http = getHttp();
+    const cur = await http.get(`/recipients/${company.pagarme_recipient_id}`);
+    status = cur.data?.status || null;
+    await _saveRecipientStatus(company.pagarme_recipient_id, status);
+  } catch (error) {
+    throw _wrap(error, "Falha ao consultar o recebedor");
+  }
+
+  // O QR de verificação (prova de vida) só é liberado pela Pagar.me DEPOIS que o
+  // recebedor sai de "registration" (pré-onboarding em análise) e avança para a
+  // afiliação. Antes disso o kyc_link retorna
+  // "Recebedor não completou as etapas prévias à obtenção do QRCode".
+  const st = String(status || "").toLowerCase();
+  if (_isActiveStatus(status)) {
+    throw Object.assign(
+      new Error("Este recebedor já está ativo — a verificação de identidade não é necessária."),
+      { status: 409 },
+    );
+  }
+  if (["refused", "suspended", "blocked", "inactive"].includes(st)) {
+    throw Object.assign(
+      new Error(`O recebedor está com status "${status}" na Pagar.me. Regularize com o suporte da Pagar.me antes da verificação.`),
+      { status: 409 },
+    );
+  }
+  if (st === "registration") {
+    throw Object.assign(
+      new Error("O cadastro do recebedor ainda está em análise pela Pagar.me. A verificação de identidade é liberada assim que a análise avança (em geral, alguns minutos). Tente novamente em instantes."),
+      { status: 409 },
+    );
+  }
+
+  try {
     const r = await http.post(`/recipients/${company.pagarme_recipient_id}/kyc_link`, {});
     return {
       url: r.data?.url || null,
@@ -403,6 +439,15 @@ const createKycLink = async (companyId) => {
       expires_at: r.data?.expires_at || null,
     };
   } catch (error) {
+    // Se mesmo assim a Pagar.me disser que faltam etapas prévias, traduz o erro
+    // cru para uma mensagem clara (em vez de "…obtenção do QRCode").
+    const raw = String(error?.response?.data?.message || _formatErrors(error?.response?.data?.errors) || "");
+    if (/etapas\s+pr[ée]vias|qr\s*code/i.test(raw)) {
+      throw Object.assign(
+        new Error("A Pagar.me ainda não liberou a verificação de identidade deste recebedor (cadastro em análise). Tente novamente em alguns minutos."),
+        { status: 409 },
+      );
+    }
     throw _wrap(error, "Falha ao gerar o link de verificação");
   }
 };
@@ -546,7 +591,7 @@ const requestWithdrawal = async (companyId, amount) => {
 // Carrega o pedido + empresa + cliente e valida que o recebedor está ativo.
 const _loadOrderForCharge = async (orderId) => {
   const orderRes = await pool.query(
-    `SELECT o.id, o.uuid, o.total, o.tag, o.company_id, o.client_id, o.payment_status, o.service_fee,
+    `SELECT o.id, o.uuid, o.total, o.subtotal, o.delivery_fee, o.tag, o.company_id, o.client_id, o.payment_status, o.service_fee,
             c.name AS company_name, c.pagarme_recipient_id, c.pagarme_charges_enabled,
             cl.name AS client_name, cl.phone AS client_phone, cl.document AS client_document,
             cl.user_id AS client_user_id,
@@ -657,6 +702,77 @@ const _persistClientDocument = async (clientId, document) => {
   }
 };
 
+// Salva no perfil GLOBAL do usuário (platform_users.pagarme_customer_id) o id do
+// customer que a Pagar.me retorna ao criar o pedido, para REUTILIZAR nas próximas
+// compras (tudo sob o mesmo customer). Só grava se a coluna existe e ainda está
+// vazia (não sobrescreve). Requer a migração de pagarme_customer_id.
+const _saveUserPagarmeCustomerId = async (userId, customerId) => {
+  if (!userId || !customerId || !(await _savedCardsEnabled())) return;
+  try {
+    await pool.query(
+      `UPDATE platform_users SET pagarme_customer_id = $2
+       WHERE id = $1 AND (pagarme_customer_id IS NULL OR pagarme_customer_id = '')`,
+      [userId, customerId],
+    );
+  } catch (e) {
+    console.error("pagarme: falha ao salvar o customer id do usuário:", e.message);
+  }
+};
+
+// Monta os "Itens" do pedido para a Pagar.me a partir de order_items (o que o
+// cliente pediu) + linhas de Taxa de entrega e Taxa de serviço. Cada linha vai
+// com quantity=1 e amount = subtotal da linha (em centavos) para não introduzir
+// erro de arredondamento por unidade. A SOMA das linhas DEVE bater exatamente com
+// o valor cobrado (totalCents) — reconciliamos o resto de arredondamento na última
+// linha e, em qualquer inconsistência, caímos num item único de valor = total
+// (nunca cobra valor diferente do pedido).
+const _buildPagarmeItems = async (order, totalCents) => {
+  const single = [{
+    code: String(order.id),
+    amount: totalCents,
+    description: `Pedido ${order.tag || "#" + order.id}`.slice(0, 64),
+    quantity: 1,
+  }];
+  try {
+    const r = await pool.query(
+      "SELECT menu_item_id, item_name, quantity, subtotal FROM order_items WHERE order_id = $1 ORDER BY id",
+      [order.id],
+    );
+    const lines = [];
+    for (const oi of r.rows) {
+      const cents = Math.round(Number(oi.subtotal) * 100);
+      if (!Number.isFinite(cents) || cents < 1) continue;
+      const qty = Number(oi.quantity) || 1;
+      const name = (String(oi.item_name || "Item").trim() || "Item");
+      lines.push({
+        code: String(oi.menu_item_id || order.id),
+        amount: cents,
+        description: `${qty > 1 ? qty + "x " : ""}${name}`.slice(0, 64),
+        quantity: 1,
+      });
+    }
+    const deliveryCents = Math.max(0, Math.round(Number(order.delivery_fee || 0) * 100));
+    const serviceCents = Math.max(0, Math.round(Number(order.service_fee || 0) * 100));
+    if (deliveryCents >= 1) lines.push({ code: "delivery", amount: deliveryCents, description: "Taxa de entrega", quantity: 1 });
+    if (serviceCents >= 1) lines.push({ code: "service", amount: serviceCents, description: "Taxa de serviço", quantity: 1 });
+
+    if (lines.length === 0) return single;
+
+    // Reconcilia o arredondamento na última linha (todas com quantity=1).
+    const sum = lines.reduce((s, l) => s + l.amount, 0);
+    const diff = totalCents - sum;
+    if (diff !== 0) lines[lines.length - 1].amount += diff;
+
+    const valid = lines.every((l) => Number.isInteger(l.amount) && l.amount >= 1);
+    const finalSum = lines.reduce((s, l) => s + l.amount, 0);
+    // Só usa a lista itemizada se ela for válida E somar EXATAMENTE o total.
+    return valid && finalSum === totalCents ? lines : single;
+  } catch (e) {
+    console.error("pagarme: falha ao montar itens do pedido (usando item único):", e.message);
+    return single;
+  }
+};
+
 const _persistOrderCharge = async (orderId, pmOrderId, chargeId) => {
   await pool.query(
     `UPDATE orders
@@ -694,8 +810,12 @@ const _ensurePagarmeCustomer = async (userId, customerObj) => {
 };
 
 // Cria o cartão no cofre e devolve { id, brand, last4 }.
+// `verify_card: false` — NÃO faz o Zero-Dollar-Auth de verificação (que retorna
+// 412 "Could not create credit card. The card verification failed." quando o
+// emissor recusa a validação de R$ 0). A autorização de verdade é a própria
+// cobrança logo em seguida (com o card_id).
 const _createVaultCard = async (customerId, cardToken, billingAddress) => {
-  const body = { token: cardToken };
+  const body = { token: cardToken, options: { verify_card: false } };
   if (billingAddress) body.billing_address = billingAddress;
   const { data } = await getHttp().post(`/customers/${customerId}/cards`, body);
   return { id: data.id, brand: data.brand || null, last4: data.last_four_digits || data.last_four || null };
@@ -779,7 +899,6 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
   }
   const order = await _loadOrderForCharge(orderId);
   const { totalCents, split } = _computeSplit(order);
-  const orderRef = order.tag || `#${order.id}`;
   const installments = Math.min(12, Math.max(1, Number(extra.installments) || 1));
   const billingAddress = _buildBillingAddress(order);
   const userId = order.client_user_id;
@@ -794,14 +913,44 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
     installments,
     statement_descriptor: (order.company_name || "Loja").replace(/[^a-zA-Z0-9 ]/g, "").slice(0, 13),
   };
-  const items = [{ code: String(order.id), amount: totalCents, description: `Pedido ${orderRef}`.slice(0, 64), quantity: 1 }];
+  // "Itens" do pedido enviados à Pagar.me (produtos pedidos + taxas).
+  const items = await _buildPagarmeItems(order, totalCents);
   const metadata = { order_id: String(order.id), company_id: String(order.company_id) };
+
+  // Reutiliza o customer do usuário na Pagar.me quando já existe (todas as compras
+  // sob o MESMO cadastro). Se ainda não houver, manda o customer inline e salva o
+  // id que a Pagar.me retornar (após criar o pedido).
+  const existingCustomerId = await _getUserPagarmeCustomerId(userId);
+  const customerField = existingCustomerId
+    ? { customer_id: existingCustomerId }
+    : { customer: _buildCustomer(order, extra, billingAddress) };
+
+  // Payload de cobrança avulsa (cartão novo pelo card_token) — padrão e também
+  // fallback quando salvar o cartão não está disponível.
+  const tokenChargePayload = () => ({
+    code: String(order.id),
+    ...customerField,
+    items,
+    payments: [{
+      payment_method: "credit_card",
+      credit_card: {
+        ...creditCardBase,
+        card_token: cardToken,
+        // O antifraude exige billing_address no cartão; sem ele a cobrança falha
+        // com `billing | "value" is required`.
+        ...(billingAddress ? { card: { billing_address: billingAddress } } : {}),
+      },
+      split,
+    }],
+    metadata,
+  });
 
   try {
     const http = getHttp();
 
     // Monta o payload do pedido conforme o modo (cartão salvo / salvar / avulso).
     let orderPayload;
+    let pendingSave = null; // { userId, card } — só é gravado se a cobrança for aprovada.
     if (cardId) {
       // Pagar com cartão SALVO — precisa do customer dono do card_id.
       await _assertOwnedCard(userId, cardId);
@@ -814,12 +963,13 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
         payments: [{ payment_method: "credit_card", credit_card: { ...creditCardBase, card_id: cardId }, split }],
         metadata,
       };
-    } else if (saveCard) {
-      // Cartão NOVO + salvar: cria customer + cartão no cofre e cobra pelo card_id.
-      const customerObj = _buildCustomer(order, extra, billingAddress);
-      const customerId = await _ensurePagarmeCustomer(userId, customerObj);
+    } else if (saveCard && userId && (await _savedCardsEnabled())) {
+      // Cartão NOVO + salvar: cria customer + cartão no cofre (sem zero-auth) e
+      // cobra pelo card_id. O registro em user_payment_tokens só é feito DEPOIS,
+      // se a cobrança for aprovada (não guardamos cartão de cobrança recusada).
+      const customerId = await _ensurePagarmeCustomer(userId, _buildCustomer(order, extra, billingAddress));
       const card = await _createVaultCard(customerId, cardToken, billingAddress);
-      await _persistSavedCard(userId, card);
+      pendingSave = { userId, card };
       orderPayload = {
         code: String(order.id),
         customer_id: customerId,
@@ -828,35 +978,36 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
         metadata,
       };
     } else {
-      // Cartão NOVO avulso (padrão): cobra direto pelo card_token.
-      orderPayload = {
-        code: String(order.id),
-        customer: _buildCustomer(order, extra, billingAddress),
-        items,
-        payments: [{
-          payment_method: "credit_card",
-          credit_card: {
-            ...creditCardBase,
-            card_token: cardToken,
-            // O antifraude exige billing_address no cartão; sem ele a cobrança
-            // falha com `billing | "value" is required`.
-            ...(billingAddress ? { card: { billing_address: billingAddress } } : {}),
-          },
-          split,
-        }],
-        metadata,
-      };
+      // Cartão NOVO avulso (padrão). Também cai aqui quando o cliente pediu para
+      // salvar mas o recurso não está disponível (sem identidade/migração pendente)
+      // — melhor concluir a compra do que falhar por causa do salvamento.
+      orderPayload = tokenChargePayload();
     }
 
     const { data } = await http.post("/orders", orderPayload);
+
+    // Reaproveita o customer nas próximas compras: se a Pagar.me criou um customer
+    // novo (mandamos inline), guarda o id retornado no perfil global do usuário.
+    if (!existingCustomerId && data.customer?.id) {
+      await _saveUserPagarmeCustomerId(userId, data.customer.id);
+    }
 
     const charge = (data.charges && data.charges[0]) || {};
     await _persistOrderCharge(order.id, data.id, charge.id);
 
     const status = charge.status || data.status;
     const paid = status === "paid";
-    if (paid) await _markOrderPaid(order.id, charge.id);
-    else if (status === "failed") {
+    if (paid) {
+      await _markOrderPaid(order.id, charge.id);
+      // Só registra o cartão salvo quando a cobrança foi realmente aprovada.
+      if (pendingSave) {
+        try {
+          await _persistSavedCard(pendingSave.userId, pendingSave.card);
+        } catch (e) {
+          console.error("pagarme: falha ao registrar o cartão salvo:", e.message);
+        }
+      }
+    } else if (status === "failed") {
       await pool.query("UPDATE orders SET payment_status = 'failed' WHERE id = $1", [order.id]);
     }
 
@@ -866,6 +1017,7 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
       order_id: order.id,
       pagarme_order_id: data.id,
       charge_id: charge.id,
+      card_saved: !!(pendingSave && paid),
       // Em falha, o Pagar.me costuma pôr a razão em acquirer_message; quando é
       // rejeição de validação (ex.: "The item Code is required.") ela vem em
       // gateway_response.errors. Surfaceamos ambas para não retornar message:null.
@@ -886,26 +1038,35 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
 const createPixCharge = async (orderId, extra = {}) => {
   const order = await _loadOrderForCharge(orderId);
   const { totalCents, split } = _computeSplit(order);
-  const orderRef = order.tag || `#${order.id}`;
   const expiresIn = Number(process.env.PAGARME_PIX_EXPIRES_IN || 3600);
 
   // A Pagar.me EXIGE o documento (CPF/CNPJ) do pagador para PIX. Sem ele a
   // cobrança nasce "failed" sem QR Code. Usa o CPF informado no pagamento ou o
   // já salvo no cadastro do cliente; se não houver nenhum, recusa com mensagem
   // clara (o cliente precisa informar o CPF na tela de pagamento).
-  const customer = _buildCustomer(order, extra);
+  // Enriquece o customer ao máximo (telefone do cadastro + CPF + e-mail +
+  // endereço) — também no PIX, para o cadastro reutilizado na Pagar.me ficar
+  // completo e ajudar o antifraude nas cobranças de cartão seguintes.
+  const customer = _buildCustomer(order, extra, _buildBillingAddress(order));
   if (!customer.document) {
     throw Object.assign(new Error("Informe o CPF do pagador para pagar com PIX."), { status: 400 });
   }
   // Persiste o CPF informado para pré-preencher nos próximos pedidos.
   await _persistClientDocument(order.client_id, customer.document);
 
+  const userId = order.client_user_id;
+  // Reutiliza o customer do usuário na Pagar.me quando já existe (mesmo cadastro
+  // em todas as compras); senão manda inline e guarda o id retornado abaixo.
+  const existingCustomerId = await _getUserPagarmeCustomerId(userId);
+  const customerField = existingCustomerId ? { customer_id: existingCustomerId } : { customer };
+  const items = await _buildPagarmeItems(order, totalCents);
+
   try {
     const http = getHttp();
     const { data } = await http.post("/orders", {
       code: String(order.id),
-      customer,
-      items: [{ code: String(order.id), amount: totalCents, description: `Pedido ${orderRef}`.slice(0, 64), quantity: 1 }],
+      ...customerField,
+      items,
       payments: [
         {
           payment_method: "pix",
@@ -915,6 +1076,10 @@ const createPixCharge = async (orderId, extra = {}) => {
       ],
       metadata: { order_id: String(order.id), company_id: String(order.company_id) },
     });
+
+    if (!existingCustomerId && data.customer?.id) {
+      await _saveUserPagarmeCustomerId(userId, data.customer.id);
+    }
 
     const charge = (data.charges && data.charges[0]) || {};
     const tx = charge.last_transaction || {};
