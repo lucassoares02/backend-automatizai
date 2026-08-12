@@ -400,6 +400,7 @@ const createRoute = async ({ company_id, driver_id, order_ids }) => {
         lng: s.lng,
         distance_meters: s.distance_meters,
         duration_seconds: s.duration_seconds,
+        status: STATUS_IN_ROUTE,
       })),
     };
   } catch (error) {
@@ -424,7 +425,8 @@ const listRoutes = async (companyId, { days = 7 } = {}) => {
                        'distance_meters', ro.distance_meters,
                        'duration_seconds', ro.duration_seconds,
                        'tag', o.tag,
-                       'client_name', c.name
+                       'client_name', c.name,
+                       'status', o.status
                      ) ORDER BY ro.stop_order)
               FROM delivery_route_orders ro
               JOIN orders o ON o.id = ro.order_id
