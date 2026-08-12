@@ -438,7 +438,9 @@ const findClientByPhone = async (phone, companyId) => {
     const r = await pool.query(
       `SELECT cl.*, em.value_norm AS email
        FROM clients cl ${emailJoin}
-       WHERE cl.phone = $1 AND cl.company_id = $2 AND cl.deactivated_at IS NULL LIMIT 1`,
+       WHERE cl.phone = $1 AND cl.company_id = $2 AND cl.deactivated_at IS NULL
+       ORDER BY (cl.user_id IS NOT NULL) DESC, cl.id ASC
+       LIMIT 1`,
       [phone, companyId],
     );
     return r.rows[0] || null;
@@ -448,7 +450,8 @@ const findClientByPhone = async (phone, companyId) => {
      FROM clients cl ${emailJoin}
      WHERE cl.company_id = $2 AND cl.deactivated_at IS NULL
        AND normalize_phone(cl.phone) = $1
-     ORDER BY cl.id ASC LIMIT 1`,
+     ORDER BY (cl.user_id IS NOT NULL) DESC, cl.id ASC
+     LIMIT 1`,
     [norm, companyId],
   );
   return result.rows[0] || null;

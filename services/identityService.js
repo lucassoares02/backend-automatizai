@@ -25,6 +25,13 @@ const _toUf = (state) => {
   return _UF_BY_NAME[key] || raw.slice(0, 2).toUpperCase();
 };
 
+const _normalizeEmail = (emailRaw) => {
+  const email = String(emailRaw ?? "").trim().toLowerCase();
+  // Validação intencionalmente simples: o provedor de pagamento valida o formato
+  // definitivo, mas não devemos persistir texto que não possa ser um e-mail.
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Camada de IDENTIDADE (global) — separa "quem é a pessoa" do "relacionamento
 // com um restaurante" (clients) e dos "endereços salvos" (user_addresses).
@@ -143,6 +150,57 @@ const lookupUserIdByPhone = async (phoneRaw) => {
   return r.rows[0]?.user_id ?? null;
 };
 
+// Salva o e-mail mais recente informado pelo cliente na identidade global.
+// O identificador ativo é único na plataforma: se ele pertencer a outra pessoa,
+// preservamos o cadastro atual e não deixamos isso interromper um pagamento.
+const saveEmailForUser = async (userId, emailRaw) => {
+  const email = _normalizeEmail(emailRaw);
+  if (!userId || !email) return { saved: false, email: null };
+
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+    const current = await db.query(
+      `SELECT id, user_id FROM user_identifiers
+       WHERE type = 'email' AND value_norm = $1 AND revoked_at IS NULL
+       LIMIT 1`,
+      [email],
+    );
+
+    if (current.rows[0]?.user_id && current.rows[0].user_id !== userId) {
+      await db.query("COMMIT");
+      return { saved: false, email: null, conflict: true };
+    }
+
+    if (current.rows[0]) {
+      await db.query(
+        "UPDATE user_identifiers SET last_seen_at = now() WHERE id = $1",
+        [current.rows[0].id],
+      );
+    } else {
+      // Mantém apenas um e-mail ativo para a identidade: o mais recente que o
+      // cliente confirmou durante o checkout é o usado no próximo pagamento.
+      await db.query(
+        `UPDATE user_identifiers SET revoked_at = now()
+         WHERE user_id = $1 AND type = 'email' AND revoked_at IS NULL`,
+        [userId],
+      );
+      await db.query(
+        `INSERT INTO user_identifiers (user_id, type, value_norm, last_seen_at)
+         VALUES ($1, 'email', $2, now())`,
+        [userId, email],
+      );
+    }
+    await db.query("COMMIT");
+    return { saved: true, email };
+  } catch (e) {
+    await db.query("ROLLBACK");
+    throw e;
+  } finally {
+    db.release();
+  }
+};
+
 // ─── Endereços salvos (globais, do usuário) ─────────────────────────────────
 
 const listAddresses = async (userId) => {
@@ -236,6 +294,7 @@ module.exports = {
   resolveClient,
   resolveClientByPhone,
   lookupUserIdByPhone,
+  saveEmailForUser,
   listAddresses,
   createAddress,
   updateAddress,

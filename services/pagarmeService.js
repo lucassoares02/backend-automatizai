@@ -651,6 +651,48 @@ const _loadOrderForCharge = async (orderId) => {
   return order;
 };
 
+// Pedidos de cadastros legados podem apontar para um client sem `user_id`. Sem
+// isso, o cofre não consegue saber a quem pertence o cartão. Reconstituímos a
+// identidade pelo telefone do próprio pedido e vinculamos o client quando não há
+// conflito com outro cadastro ativo da mesma empresa.
+const _ensureOrderUserId = async (order) => {
+  if (order?.client_user_id || !order?.client_phone) {
+    return order?.client_user_id || null;
+  }
+
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+    const { userId } = await identityService.resolveUserByPhone(
+      db,
+      order.client_phone,
+      { name: order.client_name },
+    );
+    await db.query(
+      `UPDATE clients c
+       SET user_id = $2, updated_at = now()
+       WHERE c.id = $1
+         AND c.user_id IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM clients c2
+           WHERE c2.company_id = c.company_id
+             AND c2.user_id = $2
+             AND c2.id <> c.id
+             AND c2.deactivated_at IS NULL
+         )`,
+      [order.client_id, userId],
+    );
+    await db.query("COMMIT");
+    return userId;
+  } catch (e) {
+    await db.query("ROLLBACK");
+    console.error("pagarme: falha ao resolver identidade do cliente:", e.message);
+    return null;
+  } finally {
+    db.release();
+  }
+};
+
 // Calcula o split (em centavos): a plataforma retém percentual sobre bens/entrega
 // + a taxa de serviço integral; o restante vai para a loja.
 const _computeSplit = (order) => {
@@ -780,6 +822,41 @@ const _persistOrderCharge = async (orderId, pmOrderId, chargeId) => {
      WHERE id = $1`,
     [orderId, pmOrderId || null, chargeId || null],
   );
+};
+
+const _cardFailureMessage = (charge) => {
+  const transaction = charge?.last_transaction || {};
+  return (
+    transaction.acquirer_message ||
+    _formatErrors(transaction.gateway_response?.errors) ||
+    _formatErrors(transaction.errors) ||
+    null
+  );
+};
+
+// A Pagar.me pode trazer a recusa antifraude em campos diferentes conforme o
+// adquirente. Só encaminhamos ao acompanhamento quando a resposta contém uma
+// indicação explícita de risco/fraude; toda recusa de cartão continua no checkout.
+const _hasAntifraudSignal = (values) => {
+  const details = values
+    .filter((value) => value != null)
+    .map((value) => (typeof value === "string" ? value : JSON.stringify(value)))
+    .join(" ")
+    .toLowerCase();
+
+  return /anti[ _-]?fraud|antifraude|fraud|fraude|risk[ _-]?(analysis|score|level)|an[aá]lise de risco/.test(details);
+};
+
+const _isAntifraudDecline = (charge) => {
+  const transaction = charge?.last_transaction || {};
+  return _hasAntifraudSignal([
+    charge?.antifraud_response,
+    charge?.antifraud,
+    transaction?.antifraud_response,
+    transaction?.antifraud,
+    transaction?.gateway_response,
+    transaction?.acquirer_message,
+  ]);
 };
 
 // ─── Cartão salvo (cofre Pagar.me) ───────────────────────────────────────────
@@ -915,12 +992,23 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
   const { totalCents, split } = _computeSplit(order);
   const installments = Math.min(12, Math.max(1, Number(extra.installments) || 1));
   const billingAddress = _buildBillingAddress(order);
-  const userId = order.client_user_id;
+  const userId = await _ensureOrderUserId(order);
+  order.client_user_id = userId;
 
   // O e-mail do titular é montado no _buildCustomer (real quando existe, senão
   // sintetizado do nome com domínio real — importante p/ o antifraude). O
   // checkout NÃO pede e-mail.
   await _persistClientDocument(order.client_id, extra.document);
+  if (userId && _isPlausibleEmail(extra.email)) {
+    try {
+      await identityService.saveEmailForUser(userId, extra.email);
+      order.client_email = String(extra.email).trim().toLowerCase();
+    } catch (e) {
+      // O e-mail melhora o cadastro e o antifraude, mas uma falha de persistência
+      // não pode impedir que o cliente tente concluir o pagamento.
+      console.error("pagarme: falha ao salvar e-mail do cliente:", e.message);
+    }
+  }
 
   const creditCardBase = {
     operation_type: "auth_and_capture",
@@ -969,7 +1057,8 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
 
     // Monta o payload do pedido conforme o modo (cartão salvo / salvar / avulso).
     let orderPayload;
-    let pendingSave = null; // { userId, card } — só é gravado se a cobrança for aprovada.
+    let pendingSave = null; // Só é gravado se a cobrança for aprovada.
+    const saveUnavailable = saveCard && (!userId || !(await _savedCardsEnabled()));
     if (cardId) {
       // Pagar com cartão SALVO — precisa do customer dono do card_id.
       await _assertOwnedCard(userId, cardId);
@@ -988,7 +1077,7 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
       // se a cobrança for aprovada (não guardamos cartão de cobrança recusada).
       const customerId = await _ensurePagarmeCustomer(userId, _buildCustomer(order, extra, billingAddress));
       const card = await _createVaultCard(customerId, cardToken, billingAddress);
-      pendingSave = { userId, card };
+      pendingSave = { userId, customerId, card };
       orderPayload = {
         code: String(order.id),
         customer_id: customerId,
@@ -1016,19 +1105,38 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
 
     const status = charge.status || data.status;
     const paid = status === "paid";
+    let cardSaved = false;
+    let cardSaveWarning = null;
     if (paid) {
       await _markOrderPaid(order.id, charge.id);
       // Só registra o cartão salvo quando a cobrança foi realmente aprovada.
       if (pendingSave) {
         try {
           await _persistSavedCard(pendingSave.userId, pendingSave.card);
+          cardSaved = true;
         } catch (e) {
           console.error("pagarme: falha ao registrar o cartão salvo:", e.message);
+          // Sem a referência local o cartão ficaria órfão no cofre e não poderia
+          // ser reutilizado. Tentamos removê-lo para manter os dois lados íntegros.
+          try {
+            await getHttp().delete(
+              `/customers/${pendingSave.customerId}/cards/${pendingSave.card.id}`,
+            );
+          } catch (_) {
+            // Best-effort: o cartão não será listado nem poderá ser usado aqui.
+          }
+          cardSaveWarning = "O pagamento foi aprovado, mas não foi possível salvar o cartão.";
         }
+      } else if (saveUnavailable) {
+        cardSaveWarning = "O pagamento foi aprovado, mas o recurso de salvar cartão está indisponível no momento.";
       }
     } else if (status === "failed") {
       await pool.query("UPDATE orders SET payment_status = 'failed' WHERE id = $1", [order.id]);
     }
+
+    const failureType = !paid && status === "failed"
+      ? (_isAntifraudDecline(charge) ? "antifraud" : "card_declined")
+      : (!paid ? "payment_pending" : null);
 
     return {
       status,
@@ -1036,16 +1144,30 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
       order_id: order.id,
       pagarme_order_id: data.id,
       charge_id: charge.id,
-      card_saved: !!(pendingSave && paid),
+      card_saved: cardSaved,
+      card_save_warning: cardSaveWarning,
+      failure_type: failureType,
+      next_action: failureType === "antifraud" ? "track_order" : "retry_payment",
       // Em falha, o Pagar.me costuma pôr a razão em acquirer_message; quando é
       // rejeição de validação (ex.: "The item Code is required.") ela vem em
       // gateway_response.errors. Surfaceamos ambas para não retornar message:null.
-      message:
-        charge.last_transaction?.acquirer_message ||
-        _formatErrors(charge.last_transaction?.gateway_response?.errors) ||
-        null,
+      message: _cardFailureMessage(charge),
     };
   } catch (error) {
+    // Alguns adquirentes devolvem a recusa antifraude como erro HTTP, sem a
+    // estrutura de charge. Mantemos o mesmo contrato de navegação nesses casos.
+    if (_hasAntifraudSignal([error?.response?.data, error?.message])) {
+      await pool.query("UPDATE orders SET payment_status = 'failed' WHERE id = $1", [order.id]);
+      const wrapped = _wrap(error, "Pagamento recusado pela análise de segurança");
+      return {
+        status: "failed",
+        paid: false,
+        order_id: order.id,
+        failure_type: "antifraud",
+        next_action: "track_order",
+        message: wrapped.message,
+      };
+    }
     throw _wrap(error, "Falha ao processar o pagamento com cartão");
   }
 };
