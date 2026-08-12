@@ -530,6 +530,78 @@ const getPublicRoute = async (token) => {
   };
 };
 
+const getPublicDriverRoutes = async (token) => {
+  if (!token || !_UUID_RE.test(String(token).trim())) return null;
+  if (!(await columnExists("delivery_routes", "public_token"))) return null;
+
+  const anchorRes = await pool.query(
+    `SELECT r.company_id, r.driver_id,
+            d.name AS driver_name,
+            comp.name AS company_name
+     FROM delivery_routes r
+     LEFT JOIN delivery_drivers d ON d.id = r.driver_id
+     LEFT JOIN companies comp ON comp.id = r.company_id
+     WHERE r.public_token = $1
+     LIMIT 1`,
+    [String(token).trim()],
+  );
+  const anchor = anchorRes.rows[0];
+  if (!anchor || !anchor.driver_id) return null;
+
+  const routesRes = await pool.query(
+    `SELECT r.id, r.public_token, r.status, r.total_distance_meters, r.total_duration_seconds,
+            r.stops_count, r.google_maps_url, r.created_at,
+            d.name AS driver_name,
+            COALESCE(COUNT(ro.order_id), 0)::int AS total_stops,
+            COALESCE(COUNT(ro.order_id) FILTER (WHERE o.status = 5), 0)::int AS delivered_count,
+            COALESCE(COUNT(ro.order_id) FILTER (WHERE o.status NOT IN (5, 6, 7, 9)), 0)::int AS pending_count,
+            COALESCE((
+              SELECT json_agg(json_build_object(
+                       'order_id', ro2.order_id,
+                       'stop_order', ro2.stop_order,
+                       'tag', o2.tag,
+                       'client_name', c2.name,
+                       'status', o2.status
+                     ) ORDER BY ro2.stop_order)
+              FROM delivery_route_orders ro2
+              JOIN orders o2 ON o2.id = ro2.order_id
+              JOIN clients c2 ON c2.id = o2.client_id
+              WHERE ro2.route_id = r.id
+            ), '[]') AS stops
+     FROM delivery_routes r
+     LEFT JOIN delivery_drivers d ON d.id = r.driver_id
+     LEFT JOIN delivery_route_orders ro ON ro.route_id = r.id
+     LEFT JOIN orders o ON o.id = ro.order_id
+     WHERE r.company_id = $1
+       AND r.driver_id = $2
+       AND r.public_token IS NOT NULL
+     GROUP BY r.id, d.name
+     ORDER BY r.created_at DESC`,
+    [anchor.company_id, anchor.driver_id],
+  );
+
+  return {
+    company_name: anchor.company_name,
+    driver_name: anchor.driver_name,
+    current_token: String(token).trim(),
+    routes: routesRes.rows.map((r) => ({
+      id: r.id,
+      token: r.public_token,
+      status: r.status,
+      driver_name: r.driver_name,
+      total_distance_meters: toNumber(r.total_distance_meters),
+      total_duration_seconds: toNumber(r.total_duration_seconds),
+      stops_count: toNumber(r.stops_count) ?? Number(r.total_stops || 0),
+      total_stops: Number(r.total_stops || 0),
+      delivered_count: Number(r.delivered_count || 0),
+      pending_count: Number(r.pending_count || 0),
+      google_maps_url: r.google_maps_url,
+      created_at: r.created_at,
+      stops: Array.isArray(r.stops) ? r.stops : [],
+    })),
+  };
+};
+
 const confirmPublicStopDelivery = async (token, orderId, comment = null) => {
   if (!token || !_UUID_RE.test(String(token).trim())) return null;
   const id = Number(orderId);
@@ -611,6 +683,7 @@ module.exports = {
   createRoute,
   listRoutes,
   getPublicRoute,
+  getPublicDriverRoutes,
   confirmPublicStopDelivery,
   returnPublicStopToRoute,
 };

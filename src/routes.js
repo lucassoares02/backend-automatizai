@@ -289,6 +289,7 @@ router.get("/public/restaurants", publicLimiter, publicCtrl.listRestaurants);
 router.get("/public/company/:companyId", publicLimiter, publicCtrl.getCompanyMenu);
 router.get("/public/delivery-fee", publicLimiter, publicCtrl.calculateDeliveryFee);
 // Página pública do motoboy (link/QR): entregas + rota + link do Maps. Sem auth.
+router.get("/public/delivery-routes/:token/driver-routes", publicLimiter, deliveries.getPublicDriverRoutes);
 router.get("/public/delivery-routes/:token", publicLimiter, deliveries.getPublicRoute);
 router.patch("/public/delivery-routes/:token/orders/:orderId/delivered", publicLimiter, deliveries.confirmPublicStopDelivery);
 router.patch("/public/delivery-routes/:token/orders/:orderId/return-to-route", publicLimiter, deliveries.returnPublicStopToRoute);

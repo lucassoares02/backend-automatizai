@@ -73,6 +73,18 @@ const getPublicRoute = async (req, res) => {
   }
 };
 
+const getPublicDriverRoutes = async (req, res) => {
+  const { token } = req.params;
+  try {
+    const data = await service.getPublicDriverRoutes(token);
+    if (!data) return res.status(404).json({ error: "Rotas não encontradas." });
+    return res.status(200).json(data);
+  } catch (error) {
+    console.error("Error fetching public driver routes:", error);
+    return res.status(500).json({ error: "Failed to fetch driver routes" });
+  }
+};
+
 const confirmPublicStopDelivery = async (req, res) => {
   const { token, orderId } = req.params;
   const { comment } = req.body || {};
@@ -111,6 +123,7 @@ module.exports = {
   createRoute,
   listRoutes,
   getPublicRoute,
+  getPublicDriverRoutes,
   confirmPublicStopDelivery,
   returnPublicStopToRoute,
 };
