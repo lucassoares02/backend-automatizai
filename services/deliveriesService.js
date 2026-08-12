@@ -1,5 +1,6 @@
 const pool = require("../db");
 const axios = require("axios");
+const { columnExists } = require("../helpers/schema");
 
 const MAPS_KEY = process.env.GOOGLE_API_KEY;
 
@@ -433,4 +434,84 @@ const listRoutes = async (companyId, { days = 7 } = {}) => {
   return result.rows || [];
 };
 
-module.exports = { getActiveDeliveries, createRoute, listRoutes };
+// ─── Rota pública do motoboy (por token, sem auth) ──────────────────────────
+// Devolve os dados que o motoboy vê ao abrir o link/QR: loja de origem, motoboy,
+// totais, link do Maps e as paradas na ORDEM otimizada com os detalhes do pedido
+// (tag, cliente, telefone, endereço, total e itens).
+const _UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const getPublicRoute = async (token) => {
+  if (!token || !_UUID_RE.test(String(token).trim())) return null;
+  // Coluna criada pela migração em DB_CHANGES_NEEDED.md — sem ela, não há links.
+  if (!(await columnExists("delivery_routes", "public_token"))) return null;
+
+  const routeRes = await pool.query(
+    `SELECT r.id, r.company_id, r.status, r.total_distance_meters, r.total_duration_seconds,
+            r.stops_count, r.origin_lat, r.origin_lng, r.overview_polyline, r.google_maps_url,
+            r.created_at,
+            d.name AS driver_name,
+            comp.name AS company_name
+     FROM delivery_routes r
+     LEFT JOIN delivery_drivers d ON d.id = r.driver_id
+     LEFT JOIN companies comp ON comp.id = r.company_id
+     WHERE r.public_token = $1
+     LIMIT 1`,
+    [String(token).trim()],
+  );
+  const route = routeRes.rows[0];
+  if (!route) return null;
+
+  // Paradas na ordem otimizada + detalhes do pedido + itens.
+  const stopsRes = await pool.query(
+    `SELECT ro.order_id, ro.stop_order, ro.lat, ro.lng, ro.distance_meters, ro.duration_seconds,
+            o.tag, o.total, o.delivery_address, o.notes, o.status,
+            c.name AS client_name, c.phone AS client_phone,
+            COALESCE((
+              SELECT json_agg(json_build_object(
+                       'name', oi.item_name,
+                       'quantity', oi.quantity
+                     ) ORDER BY oi.id)
+              FROM order_items oi WHERE oi.order_id = o.id
+            ), '[]') AS items
+     FROM delivery_route_orders ro
+     JOIN orders o ON o.id = ro.order_id
+     JOIN clients c ON c.id = o.client_id
+     WHERE ro.route_id = $1
+     ORDER BY ro.stop_order ASC`,
+    [route.id],
+  );
+
+  const stops = stopsRes.rows.map((s) => ({
+    order_id: s.order_id,
+    stop_order: s.stop_order,
+    tag: s.tag,
+    client_name: s.client_name,
+    client_phone: s.client_phone,
+    delivery_address: s.delivery_address,
+    notes: s.notes,
+    total: toNumber(s.total),
+    status: s.status,
+    lat: toNumber(s.lat),
+    lng: toNumber(s.lng),
+    distance_meters: toNumber(s.distance_meters),
+    duration_seconds: toNumber(s.duration_seconds),
+    items: Array.isArray(s.items) ? s.items : [],
+  }));
+
+  return {
+    id: route.id,
+    status: route.status,
+    company_name: route.company_name,
+    driver_name: route.driver_name,
+    total_distance_meters: toNumber(route.total_distance_meters),
+    total_duration_seconds: toNumber(route.total_duration_seconds),
+    stops_count: route.stops_count,
+    origin: { lat: toNumber(route.origin_lat), lng: toNumber(route.origin_lng) },
+    overview_polyline: route.overview_polyline,
+    google_maps_url: route.google_maps_url,
+    created_at: route.created_at,
+    stops,
+  };
+};
+
+module.exports = { getActiveDeliveries, createRoute, listRoutes, getPublicRoute };

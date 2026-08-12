@@ -60,4 +60,17 @@ const listRoutes = async (req, res) => {
   }
 };
 
-module.exports = { getActive, createRoute, listRoutes };
+// Página pública do motoboy (por token, sem auth): entregas + rota + link Maps.
+const getPublicRoute = async (req, res) => {
+  const { token } = req.params;
+  try {
+    const route = await service.getPublicRoute(token);
+    if (!route) return res.status(404).json({ error: "Rota não encontrada." });
+    return res.status(200).json(route);
+  } catch (error) {
+    console.error("Error fetching public delivery route:", error);
+    return res.status(500).json({ error: "Failed to fetch delivery route" });
+  }
+};
+
+module.exports = { getActive, createRoute, listRoutes, getPublicRoute };
