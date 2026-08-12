@@ -112,6 +112,11 @@ const _selectInRouteOrders = async (companyId, orderIds = null) => {
   const result = await pool.query(
     `SELECT o.id, o.tag, o.total, o.status, o.created_at, o.delivery_address,
             ${coordFields} o.estimated_delivery_minutes,
+            (
+              SELECT MAX(dro.route_id)
+              FROM delivery_route_orders dro
+              WHERE dro.order_id = o.id
+            ) AS assigned_route_id,
             c.id    AS client_id,
             c.name  AS client_name,
             c.phone AS client_phone
@@ -167,6 +172,7 @@ const getActiveDeliveries = async (companyId) => {
       delivery_address: row.delivery_address,
       total: toNumber(row.total),
       status: row.status,
+      assigned_route_id: toNumber(row.assigned_route_id),
       created_at: row.created_at,
       estimated_delivery_minutes: row.estimated_delivery_minutes,
       lat,
