@@ -564,4 +564,47 @@ const confirmPublicStopDelivery = async (token, orderId, comment = null) => {
   return { order_id: id, status: Number(updated.status), already_delivered: false, delivery_note: note };
 };
 
-module.exports = { getActiveDeliveries, createRoute, listRoutes, getPublicRoute, confirmPublicStopDelivery };
+const returnPublicStopToRoute = async (token, orderId) => {
+  if (!token || !_UUID_RE.test(String(token).trim())) return null;
+  const id = Number(orderId);
+  if (!Number.isInteger(id) || id <= 0) {
+    const err = new Error("Pedido inválido.");
+    err.code = "invalid_order";
+    throw err;
+  }
+  if (!(await columnExists("delivery_routes", "public_token"))) return null;
+
+  const stopRes = await pool.query(
+    `SELECT o.id, o.status
+     FROM delivery_routes r
+     JOIN delivery_route_orders ro ON ro.route_id = r.id
+     JOIN orders o ON o.id = ro.order_id
+     WHERE r.public_token = $1
+       AND ro.order_id = $2
+     LIMIT 1`,
+    [String(token).trim(), id],
+  );
+  const stop = stopRes.rows[0];
+  if (!stop) return null;
+
+  if (Number(stop.status) === STATUS_IN_ROUTE) {
+    return { order_id: id, status: STATUS_IN_ROUTE, already_in_route: true };
+  }
+  if (Number(stop.status) !== 5) {
+    const err = new Error("Somente pedidos entregues podem voltar para a rota.");
+    err.code = "invalid_status";
+    throw err;
+  }
+
+  const updated = await ordersService.updateStatus(id, STATUS_IN_ROUTE, "Entrega retornada para a rota pelo motoboy");
+  return { order_id: id, status: Number(updated.status), already_in_route: false };
+};
+
+module.exports = {
+  getActiveDeliveries,
+  createRoute,
+  listRoutes,
+  getPublicRoute,
+  confirmPublicStopDelivery,
+  returnPublicStopToRoute,
+};
