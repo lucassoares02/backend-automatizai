@@ -1,5 +1,11 @@
 const pool = require("../db");
 
+// As colunas opens_at/closes_at são NOT NULL no banco. Em dia FECHADO o front
+// envia horário null → gravamos um placeholder ('00:00:00') só para satisfazer a
+// constraint. Quem determina aberto/fechado é `is_closed`; os horários são
+// ignorados na leitura quando o dia está fechado (ver publicService).
+const _timeOrPlaceholder = (t) => (t != null && String(t).trim() !== "" ? t : "00:00:00");
+
 /**
  * Get All CompanyOpeningHours
  */
@@ -26,7 +32,7 @@ const create = async (data) => {
   const { company_id, weekday, opens_at, closes_at, is_closed } = data;
   const result = await pool.query(
     "INSERT INTO company_opening_hours (company_id, weekday, opens_at, closes_at, is_closed) VALUES ($1, $2, $3, $4, $5) RETURNING *",
-    [company_id, weekday, opens_at, closes_at, is_closed],
+    [company_id, weekday, _timeOrPlaceholder(opens_at), _timeOrPlaceholder(closes_at), is_closed],
   );
   return result.rows[0];
 };
@@ -40,7 +46,7 @@ const update = async (data) => {
   const isClosed = data.is_closed !== undefined ? data.is_closed : data.isClosed;
   const result = await pool.query(
     "UPDATE company_opening_hours SET company_id = $2, weekday = $3, opens_at = $4, closes_at = $5, is_closed = $6 WHERE id = $1 RETURNING *",
-    [id, companyId, weekday, opensAt, closesAt, isClosed],
+    [id, companyId, weekday, _timeOrPlaceholder(opensAt), _timeOrPlaceholder(closesAt), isClosed],
   );
   return result.rows[0];
 };
