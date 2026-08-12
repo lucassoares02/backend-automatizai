@@ -73,4 +73,21 @@ const getPublicRoute = async (req, res) => {
   }
 };
 
-module.exports = { getActive, createRoute, listRoutes, getPublicRoute };
+const confirmPublicStopDelivery = async (req, res) => {
+  const { token, orderId } = req.params;
+  const { comment } = req.body || {};
+  if (!orderId || isNaN(orderId)) return res.status(400).json({ error: "Invalid order ID" });
+  try {
+    const result = await service.confirmPublicStopDelivery(token, Number(orderId), comment);
+    if (!result) return res.status(404).json({ error: "Entrega não encontrada nesta rota." });
+    return res.status(200).json(result);
+  } catch (error) {
+    if (["invalid_order", "invalid_status"].includes(error.code)) {
+      return res.status(422).json({ error: error.message, code: error.code });
+    }
+    console.error("Error confirming public delivery stop:", error);
+    return res.status(500).json({ error: "Failed to confirm delivery" });
+  }
+};
+
+module.exports = { getActive, createRoute, listRoutes, getPublicRoute, confirmPublicStopDelivery };

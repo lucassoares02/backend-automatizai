@@ -290,6 +290,7 @@ router.get("/public/company/:companyId", publicLimiter, publicCtrl.getCompanyMen
 router.get("/public/delivery-fee", publicLimiter, publicCtrl.calculateDeliveryFee);
 // Página pública do motoboy (link/QR): entregas + rota + link do Maps. Sem auth.
 router.get("/public/delivery-routes/:token", publicLimiter, deliveries.getPublicRoute);
+router.patch("/public/delivery-routes/:token/orders/:orderId/delivered", publicLimiter, deliveries.confirmPublicStopDelivery);
 router.get("/public/client", publicLimiter, publicCtrl.findClientByPhone);
 router.post("/public/clients", publicLimiter, publicCtrl.createClient);
 router.patch("/public/clients/:id", publicLimiter, publicCtrl.updateClient);

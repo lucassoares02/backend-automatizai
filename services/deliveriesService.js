@@ -1,6 +1,7 @@
 const pool = require("../db");
 const axios = require("axios");
 const { columnExists } = require("../helpers/schema");
+const ordersService = require("./ordersService");
 
 const MAPS_KEY = process.env.GOOGLE_API_KEY;
 
@@ -466,6 +467,14 @@ const getPublicRoute = async (token) => {
     `SELECT ro.order_id, ro.stop_order, ro.lat, ro.lng, ro.distance_meters, ro.duration_seconds,
             o.tag, o.total, o.delivery_address, o.notes, o.status,
             c.name AS client_name, c.phone AS client_phone,
+            (
+              SELECT osh.notes
+              FROM order_status_history osh
+              WHERE osh.order_id = o.id
+                AND osh.status = '5'
+              ORDER BY osh.created_at DESC
+              LIMIT 1
+            ) AS delivery_note,
             COALESCE((
               SELECT json_agg(json_build_object(
                        'name', oi.item_name,
@@ -489,6 +498,7 @@ const getPublicRoute = async (token) => {
     client_phone: s.client_phone,
     delivery_address: s.delivery_address,
     notes: s.notes,
+    delivery_note: s.delivery_note,
     total: toNumber(s.total),
     status: s.status,
     lat: toNumber(s.lat),
@@ -514,4 +524,44 @@ const getPublicRoute = async (token) => {
   };
 };
 
-module.exports = { getActiveDeliveries, createRoute, listRoutes, getPublicRoute };
+const confirmPublicStopDelivery = async (token, orderId, comment = null) => {
+  if (!token || !_UUID_RE.test(String(token).trim())) return null;
+  const id = Number(orderId);
+  if (!Number.isInteger(id) || id <= 0) {
+    const err = new Error("Pedido inválido.");
+    err.code = "invalid_order";
+    throw err;
+  }
+  if (!(await columnExists("delivery_routes", "public_token"))) return null;
+
+  const stopRes = await pool.query(
+    `SELECT o.id, o.status
+     FROM delivery_routes r
+     JOIN delivery_route_orders ro ON ro.route_id = r.id
+     JOIN orders o ON o.id = ro.order_id
+     WHERE r.public_token = $1
+       AND ro.order_id = $2
+     LIMIT 1`,
+    [String(token).trim(), id],
+  );
+  const stop = stopRes.rows[0];
+  if (!stop) return null;
+
+  if (Number(stop.status) === 5) {
+    return { order_id: id, status: 5, already_delivered: true };
+  }
+  if ([6, 7, 9].includes(Number(stop.status))) {
+    const err = new Error("Este pedido não pode ser marcado como entregue.");
+    err.code = "invalid_status";
+    throw err;
+  }
+
+  const cleanComment = String(comment ?? "").trim().slice(0, 280);
+  const note = cleanComment
+    ? `Entrega confirmada pelo motoboy. Comentário: ${cleanComment}`
+    : "Entrega confirmada pelo motoboy";
+  const updated = await ordersService.updateStatus(id, 5, note);
+  return { order_id: id, status: Number(updated.status), already_delivered: false, delivery_note: note };
+};
+
+module.exports = { getActiveDeliveries, createRoute, listRoutes, getPublicRoute, confirmPublicStopDelivery };
