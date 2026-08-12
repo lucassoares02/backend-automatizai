@@ -497,9 +497,11 @@ const updatePublicClient = async ({ id, name, phone }) => {
     `UPDATE clients
      SET name = $2, phone = $3, updated_at = NOW()
      WHERE id = $1
-       AND REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g') = $4
+       AND normalize_phone(COALESCE(phone, '')) = $4
      RETURNING *`,
-    [id, name, phone ?? null, normalized],
+    // $3: salva o telefone canônico (com 55). $4: compara de forma canônica
+    // (funciona quer o telefone salvo esteja com ou sem 55).
+    [id, name, normalized, normalized],
   );
   // Nenhuma linha → id inexistente OU telefone não confere (acesso negado).
   if (!result.rows[0]) return { _forbidden: true };
@@ -893,7 +895,9 @@ const _PUBLIC_ORDER_SELECT = `
   LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id
 `;
 
-const _normalizePhone = (phone) => String(phone || "").replace(/\D/g, "");
+// Canoniza o telefone para E.164 BR (55 + DDD + número). Fallback para os
+// dígitos crus quando o número não é válido (evita null em comparações).
+const _normalizePhone = (phone) => normalizePhone(phone) || String(phone || "").replace(/\D/g, "");
 
 // Aceita o UUID público do pedido OU o id numérico (retrocompatível).
 const _ORDER_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -985,7 +989,7 @@ const findPublicOrdersByPhone = async ({ company_id, phone }) => {
   const result = await pool.query(
     `${_PUBLIC_ORDER_SELECT}
      WHERE o.company_id = $1
-       AND REGEXP_REPLACE(COALESCE(c.phone, ''), '\\D', '', 'g') = $2
+       AND normalize_phone(COALESCE(c.phone, '')) = $2
      ORDER BY o.created_at DESC
      LIMIT 50`,
     [company_id, normalized],

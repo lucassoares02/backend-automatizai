@@ -89,15 +89,19 @@ const resolveClient = async (db, { companyId, userId, name, phone }) => {
     [companyId, userId],
   );
   if (existing.rows[0]) {
-    // Mantém nome mais recente informado (não sobrescreve com vazio).
-    if (name && name !== existing.rows[0].name) {
+    const cur = existing.rows[0];
+    // Mantém nome mais recente informado (não sobrescreve com vazio) e canoniza
+    // o telefone salvo (garante o 55 na frente — self-heal de cadastros antigos).
+    const nextName = name && name !== cur.name ? name : cur.name;
+    const nextPhone = phone || cur.phone; // `phone` já vem normalizado (55)
+    if (nextName !== cur.name || nextPhone !== cur.phone) {
       const upd = await db.query(
-        `UPDATE clients SET name = $2, updated_at = now() WHERE id = $1 RETURNING *`,
-        [existing.rows[0].id, name],
+        `UPDATE clients SET name = $2, phone = $3, updated_at = now() WHERE id = $1 RETURNING *`,
+        [cur.id, nextName, nextPhone],
       );
       return upd.rows[0];
     }
-    return existing.rows[0];
+    return cur;
   }
 
   const created = await db.query(
@@ -115,7 +119,8 @@ const resolveClientByPhone = async ({ companyId, phone, name }) => {
   try {
     await db.query("BEGIN");
     const { userId, phoneNorm } = await resolveUserByPhone(db, phone, { name });
-    const client = await resolveClient(db, { companyId, userId, name, phone });
+    // Salva em clients.phone o telefone CANÔNICO (E.164 com 55 na frente).
+    const client = await resolveClient(db, { companyId, userId, name, phone: phoneNorm });
     await db.query("COMMIT");
     return { client, userId, phoneNorm };
   } catch (e) {
