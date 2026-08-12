@@ -52,10 +52,13 @@ const _UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
 const getCompanyPublicMenu = async (companyRef) => {
   const ref = String(companyRef).trim();
   const byUuid = _UUID_RE.test(ref);
+  // accepts_scheduling pode não ter sido migrada; sem a coluna devolve false.
+  const hasScheduling = await columnExists("companies", "accepts_scheduling");
+  const schedulingCol = hasScheduling ? "accepts_scheduling," : "false AS accepts_scheduling,";
   const companyRes = await pool.query(
     `SELECT id, uuid, name, description, phone, status, manual_open,
             logo_url, banner_url, brand_color,
-            accepts_delivery, accepts_pickup,
+            accepts_delivery, accepts_pickup, ${schedulingCol}
             cuisine_type, dietary_restrictions, custom_dietary_restrictions,
             stripe_account_id, stripe_charges_enabled,
             pagarme_recipient_id, pagarme_charges_enabled

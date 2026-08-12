@@ -1,4 +1,5 @@
 const pool = require("../db");
+const { columnExists } = require("../helpers/schema");
 
 /**
  * Normaliza a lista de restrições alimentares antes de persistir:
@@ -80,6 +81,7 @@ const update = async (data) => {
     custom_ai_personalities,
     accepts_delivery,
     accepts_pickup,
+    accepts_scheduling,
     max_distance_meters_delivery,
     kilometer_price,
     max_distance_meters_free_delivery,
@@ -90,6 +92,25 @@ const update = async (data) => {
   try {
     await client.query("BEGIN");
 
+    // Coluna accepts_scheduling pode não ter sido migrada ainda — só a inclui no
+    // UPDATE quando existe (senão a query quebraria).
+    const hasScheduling = await columnExists("companies", "accepts_scheduling");
+    const params = [
+      id, name, description, status, phone,
+      logo_url ?? null, brand_color ?? null, banner_url ?? null,
+      ai_name ?? null, ai_gender ?? null, ai_personality ?? null,
+      cuisine_type ?? null, normalizeDietaryRestrictions(dietary_restrictions),
+      normalizeDietaryRestrictions(custom_dietary_restrictions),
+      normalizeAiPersonalities(custom_ai_personalities),
+      typeof accepts_delivery === "boolean" ? accepts_delivery : null,
+      typeof accepts_pickup === "boolean" ? accepts_pickup : null,
+    ];
+    let schedulingSet = "";
+    if (hasScheduling) {
+      params.push(typeof accepts_scheduling === "boolean" ? accepts_scheduling : null);
+      schedulingSet = `, accepts_scheduling = COALESCE($${params.length}, accepts_scheduling)`;
+    }
+
     const companyRes = await client.query(
       `UPDATE companies SET
          name = $2, description = $3, status = $4, phone = $5,
@@ -99,18 +120,9 @@ const update = async (data) => {
          custom_dietary_restrictions = $14,
          custom_ai_personalities = $15,
          accepts_delivery = COALESCE($16, accepts_delivery),
-         accepts_pickup = COALESCE($17, accepts_pickup)
+         accepts_pickup = COALESCE($17, accepts_pickup)${schedulingSet}
        WHERE id = $1 RETURNING *`,
-      [
-        id, name, description, status, phone,
-        logo_url ?? null, brand_color ?? null, banner_url ?? null,
-        ai_name ?? null, ai_gender ?? null, ai_personality ?? null,
-        cuisine_type ?? null, normalizeDietaryRestrictions(dietary_restrictions),
-        normalizeDietaryRestrictions(custom_dietary_restrictions),
-        normalizeAiPersonalities(custom_ai_personalities),
-        typeof accepts_delivery === "boolean" ? accepts_delivery : null,
-        typeof accepts_pickup === "boolean" ? accepts_pickup : null,
-      ],
+      params,
     );
 
     const prefPayload = {
