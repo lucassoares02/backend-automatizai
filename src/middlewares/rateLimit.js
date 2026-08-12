@@ -14,10 +14,9 @@ setInterval(() => {
 }, 60 * 1000).unref?.();
 
 const clientKey = (req) => {
-  // Considera proxy reverso (X-Forwarded-For) quando presente.
-  const fwd = req.headers["x-forwarded-for"];
-  const ip = (fwd ? String(fwd).split(",")[0].trim() : null) || req.ip || req.socket?.remoteAddress || "unknown";
-  return ip;
+  // `req.ip` só usa X-Forwarded-For quando Express recebeu `trust proxy` de uma
+  // configuração explícita. Nunca aceite o header bruto enviado pelo cliente.
+  return req.ip || req.socket?.remoteAddress || "unknown";
 };
 
 /**

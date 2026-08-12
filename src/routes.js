@@ -46,6 +46,8 @@ const identity = require("../controllers/identityController");
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30, scope: "auth", message: "Muitas tentativas. Aguarde alguns minutos." });
 const publicLimiter = rateLimit({ windowMs: 60 * 1000, max: 300, scope: "public" });
 const googleLimiter = rateLimit({ windowMs: 60 * 1000, max: 60, scope: "google" });
+const paymentLimiter = rateLimit({ windowMs: 5 * 60 * 1000, max: 12, scope: "pagarme-payment", message: "Muitas tentativas de pagamento. Aguarde alguns minutos." });
+const paymentMethodsLimiter = rateLimit({ windowMs: 5 * 60 * 1000, max: 30, scope: "pagarme-methods", message: "Muitas tentativas. Aguarde alguns minutos." });
 
 // ─── Autorização por objeto (resolve a empresa dona via id do recurso) ─────────
 const authorizeOrder = authorizeByLookup("SELECT company_id FROM orders WHERE id = $1", "id");
@@ -334,11 +336,11 @@ router.get("/pagarme/payments/:companyId", authMiddleware, authorizeCompanyParam
 router.get("/pagarme/balance/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.balance);
 router.post("/pagarme/withdraw", authMiddleware, authorizeCompanyBody(), pagarme.withdraw);
 // Cliente (público, rate-limited): pagamento embutido (cartão via token / PIX).
-router.post("/public/pagarme/card", publicLimiter, pagarme.payCard);
-router.post("/public/pagarme/pix", publicLimiter, pagarme.payPix);
-// Cartões salvos do cliente (cofre Pagar.me) — prova de posse pelo telefone.
-router.get("/public/pagarme/cards", publicLimiter, pagarme.listCards);
-router.delete("/public/pagarme/cards/:id", publicLimiter, pagarme.deleteCard);
+router.post("/public/pagarme/card", paymentLimiter, pagarme.payCard);
+router.post("/public/pagarme/pix", paymentLimiter, pagarme.payPix);
+// Métodos salvos exigem sessão curta vinculada ao pedido; não aceitam telefone.
+router.get("/public/pagarme/cards", paymentMethodsLimiter, pagarme.listCards);
+router.delete("/public/pagarme/cards/:id", paymentMethodsLimiter, pagarme.deleteCard);
 // Webhook Pagar.me (sem auth JWT; Basic auth verificado no controller).
 router.post("/pagarme/webhook", pagarme.webhook);
 

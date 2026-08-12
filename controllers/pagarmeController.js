@@ -1,4 +1,11 @@
 const service = require("../services/pagarmeService");
+const { verifyPaymentSession, tokenFromRequest } = require("../helpers/publicPaymentSession");
+
+const _paymentSessionForOrder = (req, orderId) => {
+  const session = verifyPaymentSession(tokenFromRequest(req));
+  if (!session || Number(session.order_id) !== Number(orderId)) return null;
+  return session;
+};
 
 // ─── Comerciante (autenticado) ─────────────────────────────────────────────────
 
@@ -140,17 +147,24 @@ const withdraw = async (req, res) => {
 
 /**
  * Cobrança com cartão (card_token gerado no cliente via pagarme.js).
- * Body: { order_id, card_token, document?, email?, name?, phone?, installments? }
+ * Body: { order_id, payment_session_token, request_id, card_token, saved_card_id?, document?, email?, installments? }
  */
 const payCard = async (req, res) => {
   const orderId = req.body?.order_id ?? req.body?.orderId;
   const cardToken = req.body?.card_token;
-  const cardId = req.body?.card_id;
+  const savedCardId = req.body?.saved_card_id;
   if (!orderId || isNaN(orderId)) {
     return res.status(400).json({ error: "order_id é obrigatório" });
   }
-  if (!cardToken && !cardId) {
-    return res.status(400).json({ error: "card_token ou card_id é obrigatório" });
+  if (!cardToken && !savedCardId) {
+    return res.status(400).json({ error: "card_token ou saved_card_id é obrigatório" });
+  }
+  if (!_paymentSessionForOrder(req, orderId)) {
+    return res.status(401).json({ error: "Sessão de pagamento inválida ou expirada." });
+  }
+  const session = _paymentSessionForOrder(req, orderId);
+  if ((savedCardId || req.body?.save_card === true) && session.customer_verified !== true) {
+    return res.status(403).json({ error: "Cartões salvos exigem verificação de identidade do cliente." });
   }
   try {
     const result = await service.createCardCharge(Number(orderId), cardToken, {
@@ -159,8 +173,11 @@ const payCard = async (req, res) => {
       name: req.body?.name,
       phone: req.body?.phone,
       installments: req.body?.installments,
-      cardId,
+      savedCardId,
       saveCard: req.body?.save_card === true,
+      requestId: req.body?.request_id,
+      threeDs: req.body?.three_ds,
+      customerVerified: session.customer_verified === true,
     });
     return res.status(200).json(result);
   } catch (error) {
@@ -170,14 +187,17 @@ const payCard = async (req, res) => {
 };
 
 /**
- * Lista os cartões salvos do cliente (prova de posse pelo telefone).
- * Query: ?phone=...
+ * Lista métodos salvos da sessão de pagamento. Nunca devolve o card_id do cofre.
+ * Query: ?order_id=...
  */
 const listCards = async (req, res) => {
-  const phone = req.query?.phone;
-  if (!phone) return res.status(400).json({ error: "phone é obrigatório" });
+  const orderId = req.query?.order_id;
+  if (!orderId || isNaN(orderId)) return res.status(400).json({ error: "order_id é obrigatório" });
+  const session = _paymentSessionForOrder(req, orderId);
+  if (!session) return res.status(401).json({ error: "Sessão de pagamento inválida ou expirada." });
+  if (session.customer_verified !== true) return res.status(200).json([]);
   try {
-    const cards = await service.listSavedCardsByPhone(String(phone));
+    const cards = await service.listSavedCardsForClient(session.client_id);
     return res.status(200).json(cards);
   } catch (error) {
     console.error("Pagar.me listCards error:", error.message);
@@ -187,15 +207,20 @@ const listCards = async (req, res) => {
 
 /**
  * Remove um cartão salvo do cliente. Param :id (linha em user_payment_tokens);
- * body.phone comprova a posse.
+ * Sessão de pagamento comprova o contexto do pedido.
  */
 const deleteCard = async (req, res) => {
   const id = req.params?.id;
-  const phone = req.body?.phone ?? req.query?.phone;
   if (!id || isNaN(id)) return res.status(400).json({ error: "id inválido" });
-  if (!phone) return res.status(400).json({ error: "phone é obrigatório" });
+  const orderId = req.body?.order_id ?? req.query?.order_id;
+  if (!orderId || isNaN(orderId)) return res.status(400).json({ error: "order_id é obrigatório" });
+  const session = _paymentSessionForOrder(req, orderId);
+  if (!session) return res.status(401).json({ error: "Sessão de pagamento inválida ou expirada." });
+  if (session.customer_verified !== true) {
+    return res.status(403).json({ error: "Cartões salvos exigem verificação de identidade do cliente." });
+  }
   try {
-    const result = await service.deleteSavedCardByPhone(String(phone), Number(id));
+    const result = await service.deleteSavedCardForClient(session.client_id, Number(id));
     return res.status(200).json(result);
   } catch (error) {
     console.error("Pagar.me deleteCard error:", error.message);
@@ -205,12 +230,15 @@ const deleteCard = async (req, res) => {
 
 /**
  * Cobrança via PIX (retorna QR code para exibição em modal).
- * Body: { order_id, document?, email?, name?, phone? }
+ * Body: { order_id, payment_session_token, request_id, document?, email?, name?, phone? }
  */
 const payPix = async (req, res) => {
   const orderId = req.body?.order_id ?? req.body?.orderId;
   if (!orderId || isNaN(orderId)) {
     return res.status(400).json({ error: "order_id é obrigatório" });
+  }
+  if (!_paymentSessionForOrder(req, orderId)) {
+    return res.status(401).json({ error: "Sessão de pagamento inválida ou expirada." });
   }
   try {
     const result = await service.createPixCharge(Number(orderId), {
@@ -218,6 +246,7 @@ const payPix = async (req, res) => {
       email: req.body?.email,
       name: req.body?.name,
       phone: req.body?.phone,
+      requestId: req.body?.request_id,
     });
     return res.status(200).json(result);
   } catch (error) {
@@ -230,8 +259,8 @@ const payPix = async (req, res) => {
 
 /**
  * Recebe eventos do Pagar.me. Segurança por HTTP Basic auth configurado no
- * dashboard. Responde rápido; erros de processamento são logados mas não
- * impedem o 200 quando a autenticação é válida.
+ * dashboard. O 2xx só é devolvido depois que o evento foi persistido e aplicado;
+ * assim o Pagar.me pode tentar novamente quando houver falha transitória.
  */
 const webhook = async (req, res) => {
   if (!service.verifyBasicAuth(req.headers["authorization"])) {
@@ -248,12 +277,12 @@ const webhook = async (req, res) => {
     }
   }
 
-  res.status(200).json({ received: true });
-
   try {
-    await service.handleWebhookEvent(event);
+    const result = await service.handleWebhookEvent(event);
+    return res.status(200).json({ received: true, duplicate: result.duplicate === true });
   } catch (err) {
     console.error("Pagar.me webhook handler error:", err.message);
+    return res.status(err.status || 500).json({ error: "Falha temporária ao processar evento." });
   }
 };
 

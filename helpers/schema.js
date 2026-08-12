@@ -42,4 +42,27 @@ const columnExists = async (table, column) => {
   return exists;
 };
 
-module.exports = { columnExists };
+const tableExists = async (table) => {
+  const key = `table:${table}`;
+  if (_positive.has(key)) return true;
+  const until = _negativeUntil.get(key);
+  if (until && Date.now() < until) return false;
+
+  let exists = false;
+  try {
+    const r = await pool.query("SELECT to_regclass($1) AS name", [`public.${table}`]);
+    exists = Boolean(r.rows[0]?.name);
+  } catch (_) {
+    exists = false;
+  }
+
+  if (exists) {
+    _positive.add(key);
+    _negativeUntil.delete(key);
+  } else {
+    _negativeUntil.set(key, Date.now() + NEGATIVE_TTL_MS);
+  }
+  return exists;
+};
+
+module.exports = { columnExists, tableExists };

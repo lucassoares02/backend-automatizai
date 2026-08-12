@@ -1,7 +1,9 @@
 const axios = require("axios");
+const crypto = require("crypto");
 const pool = require("../db");
 const identityService = require("./identityService");
-const { columnExists } = require("../helpers/schema");
+const { columnExists, tableExists } = require("../helpers/schema");
+const { createPaymentSession } = require("../helpers/publicPaymentSession");
 
 // ─── Cliente Pagar.me (API v5 — "Core API") ────────────────────────────────────
 // Modelo marketplace: cada empresa é um RECEBEDOR (recipient) no Pagar.me; o
@@ -57,8 +59,8 @@ const _wrap = (error, fallback) => {
   let apiMsg = data?.message || error?.message;
   const details = _formatErrors(data?.errors);
   if (details) apiMsg = apiMsg ? `${apiMsg} — ${details}` : details;
-  // Log completo do corpo de erro para inspeção no servidor.
-  if (data) console.error("Pagar.me API error body:", JSON.stringify(data));
+  // Respostas podem conter PII e dados sensíveis do meio de pagamento.
+  if (data) console.error("Pagar.me API error body:", JSON.stringify(_redact(data)));
   const err = new Error(apiMsg || fallback || "Erro no Pagar.me");
   err.status = status >= 400 && status < 500 ? status : 502;
   return err;
@@ -127,6 +129,23 @@ const APP_URL = (process.env.PUBLIC_APP_URL || process.env.ORIGIN || "").replace
 // Valor mínimo de saque (em REAIS). Configurável — ajuste para o mínimo real da
 // sua conta Pagar.me. Default conservador de R$ 1,00.
 const MIN_WITHDRAWAL = Number(process.env.PAGARME_MIN_WITHDRAWAL_AMOUNT ?? 1);
+const SAVED_CARDS_ENABLED = String(process.env.PAGARME_SAVED_CARDS_ENABLED || "false").toLowerCase() === "true";
+const WEBHOOK_AUTH_REQUIRED = String(process.env.PAGARME_WEBHOOK_AUTH_REQUIRED || "true").toLowerCase() !== "false";
+const THREE_DS_ENABLED = String(process.env.PAGARME_3DS_ENABLED || "false").toLowerCase() === "true";
+
+const _redact = (value) => {
+  if (!value || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(_redact);
+  const sensitive = /(?:authorization|token|card|document|email|phone|cvv|number)/i;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key,
+    sensitive.test(key) ? "[redacted]" : _redact(item),
+  ]));
+};
+
+const _paymentLog = (event, data = {}) => {
+  console.info("pagarme.payment", { event, ..._redact(data) });
+};
 
 // ─── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -186,29 +205,6 @@ const _onlyDigits = (v) => String(v || "").replace(/\D/g, "");
 // cartão). Só aceitamos um e-mail com cara de real.
 const _isPlausibleEmail = (v) => /^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(String(v || "").trim());
 
-// Domínio real usado para sintetizar o e-mail do cliente quando ele não informa
-// um (o checkout NÃO pede e-mail). Um domínio real (arbian.com.br) evita a
-// reprovação do antifraude que acontecia com o domínio inexistente antigo.
-const SYNTHETIC_EMAIL_DOMAIN = (process.env.PAGARME_SYNTHETIC_EMAIL_DOMAIN || "arbian.com.br").replace(/^@/, "");
-
-// Gera um e-mail plausível a partir do NOME: "João da Silva" -> joao.silva@arbian.com.br.
-// Usa primeiro + último nome; um só nome vira o local-part; sem nome cai em
-// "cliente{id}". Remove acentos e caracteres inválidos de e-mail.
-const _emailFromName = (name, fallbackId) => {
-  const parts = String(name || "")
-    .normalize("NFD").replace(/[̀-ͯ]/g, "") // remove acentos
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-  let local;
-  if (parts.length >= 2) local = `${parts[0]}.${parts[parts.length - 1]}`;
-  else if (parts.length === 1) local = parts[0];
-  else local = `cliente${fallbackId || ""}`;
-  return `${local}@${SYNTHETIC_EMAIL_DOMAIN}`;
-};
-
 // Monta o objeto customer do pedido a partir do cliente + dados informados no
 // checkout. `billingAddress` (quando disponível) vai também em customer.address —
 // o antifraude usa o endereço do titular para pontuar a transação.
@@ -221,10 +217,9 @@ const _buildCustomer = (client, extra = {}, billingAddress = null) => {
     name: (extra.name || client.client_name || client.name || "Cliente").slice(0, 64),
     type: doc.length > 11 ? "company" : "individual",
   };
-  // E-mail real quando existir; senão sintetiza a partir do nome (domínio real).
-  customer.email = _isPlausibleEmail(rawEmail)
-    ? String(rawEmail).trim().toLowerCase()
-    : _emailFromName(customer.name, client.client_id || client.id);
+  // Nunca inventar identidade de contato: e-mail sintético reduz a qualidade do
+  // antifraude e impossibilita comunicação confiável com o pagador.
+  if (_isPlausibleEmail(rawEmail)) customer.email = String(rawEmail).trim().toLowerCase();
   if (doc.length === 11 || doc.length === 14) customer.document = doc;
   if (phone) customer.phones = { mobile_phone: phone };
   // Endereço do titular para o antifraude (mesmo shape do billing_address).
@@ -249,20 +244,12 @@ const _toBillingAddress = ({ street, number, neighborhood, city, state, zip }) =
 };
 
 // Monta o billing_address exigido pelo antifraude do Pagar.me em cobranças no
-// cartão (sem ele a cobrança nasce "failed" com
-// `validation_error | billing | "value" is required`). Prioriza o endereço do
-// CLIENTE (endereço salvo em user_addresses, mais relevante para o antifraude) e
-// recorre ao endereço cadastrado da empresa quando o cliente não tem um endereço
-// estruturado. Retorna null se nenhum dos dois estiver completo.
+// cartão. Usa exclusivamente o endereço do CLIENTE; endereço da loja não é
+// endereço de cobrança e não pode ser usado como substituto.
 const _buildBillingAddress = (order) => {
-  const client = _toBillingAddress({
+  return _toBillingAddress({
     street: order.cli_street, number: order.cli_number, neighborhood: order.cli_neighborhood,
     city: order.cli_city, state: order.cli_state, zip: order.cli_zip,
-  });
-  if (client) return client;
-  return _toBillingAddress({
-    street: order.addr_street, number: order.addr_number, neighborhood: order.addr_neighborhood,
-    city: order.addr_city, state: order.addr_state, zip: order.addr_zip,
   });
 };
 
@@ -591,7 +578,7 @@ const requestWithdrawal = async (companyId, amount) => {
 // Carrega o pedido + empresa + cliente e valida que o recebedor está ativo.
 const _loadOrderForCharge = async (orderId) => {
   const orderRes = await pool.query(
-    `SELECT o.id, o.uuid, o.total, o.subtotal, o.delivery_fee, o.tag, o.company_id, o.client_id, o.payment_status, o.service_fee,
+    `SELECT o.id, o.uuid, o.total, o.subtotal, o.delivery_fee, o.tag, o.company_id, o.client_id, o.status, o.payment_status, o.service_fee,
             c.name AS company_name, c.pagarme_recipient_id, c.pagarme_charges_enabled,
             cl.name AS client_name, cl.phone AS client_phone, cl.document AS client_document,
             cl.user_id AS client_user_id,
@@ -644,6 +631,9 @@ const _loadOrderForCharge = async (orderId) => {
   }
   if (order.payment_status === "paid") {
     throw Object.assign(new Error("Pedido já pago."), { status: 409 });
+  }
+  if (![10, "10"].includes(order.status) || ["refunded", "refund_pending", "chargedback"].includes(order.payment_status)) {
+    throw Object.assign(new Error("Este pedido não está disponível para pagamento online."), { status: 409 });
   }
   if (!PLATFORM_RECIPIENT_ID) {
     throw Object.assign(new Error("PAGARME_PLATFORM_RECIPIENT_ID não configurado."), { status: 503 });
@@ -824,6 +814,136 @@ const _persistOrderCharge = async (orderId, pmOrderId, chargeId) => {
   );
 };
 
+const _PAYMENT_ATTEMPTS_TABLE = "payment_attempts";
+const _WEBHOOK_EVENTS_TABLE = "payment_webhook_events";
+
+const _paymentStorageReady = async () => (
+  (await tableExists(_PAYMENT_ATTEMPTS_TABLE)) && (await tableExists(_WEBHOOK_EVENTS_TABLE))
+);
+
+const _requirePaymentStorage = async () => {
+  if (await _paymentStorageReady()) return;
+  throw Object.assign(
+    new Error("A proteção de pagamentos está em atualização. Tente novamente em alguns minutos."),
+    { status: 503, code: "payment_storage_unavailable" },
+  );
+};
+
+const _normalizeRequestId = (requestId) => {
+  const value = String(requestId || "").trim();
+  if (!/^[A-Za-z0-9_-]{16,128}$/.test(value)) {
+    throw Object.assign(new Error("Identificador de tentativa de pagamento inválido."), { status: 400 });
+  }
+  return value;
+};
+
+const _startPaymentAttempt = async (order, method, requestId) => {
+  await _requirePaymentStorage();
+  const clientRequestId = _normalizeRequestId(requestId);
+  const r = await pool.query(
+    `INSERT INTO payment_attempts (
+       order_id, provider, method, client_request_id, idempotency_key, status
+     )
+     VALUES ($1, 'pagarme', $2, $3, $4, 'processing')
+     ON CONFLICT (provider, order_id, client_request_id)
+     DO UPDATE SET updated_at = now()
+     RETURNING *`,
+    [order.id, method, clientRequestId, crypto.randomUUID()],
+  );
+  const attempt = r.rows[0];
+  await pool.query(
+    `UPDATE orders
+     SET payment_status = 'pending', payment_provider = 'pagarme'
+     WHERE id = $1 AND COALESCE(payment_status, '') NOT IN ('paid', 'refunded', 'refund_pending', 'chargedback')`,
+    [order.id],
+  );
+  return attempt;
+};
+
+const _providerIdempotencyKey = (attempt) => `automatizai:pagarme:${attempt.idempotency_key}`;
+
+const _attemptResponse = (attempt) => {
+  if (!attempt?.response || typeof attempt.response !== "object") return null;
+  return attempt.response;
+};
+
+const _storeAttempt = async (attemptId, { status, providerOrderId, chargeId, response, failureCode, failureMessage, expiresAt } = {}) => {
+  const r = await pool.query(
+    `UPDATE payment_attempts
+     SET status = COALESCE($2, status),
+         pagarme_order_id = COALESCE($3, pagarme_order_id),
+         pagarme_charge_id = COALESCE($4, pagarme_charge_id),
+         response = COALESCE($5::jsonb, response),
+         failure_code = COALESCE($6, failure_code),
+         failure_message = COALESCE($7, failure_message),
+         expires_at = COALESCE($8::timestamptz, expires_at),
+         updated_at = now()
+     WHERE id = $1
+     RETURNING *`,
+    [
+      attemptId,
+      status || null,
+      providerOrderId || null,
+      chargeId || null,
+      response ? JSON.stringify(response) : null,
+      failureCode || null,
+      failureMessage || null,
+      expiresAt || null,
+    ],
+  );
+  return r.rows[0] || null;
+};
+
+const _findAttemptByProviderRefs = async ({ pagarmeOrderId, chargeId }) => {
+  if (!(await _paymentStorageReady())) return null;
+  const r = await pool.query(
+    `SELECT * FROM payment_attempts
+     WHERE provider = 'pagarme'
+       AND (($1::text IS NOT NULL AND pagarme_order_id = $1)
+         OR ($2::text IS NOT NULL AND pagarme_charge_id = $2))
+     ORDER BY id DESC
+     LIMIT 1`,
+    [pagarmeOrderId || null, chargeId || null],
+  );
+  return r.rows[0] || null;
+};
+
+const createPublicPaymentSession = (order) => ({
+  payment_session_token: createPaymentSession({
+    orderId: order.id,
+    orderUuid: order.uuid,
+    companyId: order.company_id,
+    clientId: order.client_id,
+  }),
+});
+
+const _keyEnvironment = (key) => {
+  const value = String(key || "");
+  if (/^(sk|pk)_test_/.test(value)) return "test";
+  if (/^(sk|pk)_/.test(value)) return "live";
+  return null;
+};
+
+const isPublicCheckoutConfigured = () => {
+  const secretEnvironment = _keyEnvironment(process.env.PAGARME_SECRET_KEY);
+  const publicEnvironment = _keyEnvironment(process.env.PAGARME_PUBLIC_KEY);
+  return Boolean(
+    secretEnvironment &&
+    publicEnvironment &&
+    secretEnvironment === publicEnvironment &&
+    PLATFORM_RECIPIENT_ID &&
+    (process.env.PAGARME_PAYMENT_SESSION_SECRET || process.env.JWT_SECRET),
+  );
+};
+
+const isPaymentInfrastructureReady = async () => (
+  isPublicCheckoutConfigured() && (await _paymentStorageReady())
+);
+
+// A interface pública só habilita o cofre quando existir emissão de sessão com
+// `customer_verified` por OTP. O checkout atual emite apenas sessão de pedido.
+const savedCardsAvailable = () => false;
+
 const _cardFailureMessage = (charge) => {
   const transaction = charge?.last_transaction || {};
   return (
@@ -834,18 +954,36 @@ const _cardFailureMessage = (charge) => {
   );
 };
 
-// A Pagar.me pode trazer a recusa antifraude em campos diferentes conforme o
-// adquirente. Só encaminhamos ao acompanhamento quando a resposta contém uma
-// indicação explícita de risco/fraude; toda recusa de cartão continua no checkout.
-const _hasAntifraudSignal = (values) => {
-  const details = values
-    .filter((value) => value != null)
-    .map((value) => (typeof value === "string" ? value : JSON.stringify(value)))
-    .join(" ")
-    .toLowerCase();
+// Não classifique antifraude por texto livre de adquirente. A operação usa uma
+// lista explícita de códigos do contrato Pagar.me, configurável por ambiente.
+const ANTIFRAUD_CODES = new Set(
+  String(process.env.PAGARME_ANTIFRAUD_CODES || "antifraud_reproved,antifraud_denied,fraud_reproved")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean),
+);
 
-  return /anti[ _-]?fraud|antifraude|fraud|fraude|risk[ _-]?(analysis|score|level)|an[aá]lise de risco/.test(details);
+const _collectProviderCodes = (value, codes = []) => {
+  if (!value) return codes;
+  if (Array.isArray(value)) {
+    value.forEach((item) => _collectProviderCodes(item, codes));
+    return codes;
+  }
+  if (typeof value === "object") {
+    for (const [key, item] of Object.entries(value)) {
+      if (["code", "status", "reason", "type"].includes(key) && typeof item === "string") {
+        codes.push(item.toLowerCase());
+      } else if (item && typeof item === "object") {
+        _collectProviderCodes(item, codes);
+      }
+    }
+  }
+  return codes;
 };
+
+const _hasAntifraudSignal = (values) => values
+  .flatMap((value) => _collectProviderCodes(value))
+  .some((code) => ANTIFRAUD_CODES.has(code));
 
 const _isAntifraudDecline = (charge) => {
   const transaction = charge?.last_transaction || {};
@@ -855,8 +993,29 @@ const _isAntifraudDecline = (charge) => {
     transaction?.antifraud_response,
     transaction?.antifraud,
     transaction?.gateway_response,
-    transaction?.acquirer_message,
   ]);
+};
+
+const _buildThreeDsAuthentication = (input) => {
+  if (!input) return null;
+  if (!THREE_DS_ENABLED) {
+    throw Object.assign(new Error("Autenticação 3DS não está habilitada para esta conta."), { status: 409 });
+  }
+  const mpi = String(input.mpi || "pagarme");
+  if (!["pagarme", "third_party"].includes(mpi)) {
+    throw Object.assign(new Error("Dados 3DS inválidos."), { status: 400 });
+  }
+  const threedSecure = { mpi };
+  for (const key of ["eci", "cavv", "transaction_id", "ds_transaction_id", "version"]) {
+    if (input[key]) threedSecure[key] = String(input[key]).slice(0, 256);
+  }
+  if (mpi === "pagarme" && !threedSecure.transaction_id) {
+    throw Object.assign(new Error("Autenticação 3DS incompleta."), { status: 400 });
+  }
+  if (mpi === "third_party" && (!threedSecure.eci || !threedSecure.cavv || !threedSecure.ds_transaction_id || !threedSecure.version)) {
+    throw Object.assign(new Error("Autenticação 3DS incompleta."), { status: 400 });
+  }
+  return { type: "threed_secure", threed_secure: threedSecure };
 };
 
 // ─── Cartão salvo (cofre Pagar.me) ───────────────────────────────────────────
@@ -925,19 +1084,22 @@ const _persistSavedCard = async (userId, card) => {
   );
 };
 
-// Valida que o card_id pertence ao usuário (evita usar cartão de outra pessoa).
-const _assertOwnedCard = async (userId, cardId) => {
+// Resolve um método de pagamento local para o card_id do cofre. A referência do
+// Pagar.me nunca sai para o navegador.
+const _assertOwnedCard = async (userId, tokenRowId) => {
   const r = await pool.query(
-    "SELECT 1 FROM user_payment_tokens WHERE user_id = $1 AND token = $2 AND provider = 'pagarme' AND revoked_at IS NULL LIMIT 1",
-    [userId, cardId],
+    "SELECT token FROM user_payment_tokens WHERE user_id = $1 AND id = $2 AND provider = 'pagarme' AND revoked_at IS NULL LIMIT 1",
+    [userId, tokenRowId],
   );
-  if (!r.rows[0]) throw Object.assign(new Error("Cartão salvo inválido."), { status: 400 });
+  if (!r.rows[0]?.token) throw Object.assign(new Error("Cartão salvo inválido."), { status: 400 });
+  return r.rows[0].token;
 };
 
 const listSavedCards = async (userId) => {
+  if (!SAVED_CARDS_ENABLED) return [];
   if (!userId) return [];
   const r = await pool.query(
-    `SELECT id, token AS card_id, brand, last4, is_default
+    `SELECT id, brand, last4, is_default
      FROM user_payment_tokens
      WHERE user_id = $1 AND provider = 'pagarme' AND revoked_at IS NULL
      ORDER BY is_default DESC, id DESC`,
@@ -948,6 +1110,9 @@ const listSavedCards = async (userId) => {
 
 // Revoga (soft) e tenta remover do cofre. Só age no cartão do próprio usuário.
 const deleteSavedCard = async (userId, tokenRowId) => {
+  if (!SAVED_CARDS_ENABLED) {
+    throw Object.assign(new Error("Cartões salvos estão indisponíveis até a verificação de identidade ser habilitada."), { status: 403 });
+  }
   const r = await pool.query(
     "SELECT id, token FROM user_payment_tokens WHERE id = $1 AND user_id = $2 AND provider = 'pagarme' AND revoked_at IS NULL",
     [tokenRowId, userId],
@@ -962,15 +1127,18 @@ const deleteSavedCard = async (userId, tokenRowId) => {
   return { deleted: true };
 };
 
-// Versões que resolvem o usuário pelo telefone (rotas públicas). O telefone é a
-// prova de posse já usada no fluxo público.
-const listSavedCardsByPhone = async (phone) => {
-  const userId = await identityService.lookupUserIdByPhone(phone);
+const _userIdForClient = async (clientId) => {
+  const r = await pool.query("SELECT user_id FROM clients WHERE id = $1", [clientId]);
+  return r.rows[0]?.user_id || null;
+};
+
+const listSavedCardsForClient = async (clientId) => {
+  const userId = await _userIdForClient(clientId);
   return userId ? listSavedCards(userId) : [];
 };
 
-const deleteSavedCardByPhone = async (phone, tokenRowId) => {
-  const userId = await identityService.lookupUserIdByPhone(phone);
+const deleteSavedCardForClient = async (clientId, tokenRowId) => {
+  const userId = await _userIdForClient(clientId);
   if (!userId) throw Object.assign(new Error("Cartão não encontrado."), { status: 404 });
   return deleteSavedCard(userId, tokenRowId);
 };
@@ -979,14 +1147,14 @@ const deleteSavedCardByPhone = async (phone, tokenRowId) => {
  * Cria um pedido com pagamento no CARTÃO. Suporta 3 modos (via `extra`):
  *  • cartão novo (card_token) — cobrança avulsa (comportamento padrão);
  *  • cartão novo + `saveCard:true` — salva no cofre e cobra pelo card_id;
- *  • `cardId` — cobra um cartão já salvo do usuário (sem redigitar).
- * `extra`: { document, email, name, phone, installments, cardId, saveCard }.
+ *  • `savedCardId` — cobra um método salvo local, resolvido no servidor.
+ * `extra`: { document, email, name, phone, installments, savedCardId, saveCard }.
  */
 const createCardCharge = async (orderId, cardToken, extra = {}) => {
-  const cardId = extra.cardId || null;
+  const savedCardId = Number(extra.savedCardId) || null;
   const saveCard = extra.saveCard === true;
-  if (!cardToken && !cardId) {
-    throw Object.assign(new Error("card_token ou card_id é obrigatório."), { status: 400 });
+  if (!cardToken && !savedCardId) {
+    throw Object.assign(new Error("card_token ou saved_card_id é obrigatório."), { status: 400 });
   }
   const order = await _loadOrderForCharge(orderId);
   const { totalCents, split } = _computeSplit(order);
@@ -994,10 +1162,20 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
   const billingAddress = _buildBillingAddress(order);
   const userId = await _ensureOrderUserId(order);
   order.client_user_id = userId;
+  const threeDsAuthentication = _buildThreeDsAuthentication(extra.threeDs);
 
-  // O e-mail do titular é montado no _buildCustomer (real quando existe, senão
-  // sintetizado do nome com domínio real — importante p/ o antifraude). O
-  // checkout NÃO pede e-mail.
+  const customerForPayment = _buildCustomer(order, extra, billingAddress);
+  if (!customerForPayment.email) {
+    throw Object.assign(new Error("Informe um e-mail válido para concluir o pagamento."), { status: 400 });
+  }
+  if (!billingAddress) {
+    throw Object.assign(new Error("Informe um endereço completo do titular para concluir o pagamento."), { status: 400 });
+  }
+  const attempt = await _startPaymentAttempt(order, "card", extra.requestId);
+  const priorResponse = _attemptResponse(attempt);
+  if (priorResponse) return priorResponse;
+
+  // O e-mail informado é persistido no perfil global para as próximas compras.
   await _persistClientDocument(order.client_id, extra.document);
   if (userId && _isPlausibleEmail(extra.email)) {
     try {
@@ -1043,6 +1221,7 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
       credit_card: {
         ...creditCardBase,
         card_token: cardToken,
+        ...(threeDsAuthentication ? { authentication: threeDsAuthentication } : {}),
         // O antifraude exige billing_address no cartão; sem ele a cobrança falha
         // com `billing | "value" is required`.
         ...(billingAddress ? { card: { billing_address: billingAddress } } : {}),
@@ -1058,20 +1237,23 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
     // Monta o payload do pedido conforme o modo (cartão salvo / salvar / avulso).
     let orderPayload;
     let pendingSave = null; // Só é gravado se a cobrança for aprovada.
-    const saveUnavailable = saveCard && (!userId || !(await _savedCardsEnabled()));
-    if (cardId) {
-      // Pagar com cartão SALVO — precisa do customer dono do card_id.
-      await _assertOwnedCard(userId, cardId);
+    const saveUnavailable = saveCard && (!SAVED_CARDS_ENABLED || extra.customerVerified !== true || !userId || !(await _savedCardsEnabled()));
+    if (savedCardId) {
+      if (!SAVED_CARDS_ENABLED || extra.customerVerified !== true) {
+        throw Object.assign(new Error("Cartões salvos estão indisponíveis até a verificação de identidade ser habilitada."), { status: 403 });
+      }
+      // Pagar com cartão salvo — o card_id só é resolvido no servidor.
+      const cardId = await _assertOwnedCard(userId, savedCardId);
       const customerId = await _getUserPagarmeCustomerId(userId);
       if (!customerId) throw Object.assign(new Error("Cartão salvo inválido."), { status: 400 });
       orderPayload = {
         code: String(order.id),
         customer_id: customerId,
         items,
-        payments: [{ payment_method: "credit_card", credit_card: { ...creditCardBase, card_id: cardId }, split }],
+        payments: [{ payment_method: "credit_card", credit_card: { ...creditCardBase, card_id: cardId, ...(threeDsAuthentication ? { authentication: threeDsAuthentication } : {}) }, split }],
         metadata,
       };
-    } else if (saveCard && userId && (await _savedCardsEnabled())) {
+    } else if (saveCard && SAVED_CARDS_ENABLED && extra.customerVerified === true && userId && (await _savedCardsEnabled())) {
       // Cartão NOVO + salvar: cria customer + cartão no cofre (sem zero-auth) e
       // cobra pelo card_id. O registro em user_payment_tokens só é feito DEPOIS,
       // se a cobrança for aprovada (não guardamos cartão de cobrança recusada).
@@ -1082,7 +1264,7 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
         code: String(order.id),
         customer_id: customerId,
         items,
-        payments: [{ payment_method: "credit_card", credit_card: { ...creditCardBase, card_id: card.id }, split }],
+        payments: [{ payment_method: "credit_card", credit_card: { ...creditCardBase, card_id: card.id, ...(threeDsAuthentication ? { authentication: threeDsAuthentication } : {}) }, split }],
         metadata,
       };
     } else {
@@ -1092,7 +1274,9 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
       orderPayload = tokenChargePayload();
     }
 
-    const { data } = await http.post("/orders", orderPayload);
+    const { data } = await http.post("/orders", orderPayload, {
+      headers: { "Idempotency-Key": _providerIdempotencyKey(attempt) },
+    });
 
     // Reaproveita o customer nas próximas compras: se a Pagar.me criou um customer
     // novo (mandamos inline), guarda o id retornado no perfil global do usuário.
@@ -1103,7 +1287,7 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
     const charge = (data.charges && data.charges[0]) || {};
     await _persistOrderCharge(order.id, data.id, charge.id);
 
-    const status = charge.status || data.status;
+    const status = String(charge.status || data.status || "processing").toLowerCase();
     const paid = status === "paid";
     let cardSaved = false;
     let cardSaveWarning = null;
@@ -1130,7 +1314,7 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
       } else if (saveUnavailable) {
         cardSaveWarning = "O pagamento foi aprovado, mas o recurso de salvar cartão está indisponível no momento.";
       }
-    } else if (status === "failed") {
+    } else if (["failed", "canceled"].includes(status)) {
       await pool.query("UPDATE orders SET payment_status = 'failed' WHERE id = $1", [order.id]);
     }
 
@@ -1138,7 +1322,7 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
       ? (_isAntifraudDecline(charge) ? "antifraud" : "card_declined")
       : (!paid ? "payment_pending" : null);
 
-    return {
+    const response = {
       status,
       paid,
       order_id: order.id,
@@ -1153,13 +1337,23 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
       // gateway_response.errors. Surfaceamos ambas para não retornar message:null.
       message: _cardFailureMessage(charge),
     };
+    await _storeAttempt(attempt.id, {
+      status: paid ? "paid" : (["failed", "canceled"].includes(status) ? "failed" : "pending"),
+      providerOrderId: data.id,
+      chargeId: charge.id,
+      response,
+      failureCode: paid ? null : status,
+      failureMessage: paid ? null : response.message,
+    });
+    _paymentLog("card_attempt_finished", { order_id: order.id, attempt_id: attempt.id, status });
+    return response;
   } catch (error) {
     // Alguns adquirentes devolvem a recusa antifraude como erro HTTP, sem a
     // estrutura de charge. Mantemos o mesmo contrato de navegação nesses casos.
     if (_hasAntifraudSignal([error?.response?.data, error?.message])) {
       await pool.query("UPDATE orders SET payment_status = 'failed' WHERE id = $1", [order.id]);
       const wrapped = _wrap(error, "Pagamento recusado pela análise de segurança");
-      return {
+      const response = {
         status: "failed",
         paid: false,
         order_id: order.id,
@@ -1167,8 +1361,23 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
         next_action: "track_order",
         message: wrapped.message,
       };
+      await _storeAttempt(attempt.id, {
+        status: "failed",
+        response,
+        failureCode: "antifraud",
+        failureMessage: wrapped.message,
+      });
+      return response;
     }
-    throw _wrap(error, "Falha ao processar o pagamento com cartão");
+    const wrapped = _wrap(error, "Falha ao processar o pagamento com cartão");
+    // Não converte timeout/5xx em falha definitiva: a mesma idempotency key pode
+    // ser reenviada com segurança e o provedor devolve a transação original.
+    if (wrapped.status >= 500 || wrapped.status === 409) {
+      await _storeAttempt(attempt.id, { status: "processing", failureMessage: wrapped.message });
+      throw wrapped;
+    }
+    await _storeAttempt(attempt.id, { status: "failed", failureMessage: wrapped.message, failureCode: "provider_error" });
+    throw wrapped;
   }
 };
 
@@ -1188,14 +1397,37 @@ const createPixCharge = async (orderId, extra = {}) => {
   // Enriquece o customer ao máximo (telefone do cadastro + CPF + e-mail +
   // endereço) — também no PIX, para o cadastro reutilizado na Pagar.me ficar
   // completo e ajudar o antifraude nas cobranças de cartão seguintes.
+  const userId = await _ensureOrderUserId(order);
+  order.client_user_id = userId;
   const customer = _buildCustomer(order, extra, _buildBillingAddress(order));
   if (!customer.document) {
     throw Object.assign(new Error("Informe o CPF do pagador para pagar com PIX."), { status: 400 });
   }
+  if (!customer.email) {
+    throw Object.assign(new Error("Informe um e-mail válido para concluir o pagamento."), { status: 400 });
+  }
   // Persiste o CPF informado para pré-preencher nos próximos pedidos.
   await _persistClientDocument(order.client_id, customer.document);
+  if (userId && _isPlausibleEmail(extra.email)) {
+    await identityService.saveEmailForUser(userId, extra.email);
+    order.client_email = String(extra.email).trim().toLowerCase();
+  }
 
-  const userId = order.client_user_id;
+  await _requirePaymentStorage();
+  const activePix = await pool.query(
+    `SELECT * FROM payment_attempts
+     WHERE order_id = $1 AND provider = 'pagarme' AND method = 'pix'
+       AND status IN ('processing', 'pending')
+       AND (expires_at IS NULL OR expires_at > now())
+     ORDER BY id DESC LIMIT 1`,
+    [order.id],
+  );
+  const activeResponse = _attemptResponse(activePix.rows[0]);
+  if (activeResponse) return activeResponse;
+  const attempt = await _startPaymentAttempt(order, "pix", extra.requestId);
+  const priorResponse = _attemptResponse(attempt);
+  if (priorResponse) return priorResponse;
+
   // Reutiliza o customer do usuário na Pagar.me quando já existe (mesmo cadastro
   // em todas as compras); senão manda inline e guarda o id retornado abaixo.
   const existingCustomerId = await _getUserPagarmeCustomerId(userId);
@@ -1216,6 +1448,8 @@ const createPixCharge = async (orderId, extra = {}) => {
         },
       ],
       metadata: { order_id: String(order.id), company_id: String(order.company_id) },
+    }, {
+      headers: { "Idempotency-Key": _providerIdempotencyKey(attempt) },
     });
 
     if (!existingCustomerId && data.customer?.id) {
@@ -1226,30 +1460,37 @@ const createPixCharge = async (orderId, extra = {}) => {
     const tx = charge.last_transaction || {};
     await _persistOrderCharge(order.id, data.id, charge.id);
 
-    const status = charge.status || data.status;
+    const status = String(charge.status || data.status || "processing").toLowerCase();
     // PIX bem-sucedido nasce "pending"/"waiting_payment" COM QR Code. Se veio
     // "failed" ou sem QR, a Pagar.me recusou — logamos o motivo real e devolvemos
     // um erro claro (em vez de um "200" com QR nulo que trava o cliente).
     if (!tx.qr_code || status === "failed") {
       console.error(
         "Pagar.me PIX recusado:",
-        JSON.stringify({
+        JSON.stringify(_redact({
           order_id: order.id,
           charge_status: status,
           tx_status: tx.status,
           gateway_response: tx.gateway_response,
           acquirer_message: tx.acquirer_message,
-        }),
+        })),
       );
       await pool.query("UPDATE orders SET payment_status = 'failed' WHERE id = $1", [order.id]);
       const reason = tx.acquirer_message || tx.gateway_response?.errors?.[0]?.message;
+      await _storeAttempt(attempt.id, {
+        status: "failed",
+        providerOrderId: data.id,
+        chargeId: charge.id,
+        failureCode: status || "pix_generation_failed",
+        failureMessage: reason || "PIX recusado.",
+      });
       throw Object.assign(
         new Error(reason ? `PIX recusado: ${reason}` : "Não foi possível gerar o PIX. Revise os dados e tente novamente."),
         { status: 422 },
       );
     }
 
-    return {
+    const response = {
       status,
       order_id: order.id,
       pagarme_order_id: data.id,
@@ -1258,9 +1499,24 @@ const createPixCharge = async (orderId, extra = {}) => {
       qr_code_url: tx.qr_code_url || null, // imagem do QR
       expires_at: tx.expires_at || null,
     };
+    await _storeAttempt(attempt.id, {
+      status: status === "paid" ? "paid" : "pending",
+      providerOrderId: data.id,
+      chargeId: charge.id,
+      response,
+      expiresAt: tx.expires_at || null,
+    });
+    _paymentLog("pix_attempt_created", { order_id: order.id, attempt_id: attempt.id, status });
+    return response;
   } catch (error) {
     if (error.status === 422) throw error; // erro de recusa já formatado acima
-    throw _wrap(error, "Falha ao gerar o PIX");
+    const wrapped = _wrap(error, "Falha ao gerar o PIX");
+    if (wrapped.status >= 500 || wrapped.status === 409) {
+      await _storeAttempt(attempt.id, { status: "processing", failureMessage: wrapped.message });
+      throw wrapped;
+    }
+    await _storeAttempt(attempt.id, { status: "failed", failureCode: "provider_error", failureMessage: wrapped.message });
+    throw wrapped;
   }
 };
 
@@ -1272,7 +1528,7 @@ const createPixCharge = async (orderId, extra = {}) => {
  * cartão); se ainda não foi capturado, apenas cancela. `amountCents` permite
  * estorno parcial (omitido = valor integral). Retorna o status resultante.
  */
-const refundCharge = async (chargeId, amountCents) => {
+const refundCharge = async (chargeId, amountCents, idempotencyKey) => {
   if (!chargeId) {
     throw Object.assign(new Error("charge id é obrigatório para o estorno."), { status: 400 });
   }
@@ -1280,10 +1536,62 @@ const refundCharge = async (chargeId, amountCents) => {
     const http = getHttp();
     const body = amountCents ? { amount: Math.round(amountCents) } : undefined;
     // axios envia corpo no DELETE via `data`.
-    const { data } = await http.delete(`/charges/${chargeId}`, body ? { data: body } : undefined);
+    const config = {
+      ...(body ? { data: body } : {}),
+      ...(idempotencyKey ? { headers: { "Idempotency-Key": idempotencyKey } } : {}),
+    };
+    const { data } = await http.delete(`/charges/${chargeId}`, config);
     return { status: data?.status || null };
   } catch (error) {
     throw _wrap(error, "Falha ao solicitar o estorno no Pagar.me");
+  }
+};
+
+const requestRefundForOrder = async (orderId, chargeId, amountCents) => {
+  await _requirePaymentStorage();
+  const key = `refund_${crypto.createHash("sha256").update(`${orderId}:${chargeId}:${amountCents || "full"}`).digest("hex").slice(0, 48)}`;
+  const attemptRes = await pool.query(
+    `INSERT INTO payment_attempts (order_id, provider, method, client_request_id, idempotency_key, status)
+     VALUES ($1, 'pagarme', 'refund', $2, $3, 'refund_pending')
+     ON CONFLICT (provider, order_id, client_request_id)
+     DO UPDATE SET updated_at = now()
+     RETURNING *`,
+    [orderId, key, crypto.randomUUID()],
+  );
+  const attempt = attemptRes.rows[0];
+  const previous = _attemptResponse(attempt);
+  if (previous) return previous;
+
+  await pool.query(
+    `UPDATE orders SET payment_status = 'refund_pending'
+     WHERE id = $1 AND payment_status = 'paid' AND pagarme_charge_id = $2`,
+    [orderId, chargeId],
+  );
+  try {
+    const result = await refundCharge(chargeId, amountCents, _providerIdempotencyKey(attempt));
+    const status = String(result.status || "refund_pending").toLowerCase();
+    const response = { status, refund_pending: status !== "refunded" };
+    await _storeAttempt(attempt.id, {
+      status: status === "refunded" ? "refunded" : "refund_pending",
+      chargeId,
+      response,
+    });
+    if (status === "refunded") {
+      await pool.query(
+        "UPDATE orders SET payment_status = 'refunded' WHERE id = $1 AND pagarme_charge_id = $2",
+        [orderId, chargeId],
+      );
+    }
+    return response;
+  } catch (error) {
+    const wrapped = _wrap(error, "Falha ao solicitar o estorno no Pagar.me");
+    await _storeAttempt(attempt.id, {
+      status: "refund_pending",
+      chargeId,
+      failureCode: "refund_request_failed",
+      failureMessage: wrapped.message,
+    });
+    throw wrapped;
   }
 };
 
@@ -1294,8 +1602,9 @@ const refundCharge = async (chargeId, amountCents) => {
 const verifyBasicAuth = (authorizationHeader) => {
   const user = process.env.PAGARME_WEBHOOK_USER;
   const pass = process.env.PAGARME_WEBHOOK_PASSWORD;
-  // Se não configurado, não valida (recomendado configurar em produção).
-  if (!user && !pass) return true;
+  // Webhook nunca pode falhar aberto: ausência de credenciais bloqueia o endpoint.
+  if (WEBHOOK_AUTH_REQUIRED && (!user || !pass)) return false;
+  if (!user && !pass) return false;
   if (!authorizationHeader || !authorizationHeader.startsWith("Basic ")) return false;
   let decoded = "";
   try {
@@ -1304,13 +1613,12 @@ const verifyBasicAuth = (authorizationHeader) => {
     return false;
   }
   const expected = `${user || ""}:${pass || ""}`;
-  const crypto = require("crypto");
   const a = Buffer.from(decoded);
   const b = Buffer.from(expected);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 };
 
-const _markOrderPaid = async (orderId, chargeId) => {
+const _markOrderPaid = async (orderId, chargeId, pagarmeOrderId) => {
   // Marca como pago e, se o pedido estava em "Pagamento Pendente" (10), avança
   // para "Aguardando" (1) — a partir daí a loja passa a tratar o pedido.
   const r = await pool.query(
@@ -1319,8 +1627,13 @@ const _markOrderPaid = async (orderId, chargeId) => {
          pagarme_charge_id = COALESCE($2, pagarme_charge_id),
          status = CASE WHEN status = '10' THEN '1' ELSE status END
      WHERE id = $1
+       AND COALESCE(payment_status, '') NOT IN ('refunded', 'refund_pending', 'chargedback')
+       AND (
+         ($2::text IS NOT NULL AND pagarme_charge_id = $2)
+         OR ($3::text IS NOT NULL AND pagarme_order_id = $3)
+       )
      RETURNING status`,
-    [orderId, chargeId || null],
+    [orderId, chargeId || null, pagarmeOrderId || null],
   );
   // Registra a entrada em "Aguardando" no histórico (sem duplicar se já existir).
   if (r.rows[0]?.status === "1") {
@@ -1335,47 +1648,202 @@ const _markOrderPaid = async (orderId, chargeId) => {
   }
 };
 
-// Extrai o id do nosso pedido do payload (order.code / metadata / charge.metadata).
-const _orderIdFromPayload = (obj) => {
-  if (!obj) return null;
-  const fromCode = obj.code && /^\d+$/.test(String(obj.code)) ? Number(obj.code) : null;
-  const fromMeta =
-    obj.metadata?.order_id ||
-    obj.order?.metadata?.order_id ||
-    obj.order?.code ||
-    null;
-  const n = fromCode || (fromMeta && /^\d+$/.test(String(fromMeta)) ? Number(fromMeta) : null);
-  return Number.isFinite(n) ? n : null;
+const _providerRefsFromPayload = (data) => {
+  const charge = data?.id?.startsWith?.("ch_")
+    ? data
+    : data?.charge || data?.charges?.[0] || data?.order?.charges?.[0] || null;
+  const order = data?.id?.startsWith?.("or_") ? data : data?.order || null;
+  return {
+    pagarmeOrderId: order?.id || charge?.order_id || data?.order_id || null,
+    chargeId: charge?.id || null,
+  };
+};
+
+const _webhookEventKey = (event) => String(
+  event?.id || crypto.createHash("sha256").update(JSON.stringify(event || {})).digest("hex"),
+);
+
+const _setAttemptAndOrderState = async (attempt, status, refs) => {
+  if (!attempt) return false;
+  const normalized = String(status || "").toLowerCase();
+  const providerOrderId = refs.pagarmeOrderId || attempt.pagarme_order_id;
+  const chargeId = refs.chargeId || attempt.pagarme_charge_id;
+
+  if (normalized === "paid") {
+    await _storeAttempt(attempt.id, { status: "paid", providerOrderId, chargeId });
+    await _markOrderPaid(attempt.order_id, chargeId, providerOrderId);
+    return true;
+  }
+  if (["failed", "canceled", "voided"].includes(normalized)) {
+    await _storeAttempt(attempt.id, { status: "failed", providerOrderId, chargeId, failureCode: normalized });
+    await pool.query(
+      `UPDATE orders SET payment_status = 'failed'
+       WHERE id = $1 AND COALESCE(payment_status, '') NOT IN ('paid', 'refunded', 'refund_pending', 'chargedback')
+         AND (($2::text IS NOT NULL AND pagarme_charge_id = $2) OR ($3::text IS NOT NULL AND pagarme_order_id = $3))`,
+      [attempt.order_id, chargeId || null, providerOrderId || null],
+    );
+    return true;
+  }
+  if (["refunded", "partial_canceled"].includes(normalized)) {
+    await _storeAttempt(attempt.id, { status: "refunded", providerOrderId, chargeId });
+    await pool.query(
+      `UPDATE orders SET payment_status = 'refunded'
+       WHERE id = $1 AND (($2::text IS NOT NULL AND pagarme_charge_id = $2) OR ($3::text IS NOT NULL AND pagarme_order_id = $3))`,
+      [attempt.order_id, chargeId || null, providerOrderId || null],
+    );
+    return true;
+  }
+  if (["chargedback", "chargeback"].includes(normalized)) {
+    await _storeAttempt(attempt.id, { status: "chargedback", providerOrderId, chargeId });
+    await pool.query(
+      `UPDATE orders SET payment_status = 'chargedback'
+       WHERE id = $1 AND (($2::text IS NOT NULL AND pagarme_charge_id = $2) OR ($3::text IS NOT NULL AND pagarme_order_id = $3))`,
+      [attempt.order_id, chargeId || null, providerOrderId || null],
+    );
+    return true;
+  }
+  if (["underpaid", "overpaid", "partial_canceled"].includes(normalized)) {
+    await _storeAttempt(attempt.id, { status: "review_required", providerOrderId, chargeId, failureCode: normalized });
+    await pool.query(
+      `UPDATE orders SET payment_status = 'review_required'
+       WHERE id = $1 AND COALESCE(payment_status, '') <> 'paid'
+         AND (($2::text IS NOT NULL AND pagarme_charge_id = $2) OR ($3::text IS NOT NULL AND pagarme_order_id = $3))`,
+      [attempt.order_id, chargeId || null, providerOrderId || null],
+    );
+    return true;
+  }
+  if (["pending", "processing", "waiting_payment", "authorized"].includes(normalized)) {
+    await _storeAttempt(attempt.id, { status: "pending", providerOrderId, chargeId });
+    return true;
+  }
+  return false;
 };
 
 const handleWebhookEvent = async (event) => {
   const type = event?.type;
   const data = event?.data || {};
-  switch (type) {
+  if (!type) throw Object.assign(new Error("Evento Pagar.me sem tipo."), { status: 400 });
+
+  if (type === "recipient.updated" || type === "recipient.status_changed") {
+    if (data.id && data.status) await _saveRecipientStatus(data.id, data.status);
+    return { processed: true, duplicate: false };
+  }
+
+  await _requirePaymentStorage();
+  const eventId = _webhookEventKey(event);
+  const inserted = await pool.query(
+    `INSERT INTO payment_webhook_events (provider, provider_event_id, event_type, payload, received_at)
+     VALUES ('pagarme', $1, $2, $3::jsonb, now())
+     ON CONFLICT (provider, provider_event_id) DO NOTHING
+     RETURNING id`,
+    [eventId, type, JSON.stringify(event)],
+  );
+  let webhookEvent = inserted.rows[0] || null;
+  if (!webhookEvent) {
+    const existing = await pool.query(
+      `SELECT id, processed_at FROM payment_webhook_events
+       WHERE provider = 'pagarme' AND provider_event_id = $1`,
+      [eventId],
+    );
+    webhookEvent = existing.rows[0] || null;
+    if (!webhookEvent?.id || webhookEvent.processed_at) {
+      return { processed: true, duplicate: true };
+    }
+  }
+
+  try {
+    switch (type) {
     case "order.paid":
     case "charge.paid": {
-      const orderId = _orderIdFromPayload(data);
-      const chargeId = data.id?.startsWith?.("ch_") ? data.id : (data.charges && data.charges[0]?.id) || null;
-      if (orderId) await _markOrderPaid(orderId, chargeId);
+      const refs = _providerRefsFromPayload(data);
+      const attempt = await _findAttemptByProviderRefs(refs);
+      await _setAttemptAndOrderState(attempt, "paid", refs);
       break;
     }
     case "charge.payment_failed":
-    case "order.payment_failed": {
-      const orderId = _orderIdFromPayload(data);
-      if (orderId) {
-        await pool.query("UPDATE orders SET payment_status = 'failed' WHERE id = $1", [orderId]);
-      }
+    case "order.payment_failed":
+    case "charge.canceled":
+    case "order.canceled": {
+      const refs = _providerRefsFromPayload(data);
+      const attempt = await _findAttemptByProviderRefs(refs);
+      await _setAttemptAndOrderState(attempt, "failed", refs);
       break;
     }
-    case "recipient.updated":
-    case "recipient.status_changed": {
-      if (data.id && data.status) await _saveRecipientStatus(data.id, data.status);
+    case "charge.refunded": {
+      const refs = _providerRefsFromPayload(data);
+      const attempt = await _findAttemptByProviderRefs(refs);
+      await _setAttemptAndOrderState(attempt, "refunded", refs);
       break;
     }
-    default:
-      // Eventos não tratados são ignorados de propósito.
+    case "charge.partial_canceled": {
+      const refs = _providerRefsFromPayload(data);
+      const attempt = await _findAttemptByProviderRefs(refs);
+      await _setAttemptAndOrderState(attempt, "partial_canceled", refs);
       break;
+    }
+    case "charge.chargedback":
+    case "chargeback.received": {
+      const refs = _providerRefsFromPayload(data);
+      const attempt = await _findAttemptByProviderRefs(refs);
+      await _setAttemptAndOrderState(attempt, "chargedback", refs);
+      break;
+    }
+    case "charge.underpaid":
+    case "charge.overpaid": {
+      const refs = _providerRefsFromPayload(data);
+      const attempt = await _findAttemptByProviderRefs(refs);
+      await _setAttemptAndOrderState(attempt, type.endsWith("underpaid") ? "underpaid" : "overpaid", refs);
+      break;
+    }
+    case "charge.pending":
+    case "charge.processing":
+    case "charge.updated": {
+      const refs = _providerRefsFromPayload(data);
+      const attempt = await _findAttemptByProviderRefs(refs);
+      await _setAttemptAndOrderState(attempt, data.status || "processing", refs);
+      break;
+    }
+      default:
+        break;
+    }
+    await pool.query(
+      "UPDATE payment_webhook_events SET processed_at = now(), processing_error = NULL WHERE id = $1",
+      [webhookEvent.id],
+    );
+  } catch (error) {
+    await pool.query(
+      "UPDATE payment_webhook_events SET processing_error = $2 WHERE id = $1",
+      [webhookEvent.id, String(error.message || "Erro ao processar evento").slice(0, 2000)],
+    );
+    throw error;
   }
+  _paymentLog("webhook_processed", { type, event_id: eventId });
+  return { processed: true, duplicate: false };
+};
+
+const reconcileOpenPaymentAttempts = async ({ limit = 50 } = {}) => {
+  if (!(await _paymentStorageReady()) || !process.env.PAGARME_SECRET_KEY) return { checked: 0, skipped: true };
+  const r = await pool.query(
+    `SELECT * FROM payment_attempts
+     WHERE provider = 'pagarme' AND method <> 'refund'
+       AND status IN ('processing', 'pending', 'review_required')
+       AND pagarme_charge_id IS NOT NULL
+     ORDER BY updated_at ASC
+     LIMIT $1`,
+    [Math.min(Math.max(Number(limit) || 50, 1), 200)],
+  );
+  let checked = 0;
+  for (const attempt of r.rows) {
+    try {
+      const { data } = await getHttp().get(`/charges/${attempt.pagarme_charge_id}`);
+      const refs = _providerRefsFromPayload(data);
+      await _setAttemptAndOrderState(attempt, data?.status, refs);
+      checked += 1;
+    } catch (error) {
+      console.error("pagarme: falha na conciliação de tentativa", { attempt_id: attempt.id, message: _wrap(error).message });
+    }
+  }
+  return { checked, skipped: false };
 };
 
 // ─── Dashboard de recebimentos (pagamentos online) ─────────────────────────────
@@ -1389,7 +1857,7 @@ const handleWebhookEvent = async (event) => {
 // Mapeia o status de um charge/order do Pagar.me para os 3 buckets do painel.
 const _paymentBucket = (pmStatus) => {
   const s = String(pmStatus || "").toLowerCase();
-  if (["paid", "overpaid", "underpaid"].includes(s)) return "paid";
+  if (s === "paid") return "paid";
   if (["pending", "processing", "waiting_payment", "authorized_pending_capture", "generated"].includes(s)) return "pending";
   if (!s) return null; // sem status → deixa o chamador usar o fallback interno
   return "failed"; // failed, refused, not_authorized, canceled, voided, refunded, chargedback…
@@ -1542,8 +2010,14 @@ module.exports = {
   createCardCharge,
   createPixCharge,
   refundCharge,
-  listSavedCardsByPhone,
-  deleteSavedCardByPhone,
+  requestRefundForOrder,
+  createPublicPaymentSession,
+  isPublicCheckoutConfigured,
+  isPaymentInfrastructureReady,
+  savedCardsAvailable,
+  listSavedCardsForClient,
+  deleteSavedCardForClient,
   verifyBasicAuth,
   handleWebhookEvent,
+  reconcileOpenPaymentAttempts,
 };

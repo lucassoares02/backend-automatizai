@@ -1,5 +1,6 @@
 const service = require("../services/publicService");
 const reorderService = require("../services/reorderService");
+const pagarmeService = require("../services/pagarmeService");
 
 const listRestaurants = async (_req, res) => {
   try {
@@ -71,9 +72,15 @@ const createOrder = async (req, res) => {
   if (!company_id || !client_id || !Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: "company_id, client_id, and items are required" });
   }
+  if (req.body?.payment_provider === "pagarme" && !(await pagarmeService.isPaymentInfrastructureReady())) {
+    return res.status(503).json({ error: "Pagamento online indisponível no momento." });
+  }
   try {
     const order = await service.createPublicOrder(req.body);
-    return res.status(201).json(order);
+    const paymentSession = order.payment_provider === "pagarme"
+      ? pagarmeService.createPublicPaymentSession(order)
+      : {};
+    return res.status(201).json({ ...order, ...paymentSession });
   } catch (error) {
     console.error("Error creating public order:", error);
     return res.status(500).json({ error: "Failed to create order" });
@@ -124,23 +131,12 @@ const getOrder = async (req, res) => {
 };
 
 const listOrdersByPhone = async (req, res) => {
-  const { company_id, phone } = req.query;
-  if (!company_id || isNaN(company_id)) {
-    return res.status(400).json({ error: "company_id inválido" });
-  }
-  if (!phone) {
-    return res.status(400).json({ error: "phone é obrigatório" });
-  }
-  try {
-    const orders = await service.findPublicOrdersByPhone({
-      company_id: Number(company_id),
-      phone: String(phone),
-    });
-    return res.status(200).json(orders);
-  } catch (error) {
-    console.error("Error listing public orders by phone:", error);
-    return res.status(500).json({ error: "Failed to list orders" });
-  }
+  // Telefone não é autenticação. O histórico será reaberto quando o provedor de
+  // OTP emitir uma sessão de cliente verificada; até lá, use links UUID de cada
+  // pedido para evitar enumeração e vazamento de dados pessoais.
+  return res.status(410).json({
+    error: "Histórico por telefone indisponível sem verificação de identidade.",
+  });
 };
 
 const reorder = async (req, res) => {
@@ -181,6 +177,7 @@ const cancelOrder = async (req, res) => {
     return res.status(200).json({
       cancelled: true,
       refunded: result.refunded,
+      refund_pending: result.refundPending,
       paid_online: result.paidOnline,
     });
   } catch (error) {

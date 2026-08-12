@@ -18,6 +18,16 @@ const watchdogService = require("./services/watchdogService");
 const cartAbandonmentService = require("./services/cartAbandonmentService");
 const campaignSchedulerService = require("./services/campaignSchedulerService");
 const messageQueueService = require("./services/messageQueueService");
+const pagarmeReconciliationService = require("./services/pagarmeReconciliationService");
+
+// Só confie em cabeçalhos de proxy quando a infraestrutura foi declarada.
+// Exemplos: TRUST_PROXY=1 ou TRUST_PROXY=loopback.
+if (process.env.TRUST_PROXY) {
+  const configured = /^\d+$/.test(process.env.TRUST_PROXY)
+    ? Number(process.env.TRUST_PROXY)
+    : process.env.TRUST_PROXY;
+  app.set("trust proxy", configured);
+}
 
 // ─── CORS ────────────────────────────────────────────────────────────────────
 // Allowlist a partir das variáveis de ambiente. Se nenhuma origem for configurada,
@@ -27,13 +37,17 @@ const allowedOrigins = [process.env.ORIGIN, process.env.ALLOWED_ORIGIN]
   .filter(Boolean)
   .flatMap((v) => v.split(",").map((s) => s.trim()))
   .filter(Boolean);
+const isProduction = ["production", "prod"].includes(
+  String(process.env.NODE_ENV || process.env.ENVIROMENT || "").toLowerCase(),
+);
 
 const corsOptions = {
   origin(origin, callback) {
     // Requisições sem Origin (curl, apps mobile, webhooks server-to-server) são
     // permitidas; a proteção de CORS é relevante apenas para navegadores.
     if (!origin) return callback(null, true);
-    if (allowedOrigins.length === 0) return callback(null, true);
+    if (allowedOrigins.length === 0 && !isProduction) return callback(null, true);
+    if (allowedOrigins.length === 0) return callback(new Error("CORS não configurado para produção"));
     if (allowedOrigins.includes(origin)) return callback(null, true);
     return callback(new Error("Not allowed by CORS"));
   },
@@ -47,6 +61,7 @@ app.options(/^\/.*$/, cors(corsOptions));
 // Webhook Stripe precisa do corpo RAW para validar a assinatura. Precisa vir
 // ANTES do express.json (o body-parser marca req._body e o json seguinte pula).
 app.use("/api/stripe/webhook", express.raw({ type: "*/*" }));
+app.use("/api/pagarme/webhook", express.raw({ type: "*/*", limit: "256kb" }));
 
 // Limite de tamanho de corpo — mitiga DoS por payload grande. Uploads de imagem
 // usam multer (limite próprio de 10MB), não passam por aqui.
@@ -79,6 +94,7 @@ app
     cartAbandonmentService.start();
     campaignSchedulerService.start();
     messageQueueService.start();
+    pagarmeReconciliationService.start();
   })
   .on("error", (err) => {
     console.error("❌ Server startup error:");

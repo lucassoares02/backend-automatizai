@@ -263,6 +263,7 @@ const getCompanyPublicMenu = async (companyRef) => {
     pagarme: {
       enabled: pagarmeEnabled,
       public_key: pagarmeEnabled ? (process.env.PAGARME_PUBLIC_KEY || null) : null,
+      saved_cards_enabled: pagarmeEnabled && pagarmeService.savedCardsAvailable(),
     },
     company_preferences: prefsRes.rows[0] || null,
     company_address: companyAddress
@@ -421,23 +422,15 @@ const calculatePublicDeliveryFee = async ({ company_id, destination_lat, destina
   };
 };
 
-// Busca o client da empresa por telefone, comparando pela forma CANÔNICA
-// (55+DDD+número) — assim "27998219176" e "5527998219176" batem no mesmo cadastro.
+// Busca mínima do cliente por telefone. Não devolve documento, e-mail, endereço
+// nem notas: telefone não é um fator de autenticação suficiente para expor PII.
 const findClientByPhone = async (phone, companyId) => {
-  // Anexa o e-mail salvo (user_identifiers) para pré-preencher no pagamento.
-  const emailJoin = `
-    LEFT JOIN LATERAL (
-      SELECT value_norm FROM user_identifiers
-      WHERE user_id = cl.user_id AND type = 'email' AND revoked_at IS NULL
-      ORDER BY verified_at DESC NULLS LAST, last_seen_at DESC NULLS LAST, id DESC
-      LIMIT 1
-    ) em ON cl.user_id IS NOT NULL`;
   const norm = normalizePhone(phone);
   if (!norm) {
     // Telefone fora do padrão: cai no match exato (retrocompatível).
     const r = await pool.query(
-      `SELECT cl.*, em.value_norm AS email
-       FROM clients cl ${emailJoin}
+      `SELECT cl.id, cl.company_id, cl.name, cl.phone
+       FROM clients cl
        WHERE cl.phone = $1 AND cl.company_id = $2 AND cl.deactivated_at IS NULL
        ORDER BY (cl.user_id IS NOT NULL) DESC, cl.id ASC
        LIMIT 1`,
@@ -446,8 +439,8 @@ const findClientByPhone = async (phone, companyId) => {
     return r.rows[0] || null;
   }
   const result = await pool.query(
-    `SELECT cl.*, em.value_norm AS email
-     FROM clients cl ${emailJoin}
+    `SELECT cl.id, cl.company_id, cl.name, cl.phone
+     FROM clients cl
      WHERE cl.company_id = $2 AND cl.deactivated_at IS NULL
        AND normalize_phone(cl.phone) = $1
      ORDER BY (cl.user_id IS NOT NULL) DESC, cl.id ASC
@@ -965,6 +958,7 @@ const cancelPublicOrder = async ({ id, phone, reason }) => {
 
   // Estorno: apenas quando houve pagamento ONLINE confirmado via Pagar.me.
   let refunded = false;
+  let refundPending = false;
   const paidOnline = order.payment_provider === "pagarme" && order.payment_status === "paid";
   if (paidOnline) {
     // getPublicOrder não expõe o charge id (dado interno) — busca sob demanda.
@@ -972,13 +966,15 @@ const cancelPublicOrder = async ({ id, phone, reason }) => {
     const chargeId = chg.rows[0]?.pagarme_charge_id;
     if (chargeId) {
       try {
-        await pagarmeService.refundCharge(chargeId);
-        refunded = true;
-        await pool.query("UPDATE orders SET payment_status = 'refunded' WHERE id = $1", [order.id]);
+        const result = await pagarmeService.requestRefundForOrder(order.id, chargeId);
+        refunded = result.status === "refunded";
+        refundPending = !refunded;
       } catch (err) {
-        // Não bloqueia o cancelamento: o pedido é cancelado mesmo se o estorno
-        // falhar (o lojista consegue estornar manualmente no painel Pagar.me).
+        // O pedido pode ser cancelado, mas o reembolso fica explicitamente em
+        // pendência para conciliação operacional, sem prometer que ele ocorreu.
         console.error("Falha ao solicitar estorno Pagar.me (pedido " + order.id + "):", err.message);
+        refundPending = true;
+        await pool.query("UPDATE orders SET payment_status = 'refund_pending' WHERE id = $1", [order.id]);
       }
     }
   }
@@ -986,7 +982,7 @@ const cancelPublicOrder = async ({ id, phone, reason }) => {
   // Marca como cancelado (status 6) com o motivo; dispara webhook + histórico.
   await ordersService.updateStatus(order.id, 6, reason || null);
 
-  return { ok: true, refunded, paidOnline };
+  return { ok: true, refunded, refundPending, paidOnline };
 };
 
 const findPublicOrdersByPhone = async ({ company_id, phone }) => {
