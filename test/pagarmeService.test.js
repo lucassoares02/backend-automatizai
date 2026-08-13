@@ -44,6 +44,22 @@ test("descarta IP interno e preserva IP público para o antifraude", () => {
   assert.equal(_testing.normalizeClientIp("::ffff:200.147.67.12"), "200.147.67.12");
 });
 
+test("normaliza e valida a agenda de transferências automáticas", () => {
+  assert.deepEqual(
+    _testing.normalizeTransferSettings({
+      transfer_enabled: true,
+      transfer_interval: "weekly",
+      transfer_day: 5,
+    }),
+    { transfer_enabled: true, transfer_interval: "Weekly", transfer_day: 5 },
+  );
+
+  assert.throws(
+    () => _testing.normalizeTransferSettings({ transfer_enabled: true, transfer_interval: "daily", transfer_day: 1 }),
+    { message: "Para transferências diárias, transfer_day deve ser 0." },
+  );
+});
+
 test("não duplica a taxa de entrega entre items e shipping da Pagar.me", async (t) => {
   // Pedido 58: produtos R$32,90 + serviço R$1,49 + entrega R$2,00 = R$36,39.
   const result = _testing.itemTotalAfterShipping(3639, 200);
@@ -73,4 +89,57 @@ test("não duplica a taxa de entrega entre items e shipping da Pagar.me", async 
     ],
   );
   assert.equal(items.reduce((sum, item) => sum + item.amount, 0), 3439);
+});
+
+test("prioriza o endereço informado no pagamento e usa o snapshot do pedido como fallback", () => {
+  const snapshotOrder = {
+    delivery_address_snapshot: {
+      street: "Rua do Pedido",
+      number: "45",
+      neighborhood: "Centro",
+      complement: null,
+      city: "Vitória",
+      state: "es",
+      zip: "29000-000",
+    },
+  };
+
+  assert.deepEqual(_testing.buildBillingAddress(snapshotOrder), {
+    line_1: "45, Rua do Pedido, Centro",
+    zip_code: "29000000",
+    city: "Vitória",
+    state: "ES",
+    country: "BR",
+  });
+
+  assert.deepEqual(_testing.buildBillingAddress(snapshotOrder, {
+    line_1: "101, Avenida da Cobrança, Praia",
+    line_2: "Apto 7",
+    zip_code: "30140-110",
+    city: "Belo Horizonte",
+    state: "mg",
+  }), {
+    line_1: "101, Avenida da Cobrança, Praia",
+    line_2: "Apto 7",
+    zip_code: "30140110",
+    city: "Belo Horizonte",
+    state: "MG",
+    country: "BR",
+  });
+});
+
+test("recusa CEP e UF incompletos no endereço de cobrança", () => {
+  assert.equal(_testing.toBillingAddress({
+    street: "Rua A", number: "1", neighborhood: "Centro", city: "Vitória", state: "E", zip: "29000",
+  }), null);
+});
+
+test("transforma erro abstrato do provedor em orientação sobre endereço", () => {
+  assert.equal(
+    _testing.friendlyPaymentValidationMessage({
+      message: "Invalid request payload",
+      errors: { billing_address: ["line_1 is required"] },
+    }),
+    "Informe um endereço de cobrança completo: rua, número, bairro, cidade, estado e CEP.",
+  );
 });

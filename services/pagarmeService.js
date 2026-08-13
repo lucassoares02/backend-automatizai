@@ -51,15 +51,42 @@ const _formatErrors = (errors) => {
   return String(errors);
 };
 
-// Normaliza erros do axios para o padrão { message, status } do projeto,
-// SEMPRE anexando os detalhes de validação do Pagar.me (data.errors) — sem eles
-// a mensagem "The request is invalid." não diz qual campo falhou.
+// O provedor devolve "Invalid request payload" para vários campos. Essa frase
+// não ajuda quem está pagando e os detalhes crus podem mudar entre versões da
+// API. Traduzimos apenas as validações conhecidas do checkout e preservamos o
+// corpo original exclusivamente no log redigido abaixo.
+const _friendlyPaymentValidationMessage = (data, fallback) => {
+  const message = String(data?.message || "").trim();
+  const details = _formatErrors(data?.errors || data?.details);
+  const context = `${message} ${details}`.toLowerCase();
+  const isGenericValidation = /invalid request payload|the request is invalid|request is invalid|validation error/.test(context);
+  const isCheckoutFailure = /pagamento|cart[aã]o|pix/i.test(String(fallback || ""));
+
+  if ((isGenericValidation || isCheckoutFailure) && /billing|billing_address|zip_code|line_1|line_2|\baddress\b/.test(context)) {
+    return "Informe um endereço de cobrança completo: rua, número, bairro, cidade, estado e CEP.";
+  }
+  if ((isGenericValidation || isCheckoutFailure) && /\bemail\b/.test(context)) {
+    return "Informe um e-mail válido do titular para concluir o pagamento.";
+  }
+  if ((isGenericValidation || isCheckoutFailure) && /document|\bcpf\b|\bcnpj\b/.test(context)) {
+    return "Informe um CPF ou CNPJ válido do titular para concluir o pagamento.";
+  }
+  if ((isGenericValidation || isCheckoutFailure) && /card_token|card_id|\bcard\b|\bcvv\b|exp_month|exp_year|holder_name/.test(context)) {
+    return "Revise os dados do cartão e tente novamente.";
+  }
+  if (isGenericValidation) {
+    return "Não foi possível validar os dados do pagamento. Revise as informações e tente novamente.";
+  }
+  return message || fallback || "Erro no Pagar.me";
+};
+
+// Normaliza erros do axios para o padrão { message, status } do projeto. Os
+// detalhes técnicos ficam no log redigido; para o checkout devolvemos uma
+// orientação segura e acionável em vez de texto cru do provedor.
 const _wrap = (error, fallback) => {
   const status = error?.response?.status || error?.status || 500;
   const data = error?.response?.data;
-  let apiMsg = data?.message || error?.message;
-  const details = _formatErrors(data?.errors);
-  if (details) apiMsg = apiMsg ? `${apiMsg} — ${details}` : details;
+  const apiMsg = _friendlyPaymentValidationMessage(data, error?.message || fallback);
   // Respostas podem conter PII e dados sensíveis do meio de pagamento.
   if (data) console.error("Pagar.me API error body:", JSON.stringify(_redact(data)));
   const err = new Error(apiMsg || fallback || "Erro no Pagar.me");
@@ -164,6 +191,53 @@ const _paymentLog = (event, data = {}) => {
 // "active" é o único status em que o recebedor pode transacionar.
 const _isActiveStatus = (status) => String(status || "").toLowerCase() === "active";
 
+// A API v5 exige os três campos para atualizar transfer_settings, inclusive
+// quando a transferência automática está desligada. Mantemos a validação na
+// service para que qualquer chamador receba o mesmo contrato seguro.
+const _normalizeTransferSettings = (settings) => {
+  if (!settings || typeof settings !== "object" || typeof settings.transfer_enabled !== "boolean") {
+    throw Object.assign(new Error("transfer_enabled deve ser verdadeiro ou falso."), { status: 400 });
+  }
+
+  const interval = String(settings.transfer_interval || "").trim().toLowerCase();
+  if (!["daily", "weekly", "monthly"].includes(interval)) {
+    throw Object.assign(new Error("transfer_interval deve ser daily, weekly ou monthly."), { status: 400 });
+  }
+
+  const day = Number(settings.transfer_day);
+  if (!Number.isInteger(day)) {
+    throw Object.assign(new Error("transfer_day deve ser um número inteiro."), { status: 400 });
+  }
+  if (interval === "daily" && day !== 0) {
+    throw Object.assign(new Error("Para transferências diárias, transfer_day deve ser 0."), { status: 400 });
+  }
+  if (interval === "weekly" && (day < 1 || day > 5)) {
+    throw Object.assign(new Error("Para transferências semanais, transfer_day deve estar entre 1 e 5."), { status: 400 });
+  }
+  if (interval === "monthly" && (day < 1 || day > 31)) {
+    throw Object.assign(new Error("Para transferências mensais, transfer_day deve estar entre 1 e 31."), { status: 400 });
+  }
+
+  // A documentação aceita os nomes minúsculos; a API também devolve os enums
+  // com inicial maiúscula em algumas contas. Padronizamos o envio no formato
+  // usado no restante da integração atual.
+  return {
+    transfer_enabled: settings.transfer_enabled,
+    transfer_interval: interval[0].toUpperCase() + interval.slice(1),
+    transfer_day: day,
+  };
+};
+
+const _publicTransferSettings = (settings) => {
+  if (!settings || typeof settings !== "object") return null;
+  const interval = String(settings.transfer_interval || "").toLowerCase();
+  return {
+    transfer_enabled: settings.transfer_enabled === true || settings.transfer_enabled === "true",
+    transfer_interval: ["daily", "weekly", "monthly"].includes(interval) ? interval : null,
+    transfer_day: Number.isInteger(Number(settings.transfer_day)) ? Number(settings.transfer_day) : null,
+  };
+};
+
 // A Pagar.me exige um SEGUNDO FATOR de autenticação para alterações sensíveis do
 // recebedor (troca de conta bancária, principalmente). Detecta essa recusa para
 // tratá-la de forma amigável, em vez de propagar
@@ -251,10 +325,10 @@ const _toBillingAddress = ({ street, number, neighborhood, complement, city, sta
     .map((v) => String(v || "").trim())
     .filter(Boolean)
     .join(", ");
-  if (!zipDigits || !uf || !cityName || !line1) return null;
+  if (zipDigits.length !== 8 || !/^[A-Z]{2}$/.test(uf) || !cityName || !line1) return null;
   const line2 = String(complement || "").trim();
   return {
-    line_1: line1,
+    line_1: line1.slice(0, 256),
     ...(line2 ? { line_2: line2.slice(0, 128) } : {}),
     zip_code: zipDigits,
     city: cityName,
@@ -263,13 +337,53 @@ const _toBillingAddress = ({ street, number, neighborhood, complement, city, sta
   };
 };
 
-// Monta o billing_address exigido pelo antifraude do Pagar.me em cobranças no
-// cartão. Usa exclusivamente o endereço do CLIENTE; endereço da loja não é
-// endereço de cobrança e não pode ser usado como substituto.
-const _buildBillingAddress = (order) => {
+// A tela pode enviar o endereço de cobrança explicitamente (essencial para
+// retirada e pedidos legados, que não têm endereço de entrega). Aceitamos o
+// shape já usado pela Pagar.me e o shape semântico do checkout, mas validamos e
+// normalizamos no servidor antes de repassá-lo ao provedor.
+const _billingAddressFromInput = (value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (value.line_1 != null) {
+    const zipCode = _onlyDigits(value.zip_code).slice(0, 8);
+    const state = String(value.state || "").trim().toUpperCase().slice(0, 2);
+    const city = String(value.city || "").trim().slice(0, 64);
+    const line1 = String(value.line_1 || "").trim().slice(0, 256);
+    const line2 = String(value.line_2 || "").trim().slice(0, 128);
+    if (zipCode.length !== 8 || !/^[A-Z]{2}$/.test(state) || !city || !line1) return null;
+    return {
+      line_1: line1,
+      // O SDK 3DS exige line_2; quando o cliente não tem complemento, o
+      // marcador representa corretamente a ausência sem inventar endereço.
+      line_2: line2 || "-",
+      zip_code: zipCode,
+      city,
+      state,
+      country: "BR",
+    };
+  }
   return _toBillingAddress({
-    street: order.cli_street, number: order.cli_number, neighborhood: order.cli_neighborhood,
-    complement: order.cli_complement, city: order.cli_city, state: order.cli_state, zip: order.cli_zip,
+    street: value.street,
+    number: value.number,
+    neighborhood: value.neighborhood,
+    complement: value.complement,
+    city: value.city,
+    state: value.state,
+    zip: value.zip || value.zip_code,
+  });
+};
+
+// Monta o billing_address exigido pelo antifraude do Pagar.me em cobranças no
+// cartão. Quando o cliente informa um endereço na tela de pagamento, ele tem
+// precedência. Sem ele, usa o snapshot imutável do pedido — nunca o endereço
+// atual da loja e nunca um endereço salvo posteriormente pelo cliente.
+const _buildBillingAddress = (order, explicitAddress) => {
+  if (explicitAddress !== undefined && explicitAddress !== null) {
+    return _billingAddressFromInput(explicitAddress);
+  }
+  const { address } = _deliveryAddressSource(order);
+  return _toBillingAddress({
+    street: address.street, number: address.number, neighborhood: address.neighborhood,
+    complement: address.complement, city: address.city, state: address.state, zip: address.zip || address.zip_code,
   });
 };
 
@@ -617,9 +731,38 @@ const getRecipientDetails = async (companyId) => {
       charges_enabled: _isActiveStatus(rec.status),
       register_information: rec.register_information || null,
       default_bank_account: rec.default_bank_account || null,
+      transfer_settings: _publicTransferSettings(rec.transfer_settings),
     };
   } catch (error) {
     throw _wrap(error, "Falha ao carregar os dados do recebedor");
+  }
+};
+
+/**
+ * Atualiza a agenda de transferências automáticas do recebedor no Pagar.me.
+ * A Pagar.me transfere o saldo elegível na frequência configurada; não existe
+ * configuração de valor fixo nessa API.
+ */
+const updateTransferSettings = async (companyId, settings) => {
+  const company = await _getCompany(companyId);
+  if (!company) throw Object.assign(new Error("Empresa não encontrada."), { status: 404 });
+  if (!company.pagarme_recipient_id) {
+    throw Object.assign(new Error("Recebedor ainda não cadastrado."), { status: 409 });
+  }
+
+  const payload = _normalizeTransferSettings(settings);
+  try {
+    const http = getHttp();
+    const r = await http.patch(`/recipients/${company.pagarme_recipient_id}/transfer-settings`, payload);
+    return _publicTransferSettings(r.data?.transfer_settings || r.data || payload);
+  } catch (error) {
+    if (_is2FAError(error)) {
+      throw Object.assign(
+        new Error("A Pagar.me exige um segundo fator de autenticação para alterar as transferências automáticas. Confirme a operação no painel da Pagar.me."),
+        { status: 409 },
+      );
+    }
+    throw _wrap(error, "Falha ao atualizar as transferências automáticas");
   }
 };
 
@@ -1384,7 +1527,7 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
   const order = await _loadOrderForCharge(orderId);
   const { totalCents, split } = _computeSplit(order);
   const installments = Math.min(12, Math.max(1, Number(extra.installments) || 1));
-  const billingAddress = _buildBillingAddress(order);
+  const billingAddress = _buildBillingAddress(order, extra.billingAddress);
   const userId = await _ensureOrderUserId(order);
   order.client_user_id = userId;
   const threeDsAuthentication = _buildThreeDsAuthentication(extra.threeDs);
@@ -2257,6 +2400,7 @@ module.exports = {
   createKycLink,
   refreshRecipientStatus,
   getRecipientDetails,
+  updateTransferSettings,
   getRecipientBalance,
   requestWithdrawal,
   getPaymentsSummary,
@@ -2282,5 +2426,9 @@ module.exports = {
     normalizeClientIp: _normalizeClientIp,
     itemTotalAfterShipping: _itemTotalAfterShipping,
     buildPagarmeItems: _buildPagarmeItems,
+    normalizeTransferSettings: _normalizeTransferSettings,
+    friendlyPaymentValidationMessage: _friendlyPaymentValidationMessage,
+    toBillingAddress: _toBillingAddress,
+    buildBillingAddress: _buildBillingAddress,
   },
 };

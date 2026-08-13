@@ -332,6 +332,7 @@ router.post("/pagarme/connect", authMiddleware, authorizeCompanyBody(), pagarme.
 router.post("/pagarme/kyc", authMiddleware, authorizeCompanyBody(), pagarme.kyc);
 router.get("/pagarme/status/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.status);
 router.get("/pagarme/recipient/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.recipient);
+router.patch("/pagarme/transfer-settings", authMiddleware, authorizeCompanyBody(), pagarme.updateTransferSettings);
 router.get("/pagarme/payments/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.payments);
 router.get("/pagarme/balance/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.balance);
 router.post("/pagarme/withdraw", authMiddleware, authorizeCompanyBody(), pagarme.withdraw);

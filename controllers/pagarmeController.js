@@ -119,6 +119,28 @@ const recipient = async (req, res) => {
 };
 
 /**
+ * Atualiza a agenda de transferências automáticas do recebedor.
+ * Body: { company_id, transfer_enabled, transfer_interval, transfer_day }.
+ */
+const updateTransferSettings = async (req, res) => {
+  const companyId = req.body?.company_id ?? req.body?.companyId;
+  if (!companyId || isNaN(companyId)) {
+    return res.status(400).json({ error: "company_id é obrigatório" });
+  }
+  try {
+    const result = await service.updateTransferSettings(Number(companyId), {
+      transfer_enabled: req.body?.transfer_enabled,
+      transfer_interval: req.body?.transfer_interval,
+      transfer_day: req.body?.transfer_day,
+    });
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error("Pagar.me transfer settings error:", error.message);
+    return res.status(error.status || 500).json({ error: error.message || "Falha ao atualizar transferências automáticas" });
+  }
+};
+
+/**
  * Resumo de recebimentos (pagamentos online) para o dashboard do lojista.
  * Param: :companyId. Query opcional: ?days=30 (0/ausente = tudo).
  */
@@ -177,7 +199,7 @@ const withdraw = async (req, res) => {
 
 /**
  * Cobrança com cartão (card_token gerado no cliente via pagarme.js).
- * Body: { order_id, payment_session_token, request_id, card_token, saved_card_id?, document?, email?, installments? }
+ * Body: { order_id, payment_session_token, request_id, card_token, saved_card_id?, document?, email?, installments?, billing_address? }
  */
 const payCard = async (req, res) => {
   const orderId = req.body?.order_id ?? req.body?.orderId;
@@ -203,6 +225,7 @@ const payCard = async (req, res) => {
       name: req.body?.name,
       phone: req.body?.phone,
       installments: req.body?.installments,
+      billingAddress: req.body?.billing_address,
       savedCardId,
       saveCard: req.body?.save_card === true,
       requestId: req.body?.request_id,
@@ -318,4 +341,4 @@ const webhook = async (req, res) => {
   }
 };
 
-module.exports = { connect, kyc, status, recipient, payments, balance, withdraw, threeDsToken, payCard, payPix, listCards, deleteCard, webhook };
+module.exports = { connect, kyc, status, recipient, updateTransferSettings, payments, balance, withdraw, threeDsToken, payCard, payPix, listCards, deleteCard, webhook };
