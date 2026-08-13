@@ -9,7 +9,7 @@ const campaignsService = require("./campaignsService");
 const identityService = require("./identityService");
 const { normalizePhone } = require("../helpers/phone");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
-const { columnExists } = require("../helpers/schema");
+const { columnExists, tableExists } = require("../helpers/schema");
 
 const MAPS_KEY = process.env.GOOGLE_API_KEY;
 
@@ -842,6 +842,79 @@ const createPublicOrder = async (data) => {
   }
 };
 
+// Troca o submétodo de um pedido online antes que qualquer cobrança fique ativa.
+// Cartão e PIX têm a mesma taxa de serviço, então o total do pedido não muda.
+// Nunca permitimos a troca depois de uma cobrança criada, pois um PIX pendente ou
+// uma transação em análise pode ser confirmado pelo provedor a qualquer momento.
+const changePendingOnlinePaymentMethod = async ({
+  orderId,
+  companyId,
+  clientId,
+  onlinePaymentMethod,
+}) => {
+  const method = String(onlinePaymentMethod || "").trim().toLowerCase();
+  if (!["card", "pix"].includes(method)) {
+    throw Object.assign(new Error("Escolha cartão ou PIX para continuar."), { status: 400 });
+  }
+  if (!(await tableExists("payment_attempts"))) {
+    throw Object.assign(new Error("A troca de pagamento está indisponível no momento."), { status: 503 });
+  }
+
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+    const orderRes = await db.query(
+      `SELECT id, company_id, client_id, status, payment_status, payment_provider,
+              online_payment_method, pagarme_charge_id
+       FROM orders
+       WHERE id = $1
+       FOR UPDATE`,
+      [Number(orderId)],
+    );
+    const order = orderRes.rows[0];
+    if (!order || Number(order.company_id) !== Number(companyId) || Number(order.client_id) !== Number(clientId)) {
+      throw Object.assign(new Error("Pedido não encontrado."), { status: 404 });
+    }
+    if (order.payment_provider !== "pagarme" || Number(order.status) !== 10 || ["paid", "refunded", "refund_pending", "chargedback"].includes(String(order.payment_status || ""))) {
+      throw Object.assign(new Error("Este pedido não pode mais ter a forma de pagamento alterada."), { status: 409 });
+    }
+
+    const activeAttempt = await db.query(
+      `SELECT id
+       FROM payment_attempts
+       WHERE order_id = $1
+         AND provider = 'pagarme'
+         AND method <> 'refund'
+         AND status IN ('processing', 'pending', 'review_required')
+         AND (method <> 'pix' OR expires_at IS NULL OR expires_at > now())
+       LIMIT 1
+       FOR UPDATE`,
+      [order.id],
+    );
+    if (order.pagarme_charge_id || activeAttempt.rows[0]) {
+      throw Object.assign(
+        new Error("Já existe uma cobrança em andamento para este pedido. Aguarde a confirmação antes de trocar a forma de pagamento."),
+        { status: 409 },
+      );
+    }
+
+    const updated = await db.query(
+      `UPDATE orders
+       SET online_payment_method = $2, updated_at = now()
+       WHERE id = $1
+       RETURNING id, online_payment_method, total`,
+      [order.id, method],
+    );
+    await db.query("COMMIT");
+    return updated.rows[0];
+  } catch (error) {
+    await db.query("ROLLBACK");
+    throw error;
+  } finally {
+    db.release();
+  }
+};
+
 const _PUBLIC_ORDER_SELECT = `
   SELECT
     o.id, o.uuid, o.company_id, o.client_id, o.status, o.notes,
@@ -1117,6 +1190,7 @@ module.exports = {
   createPublicClient,
   updatePublicClient,
   createPublicOrder,
+  changePendingOnlinePaymentMethod,
   calculatePublicDeliveryFee,
   getPublicOrder,
   cancelPublicOrder,

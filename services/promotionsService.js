@@ -220,11 +220,37 @@ const update = async (id, data) => {
 };
 
 const remove = async (id, companyId) => {
-  const result = await pool.query(
-    `DELETE FROM promotions WHERE id = $1 AND company_id = $2 RETURNING *`,
-    [id, companyId],
-  );
-  return result.rows[0] || null;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    // Os itens filhos precisam sair ANTES do pai: existe FK
+    // promotion_items.promotion_id -> promotions.id (sem ON DELETE CASCADE),
+    // então deletar direto de promotions violaria a restrição.
+    // O EXISTS garante que só apagamos os itens quando a promoção pertence
+    // à empresa — evita apagar itens de outra empresa por id forjado.
+    await client.query(
+      `DELETE FROM promotion_items
+       WHERE promotion_id = $1
+         AND EXISTS (SELECT 1 FROM promotions WHERE id = $1 AND company_id = $2)`,
+      [id, companyId],
+    );
+    const deleted = await client.query(
+      `DELETE FROM promotions WHERE id = $1 AND company_id = $2 RETURNING *`,
+      [id, companyId],
+    );
+    const promotion = deleted.rows[0];
+    if (!promotion) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+    await client.query("COMMIT");
+    return promotion;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
 };
 
 const toggleStatus = async (id, companyId, active) => {

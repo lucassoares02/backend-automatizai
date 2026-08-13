@@ -1,6 +1,7 @@
 const service = require("../services/publicService");
 const reorderService = require("../services/reorderService");
 const pagarmeService = require("../services/pagarmeService");
+const { verifyPaymentSession, tokenFromRequest } = require("../helpers/publicPaymentSession");
 
 const listRestaurants = async (_req, res) => {
   try {
@@ -84,6 +85,32 @@ const createOrder = async (req, res) => {
   } catch (error) {
     console.error("Error creating public order:", error);
     return res.status(500).json({ error: "Failed to create order" });
+  }
+};
+
+// A sessão curta de pagamento é a autorização para mudar apenas o submétodo
+// online (cartão/PIX) de um pedido ainda pendente. Não aceita telefone como prova
+// de identidade e o service bloqueia a troca quando já há cobrança ativa.
+const changeOnlinePaymentMethod = async (req, res) => {
+  const orderId = Number(req.params?.id);
+  if (!Number.isInteger(orderId) || orderId <= 0) {
+    return res.status(400).json({ error: "Invalid order id" });
+  }
+  const session = verifyPaymentSession(tokenFromRequest(req));
+  if (!session || Number(session.order_id) !== orderId) {
+    return res.status(401).json({ error: "Sessão de pagamento inválida ou expirada." });
+  }
+  try {
+    const order = await service.changePendingOnlinePaymentMethod({
+      orderId,
+      companyId: session.company_id,
+      clientId: session.client_id,
+      onlinePaymentMethod: req.body?.online_payment_method,
+    });
+    return res.status(200).json(order);
+  } catch (error) {
+    if (error.status >= 500) console.error("Error changing public payment method:", error);
+    return res.status(error.status || 500).json({ error: error.message || "Não foi possível trocar a forma de pagamento." });
   }
 };
 
@@ -193,6 +220,7 @@ module.exports = {
   createClient,
   updateClient,
   createOrder,
+  changeOnlinePaymentMethod,
   calculateDeliveryFee,
   getOrder,
   listOrdersByPhone,

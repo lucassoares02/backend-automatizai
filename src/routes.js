@@ -299,6 +299,7 @@ router.get("/public/client", publicLimiter, publicCtrl.findClientByPhone);
 router.post("/public/clients", publicLimiter, publicCtrl.createClient);
 router.patch("/public/clients/:id", publicLimiter, publicCtrl.updateClient);
 router.post("/public/orders", publicLimiter, publicCtrl.createOrder);
+router.patch("/public/orders/:id/online-payment-method", paymentMethodsLimiter, publicCtrl.changeOnlinePaymentMethod);
 router.get("/public/orders", publicLimiter, publicCtrl.listOrdersByPhone);
 router.get("/public/orders/:id/reorder", publicLimiter, publicCtrl.reorder);
 router.get("/public/orders/:id", publicLimiter, publicCtrl.getOrder);
