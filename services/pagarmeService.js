@@ -885,17 +885,31 @@ const _saveUserPagarmeCustomerId = async (userId, customerId) => {
   }
 };
 
+// Quando há `shipping.amount`, a Pagar.me o acrescenta ao total do pedido. Por
+// isso a entrega precisa aparecer em UM único lugar: no shipping ou nos items.
+// O retorno define quanto deve ser representado exclusivamente pelos items.
+const _itemTotalAfterShipping = (totalCents, shippingAmountCents = 0) => {
+  const shippingCents = Math.min(
+    totalCents,
+    Math.max(0, Math.round(Number(shippingAmountCents) || 0)),
+  );
+  return { shippingCents, itemsTotalCents: totalCents - shippingCents };
+};
+
 // Monta os "Itens" do pedido para a Pagar.me a partir de order_items (o que o
-// cliente pediu) + linhas de Taxa de entrega e Taxa de serviço. Cada linha vai
-// com quantity=1 e amount = subtotal da linha (em centavos) para não introduzir
-// erro de arredondamento por unidade. A SOMA das linhas DEVE bater exatamente com
-// o valor cobrado (totalCents) — reconciliamos o resto de arredondamento na última
-// linha e, em qualquer inconsistência, caímos num item único de valor = total
-// (nunca cobra valor diferente do pedido).
-const _buildPagarmeItems = async (order, totalCents) => {
+// cliente pediu) + linha de Taxa de serviço. A entrega entra em `shipping.amount`
+// quando o endereço de entrega é enviado; caso contrário, continua como item.
+// Cada linha vai com quantity=1 e amount = subtotal da linha (em centavos) para
+// não introduzir erro de arredondamento por unidade. A SOMA dos items, somada ao
+// shipping, DEVE bater exatamente com o valor cobrado (totalCents).
+const _buildPagarmeItems = async (order, totalCents, shippingAmountCents = 0) => {
+  const { shippingCents, itemsTotalCents } = _itemTotalAfterShipping(
+    totalCents,
+    shippingAmountCents,
+  );
   const single = [{
     code: String(order.id),
-    amount: totalCents,
+    amount: itemsTotalCents,
     description: `Pedido ${order.tag || "#" + order.id}`.slice(0, 64),
     quantity: 1,
   }];
@@ -919,20 +933,22 @@ const _buildPagarmeItems = async (order, totalCents) => {
     }
     const deliveryCents = Math.max(0, Math.round(Number(order.delivery_fee || 0) * 100));
     const serviceCents = Math.max(0, Math.round(Number(order.service_fee || 0) * 100));
-    if (deliveryCents >= 1) lines.push({ code: "delivery", amount: deliveryCents, description: "Taxa de entrega", quantity: 1 });
+    if (deliveryCents >= 1 && shippingCents === 0) {
+      lines.push({ code: "delivery", amount: deliveryCents, description: "Taxa de entrega", quantity: 1 });
+    }
     if (serviceCents >= 1) lines.push({ code: "service", amount: serviceCents, description: "Taxa de serviço", quantity: 1 });
 
     if (lines.length === 0) return single;
 
     // Reconcilia o arredondamento na última linha (todas com quantity=1).
     const sum = lines.reduce((s, l) => s + l.amount, 0);
-    const diff = totalCents - sum;
+    const diff = itemsTotalCents - sum;
     if (diff !== 0) lines[lines.length - 1].amount += diff;
 
     const valid = lines.every((l) => Number.isInteger(l.amount) && l.amount >= 1);
     const finalSum = lines.reduce((s, l) => s + l.amount, 0);
-    // Só usa a lista itemizada se ela for válida E somar EXATAMENTE o total.
-    return valid && finalSum === totalCents ? lines : single;
+    // Só usa a lista itemizada se ela for válida e, junto com shipping, somar o total.
+    return valid && finalSum + shippingCents === totalCents ? lines : single;
   } catch (e) {
     console.error("pagarme: falha ao montar itens do pedido (usando item único):", e.message);
     return single;
@@ -1396,10 +1412,10 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
     installments,
     statement_descriptor: (order.company_name || "Loja").replace(/[^a-zA-Z0-9 ]/g, "").slice(0, 13),
   };
-  // "Itens" do pedido enviados à Pagar.me (produtos pedidos + taxas).
-  const items = await _buildPagarmeItems(order, totalCents);
   const riskContext = _buildOrderRiskContext(order, extra);
   const { shipping_source: shippingSource, ...pagarmeRiskContext } = riskContext;
+  // A entrega já está em shipping.amount; não a duplica nos items.
+  const items = await _buildPagarmeItems(order, totalCents, pagarmeRiskContext.shipping?.amount);
   const metadata = {
     order_id: String(order.id),
     company_id: String(order.company_id),
@@ -1655,9 +1671,10 @@ const createPixCharge = async (orderId, extra = {}) => {
   // em todas as compras); senão manda inline e guarda o id retornado abaixo.
   const existingCustomerId = await _getUserPagarmeCustomerId(userId);
   const customerField = existingCustomerId ? { customer_id: existingCustomerId } : { customer };
-  const items = await _buildPagarmeItems(order, totalCents);
   const riskContext = _buildOrderRiskContext(order, extra);
   const { shipping_source: shippingSource, ...pagarmeRiskContext } = riskContext;
+  // A entrega já está em shipping.amount; não a duplica nos items.
+  const items = await _buildPagarmeItems(order, totalCents, pagarmeRiskContext.shipping?.amount);
 
   try {
     const http = getHttp();
@@ -2257,5 +2274,7 @@ module.exports = {
     isAntifraudDecline: _isAntifraudDecline,
     cardFailureMessage: _cardFailureMessage,
     normalizeClientIp: _normalizeClientIp,
+    itemTotalAfterShipping: _itemTotalAfterShipping,
+    buildPagarmeItems: _buildPagarmeItems,
   },
 };
