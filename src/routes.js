@@ -336,6 +336,7 @@ router.get("/pagarme/payments/:companyId", authMiddleware, authorizeCompanyParam
 router.get("/pagarme/balance/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.balance);
 router.post("/pagarme/withdraw", authMiddleware, authorizeCompanyBody(), pagarme.withdraw);
 // Cliente (público, rate-limited): pagamento embutido (cartão via token / PIX).
+router.get("/public/pagarme/3ds-token", paymentMethodsLimiter, pagarme.threeDsToken);
 router.post("/public/pagarme/card", paymentLimiter, pagarme.payCard);
 router.post("/public/pagarme/pix", paymentLimiter, pagarme.payPix);
 // Métodos salvos exigem sessão curta vinculada ao pedido; não aceitam telefone.

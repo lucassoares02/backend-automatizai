@@ -1,5 +1,6 @@
 const axios = require("axios");
 const crypto = require("crypto");
+const net = require("net");
 const pool = require("../db");
 const identityService = require("./identityService");
 const { columnExists, tableExists } = require("../helpers/schema");
@@ -132,6 +133,11 @@ const MIN_WITHDRAWAL = Number(process.env.PAGARME_MIN_WITHDRAWAL_AMOUNT ?? 1);
 const SAVED_CARDS_ENABLED = String(process.env.PAGARME_SAVED_CARDS_ENABLED || "false").toLowerCase() === "true";
 const WEBHOOK_AUTH_REQUIRED = String(process.env.PAGARME_WEBHOOK_AUTH_REQUIRED || "true").toLowerCase() !== "false";
 const THREE_DS_ENABLED = String(process.env.PAGARME_3DS_ENABLED || "false").toLowerCase() === "true";
+const THREE_DS_API_URL = (process.env.PAGARME_3DS_API_URL || (
+  /^(sk|pk)_test_/.test(String(process.env.PAGARME_SECRET_KEY || ""))
+    ? "https://3ds-sdx.stone.com.br/v2"
+    : "https://3ds.stone.com.br/v2"
+)).replace(/\/$/, "");
 
 const _redact = (value) => {
   if (!value || typeof value !== "object") return value;
@@ -230,7 +236,7 @@ const _buildCustomer = (client, extra = {}, billingAddress = null) => {
 // Converte um conjunto de campos (rua/número/bairro/cidade/UF/CEP) no formato
 // billing_address do Pagar.me. Retorna null se faltar algum campo obrigatório
 // (line_1, zip_code, city, state) — evita enviar um endereço incompleto.
-const _toBillingAddress = ({ street, number, neighborhood, city, state, zip }) => {
+const _toBillingAddress = ({ street, number, neighborhood, complement, city, state, zip }) => {
   const zipDigits = _onlyDigits(zip).slice(0, 8);
   const uf = String(state || "").trim().toUpperCase().slice(0, 2);
   const cityName = String(city || "").trim().slice(0, 64);
@@ -240,7 +246,15 @@ const _toBillingAddress = ({ street, number, neighborhood, city, state, zip }) =
     .filter(Boolean)
     .join(", ");
   if (!zipDigits || !uf || !cityName || !line1) return null;
-  return { line_1: line1, zip_code: zipDigits, city: cityName, state: uf, country: "BR" };
+  const line2 = String(complement || "").trim();
+  return {
+    line_1: line1,
+    ...(line2 ? { line_2: line2.slice(0, 128) } : {}),
+    zip_code: zipDigits,
+    city: cityName,
+    state: uf,
+    country: "BR",
+  };
 };
 
 // Monta o billing_address exigido pelo antifraude do Pagar.me em cobranças no
@@ -249,8 +263,123 @@ const _toBillingAddress = ({ street, number, neighborhood, city, state, zip }) =
 const _buildBillingAddress = (order) => {
   return _toBillingAddress({
     street: order.cli_street, number: order.cli_number, neighborhood: order.cli_neighborhood,
-    city: order.cli_city, state: order.cli_state, zip: order.cli_zip,
+    complement: order.cli_complement, city: order.cli_city, state: order.cli_state, zip: order.cli_zip,
   });
+};
+
+const _asObject = (value) => {
+  if (!value) return null;
+  if (typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+};
+
+// O endereço de entrega precisa representar o pedido, e não o último endereço
+// salvo pelo cliente. Pedidos criados antes da coluna de snapshot usam o endereço
+// ativo apenas como fallback de compatibilidade.
+const _deliveryAddressSource = (order) => {
+  const snapshot = _asObject(order.delivery_address_snapshot);
+  if (snapshot) return { address: snapshot, source: "order_snapshot" };
+  return {
+    source: "active_customer_address",
+    address: {
+      street: order.cli_street,
+      number: order.cli_number,
+      neighborhood: order.cli_neighborhood,
+      complement: order.cli_complement,
+      city: order.cli_city,
+      state: order.cli_state,
+      zip: order.cli_zip,
+    },
+  };
+};
+
+const _buildShipping = (order) => {
+  if (order.delivery_type !== true) return null;
+  const { address, source } = _deliveryAddressSource(order);
+  const shippingAddress = _toBillingAddress({
+    street: address.street,
+    number: address.number,
+    neighborhood: address.neighborhood,
+    complement: address.complement,
+    city: address.city,
+    state: address.state,
+    zip: address.zip || address.zip_code,
+  });
+  if (!shippingAddress) return null;
+  const recipientName = String(order.client_name || "Cliente").trim().slice(0, 64);
+  const recipientPhone = _onlyDigits(order.client_phone);
+  return {
+    shipping: _pruneEmpty({
+      amount: Math.max(0, Math.round(Number(order.delivery_fee || 0) * 100)),
+      description: "Entrega do pedido",
+      recipient_name: recipientName,
+      recipient_phone: recipientPhone || undefined,
+      address: shippingAddress,
+    }),
+    source,
+  };
+};
+
+const _normalizeClientIp = (value) => {
+  const ip = String(value || "").trim().replace(/^::ffff:/i, "");
+  const family = net.isIP(ip);
+  if (!family) return null;
+
+  // Endereços internos descrevem o proxy/rede local, não o comprador. Enviá-los
+  // reduz a qualidade do antifraude e pode expor topologia interna.
+  if (family === 4) {
+    const [a, b] = ip.split(".").map(Number);
+    if (
+      a === 0 || a === 10 || a === 127 ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168)
+    ) return null;
+  } else {
+    const normalized = ip.toLowerCase();
+    if (
+      normalized === "::1" ||
+      normalized.startsWith("fc") || normalized.startsWith("fd") ||
+      normalized.startsWith("fe80:")
+    ) return null;
+  }
+  return ip;
+};
+
+const _normalizeRiskSessionId = (value) => {
+  const id = String(value || "").trim();
+  return /^[A-Za-z0-9_-]{16,100}$/.test(id) ? id : null;
+};
+
+const _normalizeRiskLocation = (value) => {
+  if (!value || typeof value !== "object") return null;
+  const latitude = Number(value.latitude);
+  const longitude = Number(value.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return null;
+  return { latitude, longitude };
+};
+
+const _buildOrderRiskContext = (order, extra = {}) => {
+  const delivery = _buildShipping(order);
+  const platform = String(extra.devicePlatform || "").trim().slice(0, 100);
+  const clientIp = _normalizeClientIp(extra.clientIp);
+  const riskSessionId = _normalizeRiskSessionId(extra.riskSessionId);
+  const location = _normalizeRiskLocation(extra.location);
+  return {
+    ...(delivery?.shipping ? { shipping: delivery.shipping } : {}),
+    ...(delivery?.source ? { shipping_source: delivery.source } : {}),
+    ...(clientIp ? { ip: clientIp } : {}),
+    ...(riskSessionId ? { session_id: riskSessionId } : {}),
+    ...(location ? { location } : {}),
+    ...(platform ? { device: { platform } } : {}),
+  };
 };
 
 // ─── Persistência (companies / orders) ─────────────────────────────────────────
@@ -577,15 +706,20 @@ const requestWithdrawal = async (companyId, amount) => {
 
 // Carrega o pedido + empresa + cliente e valida que o recebedor está ativo.
 const _loadOrderForCharge = async (orderId) => {
+  const hasDeliverySnapshot = await columnExists("orders", "delivery_address_snapshot");
+  const deliverySnapshotSelect = hasDeliverySnapshot
+    ? "o.delivery_address_snapshot,"
+    : "NULL::jsonb AS delivery_address_snapshot,";
   const orderRes = await pool.query(
-    `SELECT o.id, o.uuid, o.total, o.subtotal, o.delivery_fee, o.tag, o.company_id, o.client_id, o.status, o.payment_status, o.service_fee,
+    `SELECT o.id, o.uuid, o.total, o.subtotal, o.delivery_fee, o.delivery_type, ${deliverySnapshotSelect}
+            o.tag, o.company_id, o.client_id, o.status, o.payment_status, o.service_fee,
             c.name AS company_name, c.pagarme_recipient_id, c.pagarme_charges_enabled,
             cl.name AS client_name, cl.phone AS client_phone, cl.document AS client_document,
             cl.user_id AS client_user_id,
             em.value_norm AS client_email,
             ca.street AS addr_street, ca.number AS addr_number, ca.neighborhood AS addr_neighborhood,
             ca.city AS addr_city, ca.state AS addr_state, ca.zip_code AS addr_zip,
-            ua.street AS cli_street, ua.number AS cli_number, ua.neighborhood AS cli_neighborhood,
+            ua.street AS cli_street, ua.number AS cli_number, ua.complement AS cli_complement, ua.neighborhood AS cli_neighborhood,
             ua.city AS cli_city, ua.state AS cli_state, ua.zip AS cli_zip
      FROM orders o
      JOIN companies c ON c.id = o.company_id
@@ -604,7 +738,7 @@ const _loadOrderForCharge = async (orderId) => {
        LIMIT 1
      ) ca ON true
      LEFT JOIN LATERAL (
-       SELECT street, number, neighborhood, city, state, zip
+       SELECT street, number, complement, neighborhood, city, state, zip
        FROM user_addresses
        WHERE user_id = cl.user_id AND deleted_at IS NULL
        ORDER BY is_default DESC, created_at DESC
@@ -924,6 +1058,35 @@ const _keyEnvironment = (key) => {
   return null;
 };
 
+const threeDsAvailable = () => Boolean(
+  THREE_DS_ENABLED && _keyEnvironment(process.env.PAGARME_SECRET_KEY),
+);
+
+// O token curto é gerado no servidor porque a API 3DS exige a secret key. Ele é
+// devolvido somente para uma sessão de pagamento já vinculada a um pedido.
+const createThreeDsToken = async () => {
+  if (!threeDsAvailable()) {
+    throw Object.assign(new Error("Autenticação 3DS indisponível no momento."), { status: 409 });
+  }
+  try {
+    const { data } = await axios.get(`${THREE_DS_API_URL}/tds-token`, {
+      auth: { username: process.env.PAGARME_SECRET_KEY, password: "" },
+      timeout: 10000,
+    });
+    const token = String(data?.tds_token || data?.token || "").trim();
+    if (!token) {
+      throw Object.assign(new Error("Resposta 3DS inválida."), { status: 502 });
+    }
+    return {
+      token,
+      environment: _keyEnvironment(process.env.PAGARME_SECRET_KEY),
+    };
+  } catch (error) {
+    if (error?.status) throw error;
+    throw _wrap(error, "Não foi possível iniciar a autenticação de segurança do cartão");
+  }
+};
+
 const isPublicCheckoutConfigured = () => {
   const secretEnvironment = _keyEnvironment(process.env.PAGARME_SECRET_KEY);
   const publicEnvironment = _keyEnvironment(process.env.PAGARME_PUBLIC_KEY);
@@ -944,24 +1107,23 @@ const isPaymentInfrastructureReady = async () => (
 // `customer_verified` por OTP. O checkout atual emite apenas sessão de pedido.
 const savedCardsAvailable = () => false;
 
-const _cardFailureMessage = (charge) => {
-  const transaction = charge?.last_transaction || {};
-  return (
-    transaction.acquirer_message ||
-    _formatErrors(transaction.gateway_response?.errors) ||
-    _formatErrors(transaction.errors) ||
-    null
-  );
-};
-
-// Não classifique antifraude por texto livre de adquirente. A operação usa uma
-// lista explícita de códigos do contrato Pagar.me, configurável por ambiente.
+// Não classifique antifraude por texto livre de adquirente. A operação usa os
+// campos estruturados do antifraude e permite complementar códigos por ambiente.
 const ANTIFRAUD_CODES = new Set(
   String(process.env.PAGARME_ANTIFRAUD_CODES || "antifraud_reproved,antifraud_denied,fraud_reproved")
     .split(",")
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean),
 );
+
+const ANTIFRAUD_DECLINE_STATUSES = new Set([
+  "reproved", "reproved_by_antifraud", "denied", "rejected", "refused",
+  "declined", "not_approved", "not_authorized", "failed", "fraud",
+]);
+const ANTIFRAUD_NON_FINAL_STATUSES = new Set([
+  "approved", "pending", "analyzing", "analysis", "review", "processing",
+  "not_analyzed", "not_available", "",
+]);
 
 const _collectProviderCodes = (value, codes = []) => {
   if (!value) return codes;
@@ -985,15 +1147,56 @@ const _hasAntifraudSignal = (values) => values
   .flatMap((value) => _collectProviderCodes(value))
   .some((code) => ANTIFRAUD_CODES.has(code));
 
-const _isAntifraudDecline = (charge) => {
+const _antifraudResponse = (charge) => {
   const transaction = charge?.last_transaction || {};
-  return _hasAntifraudSignal([
-    charge?.antifraud_response,
-    charge?.antifraud,
-    transaction?.antifraud_response,
-    transaction?.antifraud,
-    transaction?.gateway_response,
+  return transaction?.antifraud_response || transaction?.antifraud ||
+    charge?.antifraud_response || charge?.antifraud || null;
+};
+
+const _antifraudDiagnostics = (charge) => {
+  const response = _antifraudResponse(charge);
+  if (!response || typeof response !== "object") return null;
+  const status = String(response.status || "").trim().toLowerCase();
+  const code = String(response.return_code || response.code || "").trim().toLowerCase() || null;
+  const message = String(response.return_message || response.message || "").trim() || null;
+  const provider = String(response.provider_name || response.provider || "").trim() || null;
+  return { status, code, message, provider };
+};
+
+const _isAntifraudDecline = (charge) => {
+  const diagnostic = _antifraudDiagnostics(charge);
+  if (diagnostic) {
+    if (ANTIFRAUD_DECLINE_STATUSES.has(diagnostic.status)) return true;
+    if (diagnostic.code && ANTIFRAUD_CODES.has(diagnostic.code)) return true;
+    // Um retorno de antifraude com provedor/status próprio em uma cobrança já
+    // falha é uma decisão de risco, mesmo que a conta use um código não mapeado.
+    if (diagnostic.provider && !ANTIFRAUD_NON_FINAL_STATUSES.has(diagnostic.status)) return true;
+  }
+  return _hasAntifraudSignal([charge?.antifraud_response, charge?.antifraud]);
+};
+
+const _isAntifraudProviderError = (value) => {
+  if (!value || typeof value !== "object") return false;
+  const charge = value.charge || value.data?.charge || value;
+  return _isAntifraudDecline(charge) || _hasAntifraudSignal([
+    value.antifraud_response,
+    value.antifraud,
+    value.errors,
   ]);
+};
+
+const _isPositiveAcquirerMessage = (value) => /\b(aprovad[ao]?|autorizad[ao]?|success)\b/i.test(String(value || ""));
+
+const _cardFailureMessage = (charge, failureType) => {
+  if (failureType === "antifraud") {
+    return "Pagamento não aprovado pela análise de segurança.";
+  }
+  const transaction = charge?.last_transaction || {};
+  const gatewayDetails = _formatErrors(transaction.gateway_response?.errors) || _formatErrors(transaction.errors);
+  if (gatewayDetails) return gatewayDetails;
+  const acquirerMessage = String(transaction.acquirer_message || "").trim();
+  if (acquirerMessage && !_isPositiveAcquirerMessage(acquirerMessage)) return acquirerMessage;
+  return "O pagamento não foi aprovado pelo cartão. Verifique os dados ou tente outro cartão.";
 };
 
 const _buildThreeDsAuthentication = (input) => {
@@ -1195,7 +1398,13 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
   };
   // "Itens" do pedido enviados à Pagar.me (produtos pedidos + taxas).
   const items = await _buildPagarmeItems(order, totalCents);
-  const metadata = { order_id: String(order.id), company_id: String(order.company_id) };
+  const riskContext = _buildOrderRiskContext(order, extra);
+  const { shipping_source: shippingSource, ...pagarmeRiskContext } = riskContext;
+  const metadata = {
+    order_id: String(order.id),
+    company_id: String(order.company_id),
+    ...(shippingSource ? { shipping_source: shippingSource } : {}),
+  };
 
   // Reutiliza o customer do usuário na Pagar.me quando já existe (todas as compras
   // sob o MESMO cadastro). Se ainda não houver, manda o customer inline e salva o
@@ -1216,6 +1425,7 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
     code: String(order.id),
     ...customerField,
     items,
+    ...pagarmeRiskContext,
     payments: [{
       payment_method: "credit_card",
       credit_card: {
@@ -1250,6 +1460,7 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
         code: String(order.id),
         customer_id: customerId,
         items,
+        ...pagarmeRiskContext,
         payments: [{ payment_method: "credit_card", credit_card: { ...creditCardBase, card_id: cardId, ...(threeDsAuthentication ? { authentication: threeDsAuthentication } : {}) }, split }],
         metadata,
       };
@@ -1264,6 +1475,7 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
         code: String(order.id),
         customer_id: customerId,
         items,
+        ...pagarmeRiskContext,
         payments: [{ payment_method: "credit_card", credit_card: { ...creditCardBase, card_id: card.id, ...(threeDsAuthentication ? { authentication: threeDsAuthentication } : {}) }, split }],
         metadata,
       };
@@ -1318,9 +1530,10 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
       await pool.query("UPDATE orders SET payment_status = 'failed' WHERE id = $1", [order.id]);
     }
 
-    const failureType = !paid && status === "failed"
+    const failureType = !paid && ["failed", "canceled"].includes(status)
       ? (_isAntifraudDecline(charge) ? "antifraud" : "card_declined")
       : (!paid ? "payment_pending" : null);
+    const antifraudDiagnostic = _antifraudDiagnostics(charge);
 
     const response = {
       status,
@@ -1332,25 +1545,35 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
       card_save_warning: cardSaveWarning,
       failure_type: failureType,
       next_action: failureType === "antifraud" ? "track_order" : "retry_payment",
-      // Em falha, o Pagar.me costuma pôr a razão em acquirer_message; quando é
-      // rejeição de validação (ex.: "The item Code is required.") ela vem em
-      // gateway_response.errors. Surfaceamos ambas para não retornar message:null.
-      message: _cardFailureMessage(charge),
+      message: paid ? null : _cardFailureMessage(charge, failureType),
     };
     await _storeAttempt(attempt.id, {
       status: paid ? "paid" : (["failed", "canceled"].includes(status) ? "failed" : "pending"),
       providerOrderId: data.id,
       chargeId: charge.id,
       response,
-      failureCode: paid ? null : status,
+      failureCode: paid ? null : (antifraudDiagnostic?.code || failureType || status),
       failureMessage: paid ? null : response.message,
     });
-    _paymentLog("card_attempt_finished", { order_id: order.id, attempt_id: attempt.id, status });
+    _paymentLog("card_attempt_finished", {
+      order_id: order.id,
+      attempt_id: attempt.id,
+      status,
+      failure_type: failureType,
+      antifraud: antifraudDiagnostic,
+      shipping_source: shippingSource,
+      risk_context: {
+        has_ip: Boolean(pagarmeRiskContext.ip),
+        has_session: Boolean(pagarmeRiskContext.session_id),
+        has_location: Boolean(pagarmeRiskContext.location),
+        has_device: Boolean(pagarmeRiskContext.device),
+      },
+    });
     return response;
   } catch (error) {
     // Alguns adquirentes devolvem a recusa antifraude como erro HTTP, sem a
     // estrutura de charge. Mantemos o mesmo contrato de navegação nesses casos.
-    if (_hasAntifraudSignal([error?.response?.data, error?.message])) {
+    if (_isAntifraudProviderError(error?.response?.data)) {
       await pool.query("UPDATE orders SET payment_status = 'failed' WHERE id = $1", [order.id]);
       const wrapped = _wrap(error, "Pagamento recusado pela análise de segurança");
       const response = {
@@ -1433,6 +1656,8 @@ const createPixCharge = async (orderId, extra = {}) => {
   const existingCustomerId = await _getUserPagarmeCustomerId(userId);
   const customerField = existingCustomerId ? { customer_id: existingCustomerId } : { customer };
   const items = await _buildPagarmeItems(order, totalCents);
+  const riskContext = _buildOrderRiskContext(order, extra);
+  const { shipping_source: shippingSource, ...pagarmeRiskContext } = riskContext;
 
   try {
     const http = getHttp();
@@ -1440,6 +1665,7 @@ const createPixCharge = async (orderId, extra = {}) => {
       code: String(order.id),
       ...customerField,
       items,
+      ...pagarmeRiskContext,
       payments: [
         {
           payment_method: "pix",
@@ -1447,7 +1673,11 @@ const createPixCharge = async (orderId, extra = {}) => {
           split,
         },
       ],
-      metadata: { order_id: String(order.id), company_id: String(order.company_id) },
+      metadata: {
+        order_id: String(order.id),
+        company_id: String(order.company_id),
+        ...(shippingSource ? { shipping_source: shippingSource } : {}),
+      },
     }, {
       headers: { "Idempotency-Key": _providerIdempotencyKey(attempt) },
     });
@@ -2014,10 +2244,18 @@ module.exports = {
   createPublicPaymentSession,
   isPublicCheckoutConfigured,
   isPaymentInfrastructureReady,
+  threeDsAvailable,
+  createThreeDsToken,
   savedCardsAvailable,
   listSavedCardsForClient,
   deleteSavedCardForClient,
   verifyBasicAuth,
   handleWebhookEvent,
   reconcileOpenPaymentAttempts,
+  // Funções puras expostas apenas para testes de contratos do provedor.
+  _testing: {
+    isAntifraudDecline: _isAntifraudDecline,
+    cardFailureMessage: _cardFailureMessage,
+    normalizeClientIp: _normalizeClientIp,
+  },
 };

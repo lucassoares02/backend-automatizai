@@ -7,6 +7,36 @@ const _paymentSessionForOrder = (req, orderId) => {
   return session;
 };
 
+const _paymentRiskContext = (req) => ({
+  // `req.ip` só usa X-Forwarded-For quando TRUST_PROXY está configurado no
+  // bootstrap. Assim não confiamos em cabeçalho controlado pelo navegador.
+  clientIp: req.ip || req.socket?.remoteAddress || null,
+  riskSessionId: req.body?.risk_session_id,
+  devicePlatform: req.body?.device_platform,
+  location: req.body?.location,
+});
+
+/**
+ * Cria o token efêmero usado pelo challenge 3DS no navegador. A sessão curta
+ * comprova que o chamador está pagando o pedido informado.
+ */
+const threeDsToken = async (req, res) => {
+  const orderId = req.query?.order_id;
+  if (!orderId || isNaN(orderId)) {
+    return res.status(400).json({ error: "order_id é obrigatório" });
+  }
+  if (!_paymentSessionForOrder(req, orderId)) {
+    return res.status(401).json({ error: "Sessão de pagamento inválida ou expirada." });
+  }
+  try {
+    const result = await service.createThreeDsToken();
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error("Pagar.me 3DS token error:", error.message);
+    return res.status(error.status || 500).json({ error: error.message || "Falha ao iniciar autenticação de segurança" });
+  }
+};
+
 // ─── Comerciante (autenticado) ─────────────────────────────────────────────────
 
 /**
@@ -178,6 +208,7 @@ const payCard = async (req, res) => {
       requestId: req.body?.request_id,
       threeDs: req.body?.three_ds,
       customerVerified: session.customer_verified === true,
+      ..._paymentRiskContext(req),
     });
     return res.status(200).json(result);
   } catch (error) {
@@ -247,6 +278,7 @@ const payPix = async (req, res) => {
       name: req.body?.name,
       phone: req.body?.phone,
       requestId: req.body?.request_id,
+      ..._paymentRiskContext(req),
     });
     return res.status(200).json(result);
   } catch (error) {
@@ -286,4 +318,4 @@ const webhook = async (req, res) => {
   }
 };
 
-module.exports = { connect, kyc, status, recipient, payments, balance, withdraw, payCard, payPix, listCards, deleteCard, webhook };
+module.exports = { connect, kyc, status, recipient, payments, balance, withdraw, threeDsToken, payCard, payPix, listCards, deleteCard, webhook };

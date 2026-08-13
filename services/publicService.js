@@ -264,6 +264,7 @@ const getCompanyPublicMenu = async (companyRef) => {
       enabled: pagarmeEnabled,
       public_key: pagarmeEnabled ? (process.env.PAGARME_PUBLIC_KEY || null) : null,
       saved_cards_enabled: pagarmeEnabled && pagarmeService.savedCardsAvailable(),
+      three_ds_enabled: pagarmeEnabled && pagarmeService.threeDsAvailable(),
     },
     company_preferences: prefsRes.rows[0] || null,
     company_address: companyAddress
@@ -507,6 +508,26 @@ const updatePublicClient = async ({ id, name, phone }) => {
   return result.rows[0];
 };
 
+// Snapshot imutável para a cobrança: um pedido não pode trocar de endereço quando
+// o cliente altera sua agenda de endereços depois do checkout.
+const _deliveryAddressSnapshot = (value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const text = (field, limit) => {
+    const raw = String(value[field] ?? "").trim();
+    return raw ? raw.slice(0, limit) : null;
+  };
+  const snapshot = {
+    street: text("street", 255),
+    number: text("number", 32),
+    complement: text("complement", 128),
+    neighborhood: text("neighborhood", 128),
+    city: text("city", 100),
+    state: text("state", 2)?.toUpperCase() || null,
+    zip: String(value.zip ?? value.zip_code ?? "").replace(/\D/g, "").slice(0, 8) || null,
+  };
+  return snapshot.street && snapshot.city && snapshot.state && snapshot.zip ? snapshot : null;
+};
+
 const createPublicOrder = async (data) => {
   const { company_id, client_id, notes, items, scheduled_for, payment_method_id } = data;
   // Provedor de pagamento online ('pagarme' | 'stripe'). Gravado já na criação
@@ -537,6 +558,7 @@ const createPublicOrder = async (data) => {
   // Em retirada: zera taxa e ignora endereço (snapshot vazio).
   // A taxa nunca pode ser negativa (clamp), evitando "desconto" via taxa.
   const delivery_address = isPickup ? null : (data.delivery_address ?? null);
+  const delivery_address_snapshot = isPickup ? null : _deliveryAddressSnapshot(data.delivery_address_snapshot);
   const delivery_fee = isPickup ? 0 : Math.max(0, Number(data.delivery_fee ?? 0));
 
   // ─── Preços autoritativos do servidor ───────────────────────────────────────
@@ -715,30 +737,35 @@ const createPublicOrder = async (data) => {
     const onlineMethod = payment_provider && ["pix", "card"].includes(data.online_payment_method)
       ? data.online_payment_method
       : null;
+    const hasDeliverySnapshot = await columnExists("orders", "delivery_address_snapshot");
+    const snapshotColumn = hasDeliverySnapshot ? ", delivery_address_snapshot" : "";
+    const snapshotPlaceholder = hasDeliverySnapshot ? ", $16::jsonb" : "";
+    const orderParams = [
+      company_id,
+      client_id,
+      notes ?? null,
+      subtotalOrder,
+      delivery_fee,
+      discount,
+      total,
+      payment_method_id ?? null,
+      delivery_address,
+      delivery_type_bool,
+      scheduled_for ?? null,
+      tag,
+      payment_provider,
+      service_fee,
+      onlineMethod,
+    ];
+    if (hasDeliverySnapshot) orderParams.push(delivery_address_snapshot ? JSON.stringify(delivery_address_snapshot) : null);
     const orderRes = await client.query(
       `INSERT INTO orders (
          company_id, client_id, status, notes, subtotal, delivery_fee, discount, total,
          payment_method_id, delivery_address, delivery_type, scheduled_for, tag, payment_provider,
-         service_fee, online_payment_method
+         service_fee, online_payment_method${snapshotColumn}
        )
-       VALUES ($1, $2, ${initialStatus}, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *`,
-      [
-        company_id,
-        client_id,
-        notes ?? null,
-        subtotalOrder,
-        delivery_fee,
-        discount,
-        total,
-        payment_method_id ?? null,
-        delivery_address,
-        delivery_type_bool,
-        scheduled_for ?? null,
-        tag,
-        payment_provider,
-        service_fee,
-        onlineMethod,
-      ],
+       VALUES ($1, $2, ${initialStatus}, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15${snapshotPlaceholder}) RETURNING *`,
+      orderParams,
     );
     const order = orderRes.rows[0];
 
