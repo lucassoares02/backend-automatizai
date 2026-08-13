@@ -132,6 +132,12 @@ const APP_URL = (process.env.PUBLIC_APP_URL || process.env.ORIGIN || "").replace
 const MIN_WITHDRAWAL = Number(process.env.PAGARME_MIN_WITHDRAWAL_AMOUNT ?? 1);
 const SAVED_CARDS_ENABLED = String(process.env.PAGARME_SAVED_CARDS_ENABLED || "false").toLowerCase() === "true";
 const WEBHOOK_AUTH_REQUIRED = String(process.env.PAGARME_WEBHOOK_AUTH_REQUIRED || "true").toLowerCase() !== "false";
+// Texto exibido na fatura do cartão do cliente (soft/statement descriptor).
+// Fixo e global para todas as lojas — máx. 13 caracteres, só letras/números/espaço.
+// Se não configurado, cai no nome da empresa (comportamento anterior).
+const STATEMENT_DESCRIPTOR = String(process.env.PAGARME_STATEMENT_DESCRIPTOR || "").trim();
+const _buildStatementDescriptor = (fallback) =>
+  String(STATEMENT_DESCRIPTOR || fallback || "Loja").replace(/[^a-zA-Z0-9 ]/g, "").trim().slice(0, 13);
 const THREE_DS_ENABLED = String(process.env.PAGARME_3DS_ENABLED || "false").toLowerCase() === "true";
 const THREE_DS_API_URL = (process.env.PAGARME_3DS_API_URL || (
   /^(sk|pk)_test_/.test(String(process.env.PAGARME_SECRET_KEY || ""))
@@ -1410,7 +1416,7 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
   const creditCardBase = {
     operation_type: "auth_and_capture",
     installments,
-    statement_descriptor: (order.company_name || "Loja").replace(/[^a-zA-Z0-9 ]/g, "").slice(0, 13),
+    statement_descriptor: _buildStatementDescriptor(order.company_name),
   };
   const riskContext = _buildOrderRiskContext(order, extra);
   const { shipping_source: shippingSource, ...pagarmeRiskContext } = riskContext;
