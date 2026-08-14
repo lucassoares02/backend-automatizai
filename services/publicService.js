@@ -1005,6 +1005,26 @@ const _normalizePhone = (phone) => normalizePhone(phone) || String(phone || "").
 // Aceita o UUID público do pedido OU o id numérico (retrocompatível).
 const _ORDER_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// A expiração é um atributo da tentativa PIX, não do pedido. Mantemos o status
+// do pedido em "pagamento pendente" para que cliente e estabelecimento decidam
+// pelo cancelamento nos fluxos já existentes, mas a interface não deve oferecer
+// um QR Code vencido como se ainda pudesse ser pago.
+const _getLatestPixExpiration = async (orderId) => {
+  if (!(await tableExists("payment_attempts"))) return null;
+  const result = await pool.query(
+    `SELECT expires_at
+     FROM payment_attempts
+     WHERE order_id = $1
+       AND provider = 'pagarme'
+       AND method = 'pix'
+       AND expires_at IS NOT NULL
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [orderId],
+  );
+  return result.rows[0]?.expires_at || null;
+};
+
 const getPublicOrder = async ({ id, phone }) => {
   const ref = String(id).trim();
   const byUuid = _ORDER_UUID_RE.test(ref);
@@ -1027,6 +1047,7 @@ const getPublicOrder = async ({ id, phone }) => {
     const rowPhone = _normalizePhone(row.client_phone);
     if (rowPhone !== reqPhone) return null;
   }
+  row.payment_expires_at = await _getLatestPixExpiration(row.id);
   return row;
 };
 
