@@ -294,11 +294,18 @@ const _isPlausibleEmail = (v) => /^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(String(v |
 // Monta o objeto customer do pedido a partir do cliente + dados informados no
 // checkout. `billingAddress` (quando disponível) vai também em customer.address —
 // o antifraude usa o endereço do titular para pontuar a transação.
-const _buildCustomer = (client, extra = {}, billingAddress = null) => {
+// ⚠️ TESTE (remover depois): valida a cobrança de CARTÃO sem enviar CPF/e-mail à
+// Pagar.me. Quando true: (1) o customer NÃO reaproveita CPF/e-mail salvos no
+// cadastro, (2) a exigência de e-mail é relaxada, (3) força customer inline (não
+// reusa customer_id já existente na Pagar.me). NÃO deixar true em produção.
+const _TEST_CARD_WITHOUT_CONTACT = true;
+
+const _buildCustomer = (client, extra = {}, billingAddress = null, ignoreSavedContact = false) => {
   // Documento informado no pagamento OU o já salvo no cadastro do cliente.
-  const doc = _onlyDigits(extra.document || client.client_document || client.document);
+  // Em teste (ignoreSavedContact) usa SÓ o que veio na requisição (aqui, nada).
+  const doc = _onlyDigits(ignoreSavedContact ? extra.document : (extra.document || client.client_document || client.document));
   const phone = _parsePhone(extra.phone || client.client_phone || client.phone);
-  const rawEmail = extra.email || client.client_email || client.email;
+  const rawEmail = ignoreSavedContact ? extra.email : (extra.email || client.client_email || client.email);
   const customer = {
     name: (extra.name || client.client_name || client.name || "Cliente").slice(0, 64),
     type: doc.length > 11 ? "company" : "individual",
@@ -313,12 +320,37 @@ const _buildCustomer = (client, extra = {}, billingAddress = null) => {
   return customer;
 };
 
+// Estados brasileiros: o Pagar.me exige a UF de 2 letras. O cadastro pode ter o
+// estado por extenso ("Espírito Santo"); convertê-lo por slice(0,2) acertava só
+// por coincidência (ex.: "São Paulo" virava "SA", "Minas Gerais" -> "MI").
+const _UF_SET = new Set(["AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"]);
+const _UF_BY_NAME = {
+  "acre": "AC", "alagoas": "AL", "amapa": "AP", "amazonas": "AM", "bahia": "BA",
+  "ceara": "CE", "distrito federal": "DF", "espirito santo": "ES", "goias": "GO",
+  "maranhao": "MA", "mato grosso": "MT", "mato grosso do sul": "MS",
+  "minas gerais": "MG", "para": "PA", "paraiba": "PB", "parana": "PR",
+  "pernambuco": "PE", "piaui": "PI", "rio de janeiro": "RJ",
+  "rio grande do norte": "RN", "rio grande do sul": "RS", "rondonia": "RO",
+  "roraima": "RR", "santa catarina": "SC", "sao paulo": "SP", "sergipe": "SE",
+  "tocantins": "TO",
+};
+// Converte o estado (por extenso OU sigla) na UF de 2 letras. Sigla válida é
+// mantida; sem correspondência, cai nas 2 primeiras letras (comportamento antigo).
+const _stateToUf = (raw) => {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  const upper = s.toUpperCase();
+  if (upper.length === 2 && _UF_SET.has(upper)) return upper;
+  const key = s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+  return _UF_BY_NAME[key] || upper.replace(/[^A-Z]/g, "").slice(0, 2);
+};
+
 // Converte um conjunto de campos (rua/número/bairro/cidade/UF/CEP) no formato
 // billing_address do Pagar.me. Retorna null se faltar algum campo obrigatório
 // (line_1, zip_code, city, state) — evita enviar um endereço incompleto.
 const _toBillingAddress = ({ street, number, neighborhood, complement, city, state, zip }) => {
   const zipDigits = _onlyDigits(zip).slice(0, 8);
-  const uf = String(state || "").trim().toUpperCase().slice(0, 2);
+  const uf = _stateToUf(state);
   const cityName = String(city || "").trim().slice(0, 64);
   // line_1 no formato do Pagar.me: "número, rua, bairro".
   const line1 = [number, street, neighborhood]
@@ -345,7 +377,7 @@ const _billingAddressFromInput = (value) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   if (value.line_1 != null) {
     const zipCode = _onlyDigits(value.zip_code).slice(0, 8);
-    const state = String(value.state || "").trim().toUpperCase().slice(0, 2);
+    const state = _stateToUf(value.state);
     const city = String(value.city || "").trim().slice(0, 64);
     const line1 = String(value.line_1 || "").trim().slice(0, 256);
     const line2 = String(value.line_2 || "").trim().slice(0, 128);
@@ -1532,8 +1564,8 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
   order.client_user_id = userId;
   const threeDsAuthentication = _buildThreeDsAuthentication(extra.threeDs);
 
-  const customerForPayment = _buildCustomer(order, extra, billingAddress);
-  if (!customerForPayment.email) {
+  const customerForPayment = _buildCustomer(order, extra, billingAddress, _TEST_CARD_WITHOUT_CONTACT);
+  if (!customerForPayment.email && !_TEST_CARD_WITHOUT_CONTACT) {
     throw Object.assign(new Error("Informe um e-mail válido para concluir o pagamento."), { status: 400 });
   }
   if (!billingAddress) {
@@ -1574,15 +1606,17 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
   // Reutiliza o customer do usuário na Pagar.me quando já existe (todas as compras
   // sob o MESMO cadastro). Se ainda não houver, manda o customer inline e salva o
   // id que a Pagar.me retornar (após criar o pedido).
-  const existingCustomerId = await _getUserPagarmeCustomerId(userId);
+  // TESTE: força customer inline (sem reusar customer_id), garantindo que a
+  // cobrança siga SEM o CPF/e-mail que ficariam salvos no customer da Pagar.me.
+  const existingCustomerId = _TEST_CARD_WITHOUT_CONTACT ? null : await _getUserPagarmeCustomerId(userId);
   // Se o cliente DIGITOU um e-mail e o customer é reutilizado, atualiza o cadastro
   // dele na Pagar.me — com customer_id o e-mail inline não seria enviado na cobrança.
   if (existingCustomerId && _isPlausibleEmail(extra.email)) {
-    await _updatePagarmeCustomer(existingCustomerId, _buildCustomer(order, extra, billingAddress));
+    await _updatePagarmeCustomer(existingCustomerId, _buildCustomer(order, extra, billingAddress, _TEST_CARD_WITHOUT_CONTACT));
   }
   const customerField = existingCustomerId
     ? { customer_id: existingCustomerId }
-    : { customer: _buildCustomer(order, extra, billingAddress) };
+    : { customer: _buildCustomer(order, extra, billingAddress, _TEST_CARD_WITHOUT_CONTACT) };
 
   // Payload de cobrança avulsa (cartão novo pelo card_token) — padrão e também
   // fallback quando salvar o cartão não está disponível.
