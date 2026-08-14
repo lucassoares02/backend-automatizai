@@ -265,6 +265,10 @@ const getCompanyPublicMenu = async (companyRef) => {
       public_key: pagarmeEnabled ? (process.env.PAGARME_PUBLIC_KEY || null) : null,
       saved_cards_enabled: pagarmeEnabled && pagarmeService.savedCardsAvailable(),
       three_ds_enabled: pagarmeEnabled && pagarmeService.threeDsAvailable(),
+      // Nome exibido na fatura do cartão (env PAGARME_STATEMENT_DESCRIPTOR, com
+      // fallback para o nome da loja). O cliente usa no payload 3DS, dentro de
+      // credit_card.statement_descriptor, alinhado à cobrança feita no servidor.
+      statement_descriptor: pagarmeEnabled ? pagarmeService.statementDescriptor(company.name) : null,
     },
     company_preferences: prefsRes.rows[0] || null,
     company_address: companyAddress

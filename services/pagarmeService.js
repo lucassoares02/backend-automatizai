@@ -2414,6 +2414,7 @@ module.exports = {
   threeDsAvailable,
   createThreeDsToken,
   savedCardsAvailable,
+  statementDescriptor: (companyName) => _buildStatementDescriptor(companyName),
   listSavedCardsForClient,
   deleteSavedCardForClient,
   verifyBasicAuth,
