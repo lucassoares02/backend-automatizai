@@ -82,6 +82,8 @@ const update = async (data) => {
     accepts_delivery,
     accepts_pickup,
     accepts_scheduling,
+    scheduling_min_days,
+    scheduling_max_days,
     max_distance_meters_delivery,
     kilometer_price,
     max_distance_meters_free_delivery,
@@ -111,6 +113,25 @@ const update = async (data) => {
       schedulingSet = `, accepts_scheduling = COALESCE($${params.length}, accepts_scheduling)`;
     }
 
+    // Janela de agendamento (min/max dias) — só quando a coluna existe. Sanitiza:
+    // inteiros >= 0 e garante max >= min (troca se vier invertido).
+    let schedWindowSet = "";
+    const hasSchedWindow = await columnExists("companies", "scheduling_min_days");
+    if (hasSchedWindow) {
+      let minD = Number.isFinite(Number(scheduling_min_days)) ? Math.max(0, Math.round(Number(scheduling_min_days))) : null;
+      let maxD = Number.isFinite(Number(scheduling_max_days)) ? Math.max(0, Math.round(Number(scheduling_max_days))) : null;
+      if (minD !== null && maxD !== null && maxD < minD) {
+        const t = minD; minD = maxD; maxD = t;
+      }
+      params.push(minD);
+      const minParam = params.length;
+      params.push(maxD);
+      const maxParam = params.length;
+      schedWindowSet =
+        `, scheduling_min_days = COALESCE($${minParam}, scheduling_min_days)` +
+        `, scheduling_max_days = COALESCE($${maxParam}, scheduling_max_days)`;
+    }
+
     const companyRes = await client.query(
       `UPDATE companies SET
          name = $2, description = $3, status = $4, phone = $5,
@@ -120,7 +141,7 @@ const update = async (data) => {
          custom_dietary_restrictions = $14,
          custom_ai_personalities = $15,
          accepts_delivery = COALESCE($16, accepts_delivery),
-         accepts_pickup = COALESCE($17, accepts_pickup)${schedulingSet}
+         accepts_pickup = COALESCE($17, accepts_pickup)${schedulingSet}${schedWindowSet}
        WHERE id = $1 RETURNING *`,
       params,
     );

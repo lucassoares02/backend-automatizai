@@ -55,10 +55,16 @@ const getCompanyPublicMenu = async (companyRef) => {
   // accepts_scheduling pode não ter sido migrada; sem a coluna devolve false.
   const hasScheduling = await columnExists("companies", "accepts_scheduling");
   const schedulingCol = hasScheduling ? "accepts_scheduling," : "false AS accepts_scheduling,";
+  // Janela de agendamento (min/max dias) — fallback 0/7 sem a coluna migrada.
+  const hasSchedWindow = await columnExists("companies", "scheduling_min_days");
+  const schedWindowCols = hasSchedWindow
+    ? "COALESCE(scheduling_min_days, 0) AS scheduling_min_days, COALESCE(scheduling_max_days, 7) AS scheduling_max_days,"
+    : "0 AS scheduling_min_days, 7 AS scheduling_max_days,";
   const companyRes = await pool.query(
     `SELECT id, uuid, name, description, phone, status, manual_open,
             logo_url, banner_url, brand_color,
             accepts_delivery, accepts_pickup, ${schedulingCol}
+            ${schedWindowCols}
             cuisine_type, dietary_restrictions, custom_dietary_restrictions,
             stripe_account_id, stripe_charges_enabled,
             pagarme_recipient_id, pagarme_charges_enabled
@@ -566,6 +572,40 @@ const createPublicOrder = async (data) => {
     }
     if (!isPickup && accepts.accepts_delivery === false) {
       throw new Error("Esta empresa não aceita pedidos para entrega.");
+    }
+  }
+
+  // Agendamento: quando enviado, valida contra a janela [hoje+min, hoje+max]
+  // configurada pela empresa (defaults 0/7 sem a coluna migrada). A checagem é
+  // por DIA e com 1 dia de tolerância nas pontas para não rejeitar por diferença
+  // de fuso — a UI (calendário) é quem restringe finamente os dias/horários.
+  if (scheduled_for) {
+    const when = new Date(scheduled_for);
+    if (isNaN(when.getTime())) {
+      throw new Error("Data de agendamento inválida.");
+    }
+    let minDays = 0;
+    let maxDays = 7;
+    if (await columnExists("companies", "scheduling_min_days")) {
+      const w = await pool.query(
+        "SELECT COALESCE(scheduling_min_days, 0) AS min, COALESCE(scheduling_max_days, 7) AS max FROM companies WHERE id = $1",
+        [company_id],
+      );
+      if (w.rows[0]) {
+        minDays = Number(w.rows[0].min);
+        maxDays = Number(w.rows[0].max);
+      }
+    }
+    const dayStart = (addDays) => {
+      const d = new Date();
+      d.setHours(0, 0, 0, 0);
+      d.setDate(d.getDate() + addDays);
+      return d;
+    };
+    const lower = dayStart(minDays - 1); // tolerância de 1 dia
+    const upper = dayStart(maxDays + 2); // +1 dia de tolerância além do fim do dia
+    if (when < lower || when >= upper) {
+      throw new Error("A data de agendamento está fora do período permitido pela loja.");
     }
   }
 
