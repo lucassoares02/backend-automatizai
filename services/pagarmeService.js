@@ -294,25 +294,39 @@ const _isPlausibleEmail = (v) => /^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(String(v |
 // Monta o objeto customer do pedido a partir do cliente + dados informados no
 // checkout. `billingAddress` (quando disponível) vai também em customer.address —
 // o antifraude usa o endereço do titular para pontuar a transação.
-// ⚠️ TESTE (remover depois): valida a cobrança de CARTÃO SEM e-mail (o CPF volta
-// ao normal). Quando true, o customer do cartão não inclui e-mail e a exigência
-// de e-mail é relaxada. NÃO afeta o PIX nem o CPF. NÃO deixar true em produção.
-const _TEST_CARD_WITHOUT_EMAIL = true;
+// Gera um e-mail sintético a partir do nome do cliente quando não há e-mail real:
+// padrão nome.sobrenome@arbian.com.br (só o nome quando não houver sobrenome).
+// Assim o cliente não precisa digitar e-mail e a cobrança não trava por "e-mail
+// obrigatório". Trade-off: e-mail sintético reduz a qualidade do antifraude e não
+// serve para comunicação real — por isso só é usado como fallback.
+const _SYNTHETIC_EMAIL_DOMAIN = "arbian.com.br";
+const _syntheticEmail = (name) => {
+  const clean = (s) => String(s || "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase().replace(/[^a-z0-9]/g, "");
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  const first = clean(parts[0]);
+  const last = parts.length > 1 ? clean(parts[parts.length - 1]) : "";
+  const local = last ? `${first}.${last}` : first;
+  return local ? `${local}@${_SYNTHETIC_EMAIL_DOMAIN}` : null;
+};
 
-const _buildCustomer = (client, extra = {}, billingAddress = null, omitEmail = false) => {
+const _buildCustomer = (client, extra = {}, billingAddress = null) => {
   // Documento informado no pagamento OU o já salvo no cadastro do cliente.
   const doc = _onlyDigits(extra.document || client.client_document || client.document);
   const phone = _parsePhone(extra.phone || client.client_phone || client.phone);
-  // omitEmail: fluxo de teste do cartão sem e-mail. Fora dele, reaproveita o
-  // e-mail informado OU o salvo no cadastro.
-  const rawEmail = omitEmail ? null : (extra.email || client.client_email || client.email);
+  const name = (extra.name || client.client_name || client.name || "Cliente").slice(0, 64);
+  // E-mail real (informado OU salvo no cadastro) tem prioridade; sem ele, gera um
+  // sintético do nome para o cliente não precisar digitar.
+  const rawEmail = extra.email || client.client_email || client.email;
+  const email = _isPlausibleEmail(rawEmail)
+    ? String(rawEmail).trim().toLowerCase()
+    : _syntheticEmail(name);
   const customer = {
-    name: (extra.name || client.client_name || client.name || "Cliente").slice(0, 64),
+    name,
     type: doc.length > 11 ? "company" : "individual",
   };
-  // Nunca inventar identidade de contato: e-mail sintético reduz a qualidade do
-  // antifraude e impossibilita comunicação confiável com o pagador.
-  if (_isPlausibleEmail(rawEmail)) customer.email = String(rawEmail).trim().toLowerCase();
+  if (email) customer.email = email;
   if (doc.length === 11 || doc.length === 14) customer.document = doc;
   if (phone) customer.phones = { mobile_phone: phone };
   // Endereço do titular para o antifraude (mesmo shape do billing_address).
@@ -1564,8 +1578,8 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
   order.client_user_id = userId;
   const threeDsAuthentication = _buildThreeDsAuthentication(extra.threeDs);
 
-  const customerForPayment = _buildCustomer(order, extra, billingAddress, _TEST_CARD_WITHOUT_EMAIL);
-  if (!customerForPayment.email && !_TEST_CARD_WITHOUT_EMAIL) {
+  const customerForPayment = _buildCustomer(order, extra, billingAddress);
+  if (!customerForPayment.email) {
     throw Object.assign(new Error("Informe um e-mail válido para concluir o pagamento."), { status: 400 });
   }
   if (!billingAddress) {
@@ -1610,11 +1624,11 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
   // Se o cliente DIGITOU um e-mail e o customer é reutilizado, atualiza o cadastro
   // dele na Pagar.me — com customer_id o e-mail inline não seria enviado na cobrança.
   if (existingCustomerId && _isPlausibleEmail(extra.email)) {
-    await _updatePagarmeCustomer(existingCustomerId, _buildCustomer(order, extra, billingAddress, _TEST_CARD_WITHOUT_EMAIL));
+    await _updatePagarmeCustomer(existingCustomerId, _buildCustomer(order, extra, billingAddress));
   }
   const customerField = existingCustomerId
     ? { customer_id: existingCustomerId }
-    : { customer: _buildCustomer(order, extra, billingAddress, _TEST_CARD_WITHOUT_EMAIL) };
+    : { customer: _buildCustomer(order, extra, billingAddress) };
 
   // Payload de cobrança avulsa (cartão novo pelo card_token) — padrão e também
   // fallback quando salvar o cartão não está disponível.
