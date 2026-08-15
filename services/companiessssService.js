@@ -84,6 +84,7 @@ const update = async (data) => {
     accepts_scheduling,
     scheduling_min_days,
     scheduling_max_days,
+    scheduling_open_days_only,
     max_distance_meters_delivery,
     kilometer_price,
     max_distance_meters_free_delivery,
@@ -132,6 +133,13 @@ const update = async (data) => {
         `, scheduling_max_days = COALESCE($${maxParam}, scheduling_max_days)`;
     }
 
+    // Só dias abertos vs todos os dias (boolean) — guardado por columnExists.
+    let openDaysOnlySet = "";
+    if (await columnExists("companies", "scheduling_open_days_only")) {
+      params.push(typeof scheduling_open_days_only === "boolean" ? scheduling_open_days_only : null);
+      openDaysOnlySet = `, scheduling_open_days_only = COALESCE($${params.length}, scheduling_open_days_only)`;
+    }
+
     const companyRes = await client.query(
       `UPDATE companies SET
          name = $2, description = $3, status = $4, phone = $5,
@@ -141,7 +149,7 @@ const update = async (data) => {
          custom_dietary_restrictions = $14,
          custom_ai_personalities = $15,
          accepts_delivery = COALESCE($16, accepts_delivery),
-         accepts_pickup = COALESCE($17, accepts_pickup)${schedulingSet}${schedWindowSet}
+         accepts_pickup = COALESCE($17, accepts_pickup)${schedulingSet}${schedWindowSet}${openDaysOnlySet}
        WHERE id = $1 RETURNING *`,
       params,
     );

@@ -60,11 +60,17 @@ const getCompanyPublicMenu = async (companyRef) => {
   const schedWindowCols = hasSchedWindow
     ? "COALESCE(scheduling_min_days, 0) AS scheduling_min_days, COALESCE(scheduling_max_days, 7) AS scheduling_max_days,"
     : "0 AS scheduling_min_days, 7 AS scheduling_max_days,";
+  // Só dias abertos (true, padrão) vs todos os dias (false) — fallback true.
+  const hasOpenDaysOnly = await columnExists("companies", "scheduling_open_days_only");
+  const openDaysOnlyCol = hasOpenDaysOnly
+    ? "COALESCE(scheduling_open_days_only, true) AS scheduling_open_days_only,"
+    : "true AS scheduling_open_days_only,";
   const companyRes = await pool.query(
     `SELECT id, uuid, name, description, phone, status, manual_open,
             logo_url, banner_url, brand_color,
             accepts_delivery, accepts_pickup, ${schedulingCol}
             ${schedWindowCols}
+            ${openDaysOnlyCol}
             cuisine_type, dietary_restrictions, custom_dietary_restrictions,
             stripe_account_id, stripe_charges_enabled,
             pagarme_recipient_id, pagarme_charges_enabled
