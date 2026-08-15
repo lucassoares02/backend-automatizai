@@ -427,11 +427,11 @@ const calculatePublicDeliveryFee = async ({ company_id, destination_lat, destina
   };
 };
 
-// Busca mínima do cliente por telefone. Devolve nome + e-mail salvo (identidade)
-// para pré-preencher o checkout/pagamento e evitar redigitar. Documento e notas
-// continuam ocultos. O e-mail já é exposto no mesmo nível de confiança dos
-// endereços salvos (GET /public/addresses?phone=), que também resolvem por
-// telefone. O e-mail vem de user_identifiers (salvo no pagamento).
+// Busca mínima do cliente por telefone. Devolve nome + e-mail + CPF salvos para
+// pré-preencher o checkout/pagamento e evitar redigitar. É o mesmo nível de
+// confiança dos endereços salvos (GET /public/addresses?phone=), que também
+// resolvem por telefone. E-mail vem de user_identifiers; CPF de clients.document
+// (ambos salvos no pagamento).
 const _clientEmailSubquery = `(
   SELECT ui.value_norm FROM user_identifiers ui
   WHERE ui.user_id = cl.user_id AND ui.type = 'email' AND ui.revoked_at IS NULL
@@ -444,7 +444,7 @@ const findClientByPhone = async (phone, companyId) => {
   if (!norm) {
     // Telefone fora do padrão: cai no match exato (retrocompatível).
     const r = await pool.query(
-      `SELECT cl.id, cl.company_id, cl.name, cl.phone, ${_clientEmailSubquery}
+      `SELECT cl.id, cl.company_id, cl.name, cl.phone, cl.document, ${_clientEmailSubquery}
        FROM clients cl
        WHERE cl.phone = $1 AND cl.company_id = $2 AND cl.deactivated_at IS NULL
        ORDER BY (cl.user_id IS NOT NULL) DESC, cl.id ASC
@@ -454,7 +454,7 @@ const findClientByPhone = async (phone, companyId) => {
     return r.rows[0] || null;
   }
   const result = await pool.query(
-    `SELECT cl.id, cl.company_id, cl.name, cl.phone, ${_clientEmailSubquery}
+    `SELECT cl.id, cl.company_id, cl.name, cl.phone, cl.document, ${_clientEmailSubquery}
      FROM clients cl
      WHERE cl.company_id = $2 AND cl.deactivated_at IS NULL
        AND normalize_phone(cl.phone) = $1
