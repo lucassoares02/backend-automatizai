@@ -160,6 +160,27 @@ const payments = async (req, res) => {
 };
 
 /**
+ * Visão financeira consolidada do recebedor: saldo, agenda de recebíveis,
+ * taxas realizadas, decomposição bruto→líquido e transferências.
+ * Param: :companyId. Query opcional: ?days=30|90|365|730.
+ */
+const financialDashboard = async (req, res) => {
+  const companyId = req.params.companyId;
+  if (!companyId || isNaN(companyId)) {
+    return res.status(400).json({ error: "companyId inválido" });
+  }
+  try {
+    const result = await service.getFinancialDashboard(Number(companyId), {
+      days: Number(req.query.days) || 30,
+    });
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error("Pagar.me financial dashboard error:", error.message);
+    return res.status(error.status || 500).json({ error: error.message || "Falha ao carregar o painel financeiro" });
+  }
+};
+
+/**
  * Saldo do recebedor (disponível / a liberar / transferido). Param: :companyId
  */
 const balance = async (req, res) => {
@@ -341,4 +362,4 @@ const webhook = async (req, res) => {
   }
 };
 
-module.exports = { connect, kyc, status, recipient, updateTransferSettings, payments, balance, withdraw, threeDsToken, payCard, payPix, listCards, deleteCard, webhook };
+module.exports = { connect, kyc, status, recipient, updateTransferSettings, payments, financialDashboard, balance, withdraw, threeDsToken, payCard, payPix, listCards, deleteCard, webhook };

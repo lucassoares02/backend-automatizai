@@ -143,3 +143,97 @@ test("transforma erro abstrato do provedor em orientação sobre endereço", () 
     "Informe um endereço de cobrança completo: rua, número, bairro, cidade, estado e CEP.",
   );
 });
+
+test("recompõe bruto, taxas e líquido usando os campos reais do recebível", () => {
+  assert.deepEqual(
+    _testing.publicPayable({
+      id: 123,
+      type: "credit",
+      status: "waiting_funds",
+      amount: 9450,
+      fee: 500,
+      anticipation_fee: 0,
+      fraud_coverage_fee: 50,
+      payment_method: "credit_card",
+      installment: 1,
+    }),
+    {
+      id: "123",
+      charge_id: null,
+      type: "credit",
+      status: "waiting_funds",
+      payment_method: "credit_card",
+      installment: 1,
+      created_at: null,
+      payment_date: null,
+      gross_cents: 10000,
+      net_cents: 9450,
+      provider_fee_cents: 500,
+      anticipation_fee_cents: 0,
+      fraud_fee_cents: 50,
+    },
+  );
+
+  const refund = _testing.publicPayable({ id: "refund-1", type: "refund", amount: 2000 });
+  assert.equal(refund.gross_cents, -2000);
+  assert.equal(refund.net_cents, -2000);
+});
+
+test("calcula a taxa Arbian com a mesma regra usada no split da cobrança", () => {
+  // R$ 100,00 em itens + R$ 1,49 de serviço: 10% dos itens + serviço.
+  assert.equal(
+    _testing.platformSplitCents({ total: 101.49, service_fee: 1.49 }),
+    1149,
+  );
+});
+
+test("calcula somente uma previsão de agenda a partir da configuração", () => {
+  const saturday = new Date("2026-08-15T12:00:00Z");
+  assert.equal(
+    _testing.nextTransferDate({
+      transfer_enabled: true,
+      transfer_interval: "daily",
+      transfer_day: 0,
+    }, saturday),
+    "2026-08-17",
+  );
+  assert.equal(
+    _testing.nextTransferDate({
+      transfer_enabled: true,
+      transfer_interval: "weekly",
+      transfer_day: 5,
+    }, saturday),
+    "2026-08-21",
+  );
+  assert.equal(
+    _testing.nextTransferDate({ transfer_enabled: false }, saturday),
+    null,
+  );
+});
+
+test("limita o histórico financeiro ao período suportado pela integração", () => {
+  assert.equal(_testing.financialPeriodDays(15), 30);
+  assert.equal(_testing.financialPeriodDays(80), 90);
+  assert.equal(_testing.financialPeriodDays(900), 730);
+});
+
+test("expõe antecipação histórica com todas as taxas discriminadas", () => {
+  const item = _testing.publicAnticipation({
+    id: "ba_123",
+    status: "approved",
+    amount: 100000,
+    fee: 5000,
+    anticipation_fee: 3000,
+    fraud_coverage_fee: 0,
+    automatic_transfer: false,
+  });
+
+  assert.equal(item.gross_amount, 1000);
+  assert.equal(item.fees, 80);
+  assert.equal(item.net_amount, 920);
+  assert.deepEqual(item.fee_breakdown, {
+    provider: 50,
+    anticipation: 30,
+    antifraud: 0,
+  });
+});

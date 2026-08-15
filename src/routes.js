@@ -335,6 +335,7 @@ router.get("/pagarme/status/:companyId", authMiddleware, authorizeCompanyParam("
 router.get("/pagarme/recipient/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.recipient);
 router.patch("/pagarme/transfer-settings", authMiddleware, authorizeCompanyBody(), pagarme.updateTransferSettings);
 router.get("/pagarme/payments/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.payments);
+router.get("/pagarme/financial-dashboard/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.financialDashboard);
 router.get("/pagarme/balance/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.balance);
 router.post("/pagarme/withdraw", authMiddleware, authorizeCompanyBody(), pagarme.withdraw);
 // Cliente (público, rate-limited): pagamento embutido (cartão via token / PIX).

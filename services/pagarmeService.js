@@ -172,6 +172,60 @@ const THREE_DS_API_URL = (process.env.PAGARME_3DS_API_URL || (
     : "https://3ds.stone.com.br/v2"
 )).replace(/\/$/, "");
 
+// Perfil comercial informado pela Pagar.me no documento fornecido pela Arbian:
+// "Taxas e Prazos (e-Commerce)", emitido em 15/08/2026 para a conta
+// 38.034.794/0001-87. Estas são condições contratuais da conta, e não valores
+// estimados pela aplicação. A taxa REAL de cada recebível continua vindo de
+// `GET /payables`; o perfil abaixo serve para explicar a regra antes da venda.
+const PAGARME_CONTRACT_FEE_PROFILE = Object.freeze({
+  source: {
+    name: "Pagar.me — Taxas e Prazos (e-Commerce)",
+    issued_at: "2026-08-15",
+    account_document: "38.034.794/0001-87",
+    scope: "pagarme_account",
+  },
+  currency: "BRL",
+  processing: {
+    fixed: 0.55,
+    rule: "Por transação aprovada",
+  },
+  antifraud_credit: {
+    fixed: 0.44,
+    rule: "Por transação de crédito",
+  },
+  pix: {
+    percentage: 1.09,
+    settlement: "No mesmo dia, após pagamento e conciliação",
+  },
+  credit_card: {
+    brands: ["Visa", "Mastercard", "Elo", "Amex", "Hipercard"],
+    rates: [
+      { installments_from: 1, installments_to: 1, percentage: 3.19 },
+      { installments_from: 2, installments_to: 6, percentage: 4.49 },
+      { installments_from: 7, installments_to: 18, percentage: 4.99 },
+    ],
+    settlement: "Na data de vencimento de cada parcela; em fins de semana e feriados, no próximo dia útil",
+  },
+  debit_card: {
+    available: false,
+    message: "Informação não disponível no documento de taxas atual.",
+  },
+  boleto: {
+    fixed: 3.19,
+    refund_fixed: 3.19,
+    settlement: "Em 2 dias úteis após pagamento e conciliação",
+  },
+  anticipation: {
+    enabled: false,
+    percentage: null,
+    message: "Antecipação automática inativa; taxa não informada no documento.",
+  },
+  transfer: {
+    fixed: 3.67,
+    rule: "Transferência para outras contas",
+  },
+});
+
 const _redact = (value) => {
   if (!value || typeof value !== "object") return value;
   if (Array.isArray(value)) return value.map(_redact);
@@ -2316,6 +2370,578 @@ const _mapLimit = async (items, limit, fn) => {
   return out;
 };
 
+// ─── Painel financeiro transparente ─────────────────────────────────────────
+
+const _money = (value) => Number((Number(value) || 0).toFixed(2));
+const _fromCents = (value) => _money((Number(value) || 0) / 100);
+const _toCents = (value) => Math.round((Number(value) || 0) * 100);
+
+const _financialPeriodDays = (value) => {
+  const days = Number(value) || 30;
+  if (days <= 30) return 30;
+  if (days <= 90) return 90;
+  if (days <= 365) return 365;
+  return 730; // A API pública passa a limitar recebíveis pagos a 24 meses.
+};
+
+const _dateOnlyUtc = (date) => {
+  const d = date instanceof Date ? date : new Date(date);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+};
+
+const _periodStart = (days) => {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - days);
+  return _dateOnlyUtc(d);
+};
+
+const _providerList = (data) => {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.data)) return data.data;
+  if (Array.isArray(data?.items)) return data.items;
+  return [];
+};
+
+// Paginação por cursor já é aceita hoje e será o único modelo suportado pela
+// Pagar.me. Limitamos a cinco páginas de 1.000 para manter a tela interativa; o
+// retorno informa quando ainda há dados e o usuário pode reduzir o período.
+const _fetchPayables = async (http, recipientId, createdSince) => {
+  const items = [];
+  let cursor = null;
+  let page = 0;
+  do {
+    const params = {
+      recipient_id: recipientId,
+      created_since: createdSince,
+      size: 1000,
+      ...(cursor ? { forward_cursor: cursor } : {}),
+    };
+    const { data } = await http.get("/payables", { params });
+    items.push(..._providerList(data));
+    cursor = data?.paging?.forward_cursor || null;
+    page += 1;
+  } while (cursor && page < 5);
+  return { items, truncated: Boolean(cursor) };
+};
+
+const _fetchTransfers = async (http, recipientId) => {
+  const { data } = await http.get("/transfers", {
+    params: { recipient_id: recipientId, count: 100 },
+  });
+  return _providerList(data);
+};
+
+const _fetchAnticipations = async (http, recipientId) => {
+  const { data } = await http.get(`/recipients/${recipientId}/bulk_anticipations`, {
+    params: { count: 100 },
+  });
+  return _providerList(data);
+};
+
+const _negativePayableTypes = new Set(["refund", "chargeback"]);
+const _positivePayableTypes = new Set(["credit", "refund_reversal", "chargeback_refund"]);
+
+// `amount` é o valor do recebível que impacta o saldo. As taxas são campos
+// separados no contrato do payable; somá-las recompõe o bruto financeiro antes
+// das deduções do provedor, sem estimar qualquer percentual.
+const _publicPayable = (raw) => {
+  const type = String(raw?.type || "credit").toLowerCase();
+  const rawAmount = Number(raw?.amount) || 0;
+  const sign = rawAmount < 0 ? -1 : (_negativePayableTypes.has(type) ? -1 : 1);
+  const netCents = sign * Math.abs(rawAmount);
+  const providerFeeCents = Math.max(0, Number(raw?.fee) || 0);
+  const anticipationFeeCents = Math.max(0, Number(raw?.anticipation_fee) || 0);
+  const fraudFeeCents = Math.max(0, Number(raw?.fraud_coverage_fee) || 0);
+  const deductionsCents = providerFeeCents + anticipationFeeCents + fraudFeeCents;
+  const positive = _positivePayableTypes.has(type) && netCents >= 0;
+  return {
+    id: raw?.id != null ? String(raw.id) : null,
+    charge_id: raw?.charge_id != null ? String(raw.charge_id) : null,
+    type,
+    status: String(raw?.status || "").toLowerCase() || null,
+    payment_method: String(raw?.payment_method || "").toLowerCase() || null,
+    installment: Number(raw?.installment) || null,
+    created_at: raw?.created_at || raw?.accrual_at || null,
+    payment_date: raw?.payment_date || null,
+    gross_cents: positive ? netCents + deductionsCents : netCents,
+    net_cents: netCents,
+    provider_fee_cents: providerFeeCents,
+    anticipation_fee_cents: anticipationFeeCents,
+    fraud_fee_cents: fraudFeeCents,
+  };
+};
+
+const _platformSplitCents = (order) => {
+  const totalCents = _toCents(order?.total);
+  const serviceFeeCents = Math.max(0, _toCents(order?.service_fee));
+  const goodsCents = Math.max(0, totalCents - serviceFeeCents);
+  return Math.min(
+    totalCents,
+    Math.max(0, Math.round(goodsCents * (PLATFORM_FEE_PERCENT / 100)) + serviceFeeCents),
+  );
+};
+
+const _safeBankAccount = (bank) => {
+  if (!bank || typeof bank !== "object") return null;
+  const account = String(bank.account_number || bank.conta || "").replace(/\D/g, "");
+  const branch = String(bank.branch_number || bank.agencia || "").replace(/\D/g, "");
+  const bankCode = String(bank.bank || bank.bank_code || "").replace(/\D/g, "");
+  return {
+    bank_code: bankCode || null,
+    bank_name: bank.bank_name || bank.name || (bankCode ? `Banco ${bankCode}` : null),
+    account_last4: account ? account.slice(-4).padStart(4, "•") : null,
+    branch_last4: branch ? branch.slice(-4).padStart(4, "•") : null,
+    type: bank.type || null,
+  };
+};
+
+const _advanceWeekendUtc = (date) => {
+  while (date.getUTCDay() === 0 || date.getUTCDay() === 6) {
+    date.setUTCDate(date.getUTCDate() + 1);
+  }
+  return date;
+};
+
+// Próxima data calculada exclusivamente a partir da frequência configurada.
+// Feriados bancários não estão disponíveis nesta integração; a interface deixa
+// explícito que é uma previsão e não uma liquidação prometida pela Pagar.me.
+const _nextTransferDate = (settings, now = new Date()) => {
+  if (!settings?.transfer_enabled) return null;
+  const interval = String(settings.transfer_interval || "").toLowerCase();
+  const day = Number(settings.transfer_day);
+  const base = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 12));
+  if (interval === "daily") return _dateOnlyUtc(_advanceWeekendUtc(base));
+  if (interval === "weekly" && day >= 1 && day <= 5) {
+    const delta = (day - base.getUTCDay() + 7) % 7;
+    base.setUTCDate(base.getUTCDate() + delta);
+    return _dateOnlyUtc(base);
+  }
+  if (interval === "monthly" && day >= 1 && day <= 31) {
+    let year = base.getUTCFullYear();
+    let month = base.getUTCMonth();
+    if (base.getUTCDate() > day) {
+      month += 1;
+      if (month > 11) { month = 0; year += 1; }
+    }
+    const last = new Date(Date.UTC(year, month + 1, 0, 12)).getUTCDate();
+    return _dateOnlyUtc(_advanceWeekendUtc(new Date(Date.UTC(year, month, Math.min(day, last), 12))));
+  }
+  return null;
+};
+
+const _transferStatus = (status) => String(status || "").toLowerCase() || null;
+
+const _publicTransfer = (raw) => {
+  const amountCents = Math.max(0, Number(raw?.amount) || 0);
+  const feeCents = Math.max(0, Number(raw?.fee) || 0);
+  return {
+    id: raw?.id != null ? String(raw.id) : null,
+    type: "transfer",
+    status: _transferStatus(raw?.status),
+    gross_amount: _fromCents(amountCents + feeCents),
+    fees: _fromCents(feeCents),
+    net_amount: _fromCents(amountCents),
+    created_at: raw?.date_created || raw?.created_at || null,
+    estimated_at: raw?.funding_estimated_date || null,
+    completed_at: raw?.funding_date || null,
+    reference: raw?.transaction_id != null ? String(raw.transaction_id) : (raw?.id != null ? String(raw.id) : null),
+  };
+};
+
+const _publicAnticipation = (raw) => {
+  const grossCents = Math.max(0, Number(raw?.amount) || 0);
+  const providerFeeCents = Math.max(0, Number(raw?.fee) || 0);
+  const anticipationFeeCents = Math.max(0, Number(raw?.anticipation_fee) || 0);
+  const fraudFeeCents = Math.max(0, Number(raw?.fraud_coverage_fee) || 0);
+  const feesCents = providerFeeCents + anticipationFeeCents + fraudFeeCents;
+  return {
+    date: raw?.created_at || raw?.updated_at || null,
+    availability_date: raw?.payment_date || null,
+    type: "anticipation",
+    method: "receivables",
+    status: String(raw?.status || "").toLowerCase() || null,
+    gross_amount: _fromCents(grossCents),
+    fees: _fromCents(feesCents),
+    net_amount: _fromCents(Math.max(0, grossCents - feesCents)),
+    reference: raw?.id != null ? String(raw.id) : null,
+    description: raw?.automatic_transfer === true ? "Antecipação automática" : "Antecipação de recebíveis",
+    fee_breakdown: {
+      provider: _fromCents(providerFeeCents),
+      anticipation: _fromCents(anticipationFeeCents),
+      antifraud: _fromCents(fraudFeeCents),
+    },
+  };
+};
+
+const _paymentMethod = (value) => {
+  const method = String(value || "").toLowerCase();
+  if (["credit_card", "card", "credit"].includes(method)) return "credit_card";
+  if (["debit_card", "debit"].includes(method)) return "debit_card";
+  if (method === "pix") return "pix";
+  if (method === "boleto") return "boleto";
+  return method || "other";
+};
+
+const _feeProfile = () => ({
+  ...PAGARME_CONTRACT_FEE_PROFILE,
+  arbian: {
+    percentage: PLATFORM_FEE_PERCENT,
+    rule: "Percentual sobre itens e entrega; a taxa de serviço do pedido também é destinada à plataforma.",
+    actual_value_source: "Split registrado em cada venda",
+  },
+});
+
+/**
+ * Painel financeiro completo do recebedor. A API do provedor é a fonte para
+ * saldo, taxas realizadas, agenda e transferências; o banco local só vincula o
+ * recebível ao pedido para explicar a parcela Arbian do split.
+ */
+const getFinancialDashboard = async (companyId, { days = 30 } = {}) => {
+  const company = await _getCompany(companyId);
+  if (!company) throw Object.assign(new Error("Empresa não encontrada."), { status: 404 });
+  const periodDays = _financialPeriodDays(days);
+  const base = {
+    connected: Boolean(company.pagarme_recipient_id),
+    currency: "BRL",
+    generated_at: new Date().toISOString(),
+    period_days: periodDays,
+    history_limit_days: 730,
+    fee_profile: _feeProfile(),
+  };
+  if (!company.pagarme_recipient_id) {
+    return {
+      ...base,
+      balance: null,
+      sales: null,
+      receivables: null,
+      automatic_transfers: null,
+      history: [],
+      availability: {
+        balance: { available: false, message: "Conecte a Pagar.me para consultar o saldo." },
+        receivables: { available: false, message: "Conecte a Pagar.me para consultar os recebíveis." },
+        transfers: { available: false, message: "Conecte a Pagar.me para consultar as transferências." },
+        anticipations: { available: false, message: "Conecte a Pagar.me para consultar as antecipações." },
+      },
+    };
+  }
+
+  const http = getHttp();
+  const recipientId = company.pagarme_recipient_id;
+  let recipient;
+  try {
+    const response = await http.get(`/recipients/${recipientId}`);
+    recipient = response.data || {};
+  } catch (error) {
+    throw _wrap(error, "Falha ao carregar o recebedor");
+  }
+
+  const createdSince = _periodStart(periodDays);
+  const periodSql = "AND o.created_at >= NOW() - ($2::int * INTERVAL '1 day')";
+  const [balanceResult, payablesResult, transfersResult, anticipationsResult, ordersResult] = await Promise.allSettled([
+    http.get(`/recipients/${recipientId}/balance`),
+    _fetchPayables(http, recipientId, createdSince),
+    _fetchTransfers(http, recipientId),
+    _fetchAnticipations(http, recipientId),
+    pool.query(
+      `SELECT o.id, o.tag, o.total, o.service_fee, o.created_at,
+              o.pagarme_charge_id, o.online_payment_method, o.payment_status,
+              c.name AS client_name
+         FROM orders o
+         LEFT JOIN clients c ON c.id = o.client_id
+        WHERE o.company_id = $1 AND o.payment_provider = 'pagarme' ${periodSql}
+        ORDER BY o.created_at DESC
+        LIMIT 1000`,
+      [Number(companyId), periodDays],
+    ),
+  ]);
+
+  const availability = {
+    balance: {
+      available: balanceResult.status === "fulfilled",
+      message: balanceResult.status === "fulfilled" ? null : "Saldo temporariamente indisponível na Pagar.me.",
+    },
+    receivables: {
+      available: payablesResult.status === "fulfilled",
+      message: payablesResult.status === "fulfilled" ? null : "Agenda de recebíveis temporariamente indisponível na Pagar.me.",
+    },
+    transfers: {
+      available: transfersResult.status === "fulfilled",
+      message: transfersResult.status === "fulfilled" ? null : "Histórico de transferências temporariamente indisponível na Pagar.me.",
+    },
+    anticipations: {
+      available: anticipationsResult.status === "fulfilled",
+      message: anticipationsResult.status === "fulfilled" ? null : "Histórico de antecipações temporariamente indisponível na Pagar.me.",
+    },
+  };
+
+  const balanceRaw = balanceResult.status === "fulfilled" ? (balanceResult.value.data || {}) : {};
+  const transferredAvailable = balanceRaw.transferred_amount != null;
+  const balance = balanceResult.status === "fulfilled" ? {
+    available: _fromCents(balanceRaw.available_amount),
+    waiting_funds: _fromCents(balanceRaw.waiting_funds_amount),
+    transferred: transferredAvailable ? _fromCents(balanceRaw.transferred_amount) : null,
+    transferred_available: transferredAvailable,
+    min_withdrawal: MIN_WITHDRAWAL,
+    max_withdrawal: _fromCents(balanceRaw.available_amount),
+    min_withdrawal_source: "Regra configurada no Arbian",
+  } : null;
+
+  const orderRows = ordersResult.status === "fulfilled" ? ordersResult.value.rows : [];
+  const ordersByCharge = new Map(
+    orderRows.filter((row) => row.pagarme_charge_id).map((row) => [String(row.pagarme_charge_id), row]),
+  );
+  const payablesPayload = payablesResult.status === "fulfilled" ? payablesResult.value : { items: [], truncated: false };
+  const payables = payablesPayload.items.map(_publicPayable);
+
+  // Uma venda parcelada gera vários recebíveis. Agrupamos por charge para que
+  // o comerciante veja uma única decomposição bruto → taxas → líquido.
+  const chargeGroups = new Map();
+  for (const payable of payables) {
+    if (payable.type !== "credit" || payable.net_cents < 0) continue;
+    const key = payable.charge_id || `payable:${payable.id}`;
+    if (!chargeGroups.has(key)) {
+      chargeGroups.set(key, {
+        charge_id: payable.charge_id,
+        reference: key,
+        method: _paymentMethod(payable.payment_method),
+        created_at: payable.created_at,
+        payment_dates: [],
+        statuses: [],
+        installments: 0,
+        merchant_gross_cents: 0,
+        provider_fee_cents: 0,
+        anticipation_fee_cents: 0,
+        fraud_fee_cents: 0,
+        net_cents: 0,
+      });
+    }
+    const group = chargeGroups.get(key);
+    group.merchant_gross_cents += payable.gross_cents;
+    group.provider_fee_cents += payable.provider_fee_cents;
+    group.anticipation_fee_cents += payable.anticipation_fee_cents;
+    group.fraud_fee_cents += payable.fraud_fee_cents;
+    group.net_cents += payable.net_cents;
+    if (payable.payment_date) group.payment_dates.push(payable.payment_date);
+    if (payable.status) group.statuses.push(payable.status);
+    group.installments = Math.max(group.installments, payable.installment || 0);
+    if (payable.created_at && (!group.created_at || new Date(payable.created_at) < new Date(group.created_at))) {
+      group.created_at = payable.created_at;
+    }
+  }
+
+  const calculations = [];
+  for (const group of chargeGroups.values()) {
+    const order = group.charge_id ? ordersByCharge.get(group.charge_id) : null;
+    const arbianFeeCents = order ? _platformSplitCents(order) : null;
+    const arbianServiceFeeCents = order ? Math.max(0, _toCents(order.service_fee)) : null;
+    const arbianPercentageFeeCents = arbianFeeCents == null
+      ? null
+      : Math.max(0, arbianFeeCents - arbianServiceFeeCents);
+    const chargedCents = order ? _toCents(order.total) : group.merchant_gross_cents;
+    const knownDeductions = (arbianFeeCents || 0) + group.provider_fee_cents + group.anticipation_fee_cents + group.fraud_fee_cents;
+    const otherAdjustmentsCents = chargedCents - knownDeductions - group.net_cents;
+    const waiting = group.statuses.some((status) => status === "waiting_funds");
+    const paid = group.statuses.length > 0 && group.statuses.every((status) => ["paid", "prepaid"].includes(status));
+    calculations.push({
+      charge_id: group.charge_id,
+      reference: order?.tag || group.reference,
+      order_id: order?.id || null,
+      client_name: order?.client_name || null,
+      method: group.method,
+      installments: group.installments || null,
+      created_at: order?.created_at || group.created_at,
+      next_payment_date: group.payment_dates.sort()[0] || null,
+      last_payment_date: group.payment_dates.sort().at(-1) || null,
+      status: waiting ? "waiting_funds" : (paid ? "paid" : (group.statuses[0] || null)),
+      gross_amount: _fromCents(chargedCents),
+      arbian_fee: arbianFeeCents == null ? null : _fromCents(arbianFeeCents),
+      arbian_percentage_fee: arbianPercentageFeeCents == null ? null : _fromCents(arbianPercentageFeeCents),
+      arbian_service_fee: arbianServiceFeeCents == null ? null : _fromCents(arbianServiceFeeCents),
+      provider_fee: _fromCents(group.provider_fee_cents),
+      anticipation_fee: _fromCents(group.anticipation_fee_cents),
+      fraud_fee: _fromCents(group.fraud_fee_cents),
+      other_adjustments: Math.abs(otherAdjustmentsCents) <= 1 ? 0 : _fromCents(otherAdjustmentsCents),
+      net_amount: _fromCents(group.net_cents),
+      values_source: "Pagar.me payables + split Arbian",
+    });
+  }
+  calculations.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+
+  const byMethodMap = new Map();
+  for (const calc of calculations) {
+    if (!byMethodMap.has(calc.method)) {
+      byMethodMap.set(calc.method, {
+        method: calc.method,
+        count: 0,
+        gross_amount: 0,
+        arbian_fee: 0,
+        provider_fee: 0,
+        anticipation_fee: 0,
+        fraud_fee: 0,
+        other_adjustments: 0,
+        net_amount: 0,
+        arbian_fee_available: true,
+      });
+    }
+    const item = byMethodMap.get(calc.method);
+    item.count += 1;
+    item.gross_amount += calc.gross_amount;
+    if (calc.arbian_fee == null) item.arbian_fee_available = false;
+    else item.arbian_fee += calc.arbian_fee;
+    item.provider_fee += calc.provider_fee;
+    item.anticipation_fee += calc.anticipation_fee;
+    item.fraud_fee += calc.fraud_fee;
+    item.other_adjustments += calc.other_adjustments;
+    item.net_amount += calc.net_amount;
+  }
+  const byMethod = [...byMethodMap.values()].map((item) => Object.fromEntries(
+    Object.entries(item).map(([key, value]) => [key, typeof value === "number" ? _money(value) : value]),
+  ));
+
+  const timelineMap = new Map();
+  for (const payable of payables) {
+    if (payable.type !== "credit" || payable.status !== "waiting_funds" || !payable.payment_date) continue;
+    const date = _dateOnlyUtc(payable.payment_date);
+    if (!date) continue;
+    if (!timelineMap.has(date)) {
+      timelineMap.set(date, { date, gross_amount: 0, fees: 0, net_amount: 0, methods: new Set(), references: new Set() });
+    }
+    const item = timelineMap.get(date);
+    item.gross_amount += _fromCents(payable.gross_cents);
+    item.fees += _fromCents(payable.provider_fee_cents + payable.anticipation_fee_cents + payable.fraud_fee_cents);
+    item.net_amount += _fromCents(payable.net_cents);
+    item.methods.add(_paymentMethod(payable.payment_method));
+    if (payable.charge_id) item.references.add(payable.charge_id);
+  }
+  const timeline = [...timelineMap.values()]
+    .map((item) => ({
+      date: item.date,
+      gross_amount: _money(item.gross_amount),
+      fees: _money(item.fees),
+      net_amount: _money(item.net_amount),
+      methods: [...item.methods],
+      receivables_count: item.references.size,
+      status: "waiting_funds",
+    }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  const summary = calculations.reduce((acc, calc) => ({
+    gross_amount: acc.gross_amount + calc.gross_amount,
+    arbian_fee: acc.arbian_fee + (calc.arbian_fee || 0),
+    provider_fee: acc.provider_fee + calc.provider_fee,
+    anticipation_fee: acc.anticipation_fee + calc.anticipation_fee,
+    fraud_fee: acc.fraud_fee + calc.fraud_fee,
+    other_adjustments: acc.other_adjustments + calc.other_adjustments,
+    net_amount: acc.net_amount + calc.net_amount,
+  }), { gross_amount: 0, arbian_fee: 0, provider_fee: 0, anticipation_fee: 0, fraud_fee: 0, other_adjustments: 0, net_amount: 0 });
+  for (const key of Object.keys(summary)) summary[key] = _money(summary[key]);
+
+  const calculatedChargeIds = new Set(calculations.map((item) => item.charge_id).filter(Boolean));
+  const pendingOrders = orderRows.filter((row) => row.payment_status !== "paid" && !calculatedChargeIds.has(String(row.pagarme_charge_id || "")));
+  const sales = {
+    paid_count: calculations.length,
+    gross_amount: summary.gross_amount,
+    pending_count: pendingOrders.filter((row) => !["failed", "refunded", "chargedback"].includes(String(row.payment_status))).length,
+    pending_amount: _money(pendingOrders
+      .filter((row) => !["failed", "refunded", "chargedback"].includes(String(row.payment_status)))
+      .reduce((sum, row) => sum + Number(row.total || 0), 0)),
+    failed_count: pendingOrders.filter((row) => ["failed", "refunded", "chargedback"].includes(String(row.payment_status))).length,
+  };
+
+  const transfers = transfersResult.status === "fulfilled"
+    ? transfersResult.value.map(_publicTransfer).sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
+    : [];
+  const transferSettings = _publicTransferSettings(recipient.transfer_settings);
+  const bankAccount = _safeBankAccount(recipient.default_bank_account);
+  const automaticTransfers = {
+    settings: transferSettings,
+    bank_account: bankAccount,
+    next_scheduled_at: _nextTransferDate(transferSettings),
+    next_scheduled_at_is_estimate: true,
+    estimated_amount: transferSettings?.transfer_enabled && balance ? balance.available : null,
+    estimated_fee: null,
+    estimated_net: null,
+    estimate_message: "A Pagar.me não informa antecipadamente a tarifa e o líquido da próxima transferência; os valores realizados aparecem no histórico.",
+    contractual_transfer_fee: PAGARME_CONTRACT_FEE_PROFILE.transfer.fixed,
+    history: transfers.slice(0, 20),
+  };
+
+  const history = calculations.map((calc) => ({
+    date: calc.created_at,
+    availability_date: calc.next_payment_date,
+    type: "sale",
+    method: calc.method,
+    status: calc.status,
+    gross_amount: calc.gross_amount,
+    fees: _money((calc.arbian_fee || 0) + calc.provider_fee + calc.anticipation_fee + calc.fraud_fee + calc.other_adjustments),
+    net_amount: calc.net_amount,
+    reference: calc.reference,
+    description: calc.client_name ? `Venda para ${calc.client_name}` : "Venda online",
+    fee_breakdown: {
+      arbian: calc.arbian_fee,
+      arbian_percentage: calc.arbian_percentage_fee,
+      arbian_service: calc.arbian_service_fee,
+      provider: calc.provider_fee,
+      anticipation: calc.anticipation_fee,
+      antifraud: calc.fraud_fee,
+      other_adjustments: calc.other_adjustments,
+    },
+  }));
+  for (const payable of payables) {
+    if (payable.type === "credit") continue;
+    const feeCents = payable.provider_fee_cents + payable.anticipation_fee_cents + payable.fraud_fee_cents;
+    history.push({
+      date: payable.created_at,
+      availability_date: payable.payment_date,
+      type: payable.type,
+      method: _paymentMethod(payable.payment_method),
+      status: payable.status,
+      gross_amount: _fromCents(payable.gross_cents),
+      fees: _fromCents(feeCents),
+      net_amount: _fromCents(payable.net_cents),
+      reference: payable.charge_id || payable.id,
+      description: payable.type === "refund" ? "Estorno" : payable.type === "chargeback" ? "Chargeback" : "Ajuste de recebível",
+    });
+  }
+  history.push(...transfers.map((transfer) => ({
+    date: transfer.created_at,
+    availability_date: transfer.completed_at || transfer.estimated_at,
+    type: "transfer",
+    method: "bank_transfer",
+    status: transfer.status,
+    gross_amount: transfer.gross_amount,
+    fees: transfer.fees,
+    net_amount: transfer.net_amount,
+    reference: transfer.reference,
+    description: "Transferência para a conta bancária",
+  })));
+  const anticipations = anticipationsResult.status === "fulfilled"
+    ? anticipationsResult.value.map(_publicAnticipation)
+    : [];
+  history.push(...anticipations);
+  history.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+
+  return {
+    ...base,
+    recipient_status: recipient.status || company.pagarme_recipient_status || null,
+    balance,
+    sales,
+    receivables: {
+      summary,
+      by_method: byMethod,
+      next: timeline[0] || null,
+      timeline,
+      calculations: calculations.slice(0, 20),
+      truncated: payablesPayload.truncated,
+    },
+    automatic_transfers: automaticTransfers,
+    anticipations,
+    history: history.slice(0, 500),
+    history_truncated: history.length > 500 || payablesPayload.truncated,
+    availability,
+  };
+};
+
 const getPaymentsSummary = async (companyId, { days = 0 } = {}) => {
   const cid = Number(companyId);
   if (!cid) return null;
@@ -2450,6 +3076,7 @@ module.exports = {
   getRecipientBalance,
   requestWithdrawal,
   getPaymentsSummary,
+  getFinancialDashboard,
   createCardCharge,
   createPixCharge,
   refundCharge,
@@ -2477,5 +3104,10 @@ module.exports = {
     friendlyPaymentValidationMessage: _friendlyPaymentValidationMessage,
     toBillingAddress: _toBillingAddress,
     buildBillingAddress: _buildBillingAddress,
+    publicPayable: _publicPayable,
+    publicAnticipation: _publicAnticipation,
+    platformSplitCents: _platformSplitCents,
+    nextTransferDate: _nextTransferDate,
+    financialPeriodDays: _financialPeriodDays,
   },
 };
