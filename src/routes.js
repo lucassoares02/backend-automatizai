@@ -39,6 +39,8 @@ const stripe = require("../controllers/stripeController");
 const pagarme = require("../controllers/pagarmeController");
 const n8n = require("../controllers/n8nController");
 const identity = require("../controllers/identityController");
+const customerAccount = require("../controllers/customerAccountController");
+const { customerAuth, optionalCustomerAuth } = require("./middlewares/customerAuth");
 
 // ─── Rate limiters ───────────────────────────────────────────────────────────
 // Estritos para autenticação/abuso; generosos para o fluxo público de pedidos
@@ -290,15 +292,27 @@ router.post("/public/purchase-goals/suggest", publicLimiter, purchaseGoals.publi
 router.get("/public/restaurants", publicLimiter, publicCtrl.listRestaurants);
 router.get("/public/company/:companyId", publicLimiter, publicCtrl.getCompanyMenu);
 router.get("/public/delivery-fee", publicLimiter, publicCtrl.calculateDeliveryFee);
+
+// Conta do consumidor. JWT e escopo são separados do painel administrativo;
+// histórico e cartões nunca usam telefone como prova de identidade.
+router.post("/public/customer-auth/google", authLimiter, customerAccount.googleSignIn);
+router.post("/public/customer-auth/email", authLimiter, customerAccount.emailSignIn);
+router.post("/public/customer-auth/register/start", authLimiter, customerAccount.startRegistration);
+router.post("/public/customer-auth/register/verify", authLimiter, customerAccount.verifyRegistration);
+router.get("/public/customer-account/me", customerAuth, customerAccount.me);
+router.get("/public/customer-account/orders", customerAuth, customerAccount.orders);
+router.get("/public/customer-account/payment-methods", customerAuth, customerAccount.paymentMethods);
+router.patch("/public/customer-account/payment-methods/:id/default", customerAuth, customerAccount.setDefaultPaymentMethod);
+router.delete("/public/customer-account/payment-methods/:id", customerAuth, customerAccount.deletePaymentMethod);
 // Página pública do motoboy (link/QR): entregas + rota + link do Maps. Sem auth.
 router.get("/public/delivery-routes/:token/driver-routes", publicLimiter, deliveries.getPublicDriverRoutes);
 router.get("/public/delivery-routes/:token", publicLimiter, deliveries.getPublicRoute);
 router.patch("/public/delivery-routes/:token/orders/:orderId/delivered", publicLimiter, deliveries.confirmPublicStopDelivery);
 router.patch("/public/delivery-routes/:token/orders/:orderId/return-to-route", publicLimiter, deliveries.returnPublicStopToRoute);
 router.get("/public/client", publicLimiter, publicCtrl.findClientByPhone);
-router.post("/public/clients", publicLimiter, publicCtrl.createClient);
+router.post("/public/clients", publicLimiter, optionalCustomerAuth, publicCtrl.createClient);
 router.patch("/public/clients/:id", publicLimiter, publicCtrl.updateClient);
-router.post("/public/orders", publicLimiter, publicCtrl.createOrder);
+router.post("/public/orders", publicLimiter, optionalCustomerAuth, publicCtrl.createOrder);
 router.patch("/public/orders/:id/online-payment-method", paymentMethodsLimiter, publicCtrl.changeOnlinePaymentMethod);
 router.get("/public/orders", publicLimiter, publicCtrl.listOrdersByPhone);
 router.get("/public/orders/:id/reorder", publicLimiter, publicCtrl.reorder);

@@ -44,11 +44,14 @@ const createClient = async (req, res) => {
   const { company_id, name } = req.body;
   if (!company_id || !name) return res.status(400).json({ error: "company_id and name are required" });
   try {
-    const client = await service.createPublicClient(req.body);
+    const client = await service.createPublicClient({
+      ...req.body,
+      authenticated_user_id: req.customer?.id || null,
+    });
     return res.status(201).json(client);
   } catch (error) {
     console.error("Error creating public client:", error);
-    return res.status(500).json({ error: "Failed to create client" });
+    return res.status(error.status || 500).json({ error: error.message || "Failed to create client" });
   }
 };
 
@@ -77,14 +80,19 @@ const createOrder = async (req, res) => {
     return res.status(503).json({ error: "Pagamento online indisponível no momento." });
   }
   try {
-    const order = await service.createPublicOrder(req.body);
+    const order = await service.createPublicOrder({
+      ...req.body,
+      authenticated_user_id: req.customer?.id || null,
+    });
     const paymentSession = order.payment_provider === "pagarme"
-      ? pagarmeService.createPublicPaymentSession(order)
+      ? pagarmeService.createPublicPaymentSession(order, {
+          customerVerified: Boolean(req.customer?.id),
+        })
       : {};
     return res.status(201).json({ ...order, ...paymentSession });
   } catch (error) {
     console.error("Error creating public order:", error);
-    return res.status(500).json({ error: "Failed to create order" });
+    return res.status(error.status || 500).json({ error: error.message || "Failed to create order" });
   }
 };
 

@@ -481,7 +481,26 @@ const findClientByPhone = async (phone, companyId) => {
 // Resolve a identidade global pelo telefone e devolve o client (company_id, user_id)
 // — criando-o só se ainda não existir. O endereço, quando enviado, é salvo na
 // camada global (user_addresses), nunca em clients.
-const createPublicClient = async ({ company_id, name, phone, street, number, complement, neighborhood, city, state, zip_code, latitude, longitude }) => {
+const createPublicClient = async ({ company_id, name, phone, street, number, complement, neighborhood, city, state, zip_code, latitude, longitude, authenticated_user_id }) => {
+  if (authenticated_user_id) {
+    const { client, userId } = await identityService.resolveClientForUser({
+      companyId: Number(company_id),
+      userId: authenticated_user_id,
+      phone: phone ? String(phone) : null,
+      name: name ? String(name) : null,
+    });
+    if (street) {
+      try {
+        await identityService.createAddress(userId, {
+          label: "Casa", street, number, complement, neighborhood,
+          city, state, zip: zip_code, latitude, longitude,
+        });
+      } catch (e) {
+        console.error("createPublicClient: falha ao salvar endereço do usuário autenticado:", e.message);
+      }
+    }
+    return client;
+  }
   if (!phone) {
     // Sem telefone não há como resolver identidade; mantém client "solto" (raro).
     const r = await pool.query(
@@ -556,6 +575,20 @@ const _deliveryAddressSnapshot = (value) => {
 
 const createPublicOrder = async (data) => {
   const { company_id, client_id, notes, items, scheduled_for, payment_method_id } = data;
+  if (data.authenticated_user_id) {
+    const owner = await pool.query(
+      `SELECT 1 FROM clients
+       WHERE id = $1 AND company_id = $2 AND user_id = $3 AND deactivated_at IS NULL
+       LIMIT 1`,
+      [client_id, company_id, data.authenticated_user_id],
+    );
+    if (!owner.rows[0]) {
+      throw Object.assign(
+        new Error("Atualize sua identificação antes de finalizar este pedido."),
+        { status: 403 },
+      );
+    }
+  }
   // Provedor de pagamento online ('pagarme' | 'stripe'). Gravado já na criação
   // para que o pedido nasça com "pagamento pendente" e o cliente pague online.
   const ONLINE_PROVIDERS = ["pagarme", "stripe"];
@@ -1180,6 +1213,22 @@ const findPublicOrdersByPhone = async ({ company_id, phone }) => {
   return result.rows;
 };
 
+// Histórico global autenticado: a posse vem do JWT de cliente e não de um dado
+// facilmente descoberto como telefone. Inclui pedidos de todas as lojas.
+const findPublicOrdersByUserId = async (userId) => {
+  const result = await pool.query(
+    `${_PUBLIC_ORDER_SELECT}
+     WHERE c.user_id = $1 AND c.deactivated_at IS NULL
+     ORDER BY o.created_at DESC
+     LIMIT 100`,
+    [userId],
+  );
+  await Promise.all(result.rows.map(async (row) => {
+    row.payment_expires_at = await _getLatestPixExpiration(row.id);
+  }));
+  return result.rows;
+};
+
 // ─── Marketplace público de restaurantes (/order) ───────────────────────────
 // Lista todas as empresas com cardápio publicado, enriquecidas com métricas
 // para ranking (pedidos/faturamento), tempo médio de preparo, taxa/pedido
@@ -1276,5 +1325,6 @@ module.exports = {
   getPublicOrder,
   cancelPublicOrder,
   findPublicOrdersByPhone,
+  findPublicOrdersByUserId,
   listPublicRestaurants,
 };

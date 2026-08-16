@@ -138,6 +138,67 @@ const resolveClientByPhone = async ({ companyId, phone, name }) => {
   }
 };
 
+// Cria/resolve o relacionamento da empresa para uma identidade JÁ autenticada.
+// O telefone informado é adicionado como canal somente quando ainda não pertence
+// a outra identidade; nunca "roubamos" um número de um cadastro anterior.
+const resolveClientForUser = async ({ companyId, userId, phone, name }) => {
+  if (!userId) throw Object.assign(new Error("Conta de cliente inválida."), { status: 401 });
+  const phoneNorm = phone ? normalizePhone(phone) : null;
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+    const active = await db.query(
+      "SELECT id FROM platform_users WHERE id = $1 AND status = 'active' LIMIT 1",
+      [userId],
+    );
+    if (!active.rows[0]) {
+      throw Object.assign(new Error("Conta indisponível."), { status: 403 });
+    }
+
+    if (name && String(name).trim()) {
+      await db.query(
+        "UPDATE platform_users SET name = $2, updated_at = now() WHERE id = $1",
+        [userId, String(name).trim().slice(0, 255)],
+      );
+    }
+
+    if (phoneNorm) {
+      const phoneOwner = await db.query(
+        `SELECT user_id FROM user_identifiers
+         WHERE type = 'phone' AND value_norm = $1 AND revoked_at IS NULL LIMIT 1`,
+        [phoneNorm],
+      );
+      if (!phoneOwner.rows[0]) {
+        await db.query(
+          `INSERT INTO user_identifiers (user_id, type, value_norm, last_seen_at)
+           VALUES ($1, 'phone', $2, now())`,
+          [userId, phoneNorm],
+        );
+      } else if (phoneOwner.rows[0].user_id === userId) {
+        await db.query(
+          `UPDATE user_identifiers SET last_seen_at = now()
+           WHERE type = 'phone' AND value_norm = $1 AND revoked_at IS NULL`,
+          [phoneNorm],
+        );
+      }
+    }
+
+    const client = await resolveClient(db, {
+      companyId: Number(companyId),
+      userId,
+      name: name ? String(name).trim() : null,
+      phone: phoneNorm,
+    });
+    await db.query("COMMIT");
+    return { client, userId, phoneNorm };
+  } catch (error) {
+    await db.query("ROLLBACK");
+    throw error;
+  } finally {
+    db.release();
+  }
+};
+
 // Lookup puro (NÃO cria) — usado por leituras (GET de endereços). Retorna userId|null.
 const lookupUserIdByPhone = async (phoneRaw) => {
   const phoneNorm = normalizePhone(phoneRaw);
@@ -293,6 +354,7 @@ module.exports = {
   resolveUserByPhone,
   resolveClient,
   resolveClientByPhone,
+  resolveClientForUser,
   lookupUserIdByPhone,
   saveEmailForUser,
   listAddresses,

@@ -5,10 +5,10 @@ const jwt = require('jsonwebtoken');
 // sessões existentes — apenas passa a expirar os novos.
 const TOKEN_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
-const generateToken = (payload) => {
+const generateToken = (payload, { expiresIn = TOKEN_EXPIRES_IN } = {}) => {
   return jwt.sign(payload, process.env.JWT_SECRET, {
     algorithm: 'HS256',
-    expiresIn: TOKEN_EXPIRES_IN,
+    expiresIn,
   });
 };
 

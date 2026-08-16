@@ -1307,12 +1307,13 @@ const _findAttemptByProviderRefs = async ({ pagarmeOrderId, chargeId }) => {
   return r.rows[0] || null;
 };
 
-const createPublicPaymentSession = (order) => ({
+const createPublicPaymentSession = (order, { customerVerified = false } = {}) => ({
   payment_session_token: createPaymentSession({
     orderId: order.id,
     orderUuid: order.uuid,
     companyId: order.company_id,
     clientId: order.client_id,
+    customerVerified,
   }),
 });
 
@@ -1368,9 +1369,9 @@ const isPaymentInfrastructureReady = async () => (
   isPublicCheckoutConfigured() && (await _paymentStorageReady())
 );
 
-// A interface pública só habilita o cofre quando existir emissão de sessão com
-// `customer_verified` por OTP. O checkout atual emite apenas sessão de pedido.
-const savedCardsAvailable = () => false;
+// O cofre é opt-in por ambiente e só pode ser usado quando a sessão curta do
+// pedido carrega `customer_verified=true`, emitido após login da conta cliente.
+const savedCardsAvailable = () => SAVED_CARDS_ENABLED;
 
 // Não classifique antifraude por texto livre de adquirente. A operação usa os
 // campos estruturados do antifraude e permite complementar códigos por ambiente.
@@ -1593,6 +1594,41 @@ const deleteSavedCard = async (userId, tokenRowId) => {
     try { await getHttp().delete(`/customers/${customerId}/cards/${row.token}`); } catch (_) { /* best-effort */ }
   }
   return { deleted: true };
+};
+
+const setDefaultSavedCard = async (userId, tokenRowId) => {
+  if (!SAVED_CARDS_ENABLED) {
+    throw Object.assign(new Error("Cartões salvos estão indisponíveis neste ambiente."), { status: 403 });
+  }
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+    const owned = await db.query(
+      `SELECT id FROM user_payment_tokens
+       WHERE id = $1 AND user_id = $2 AND provider = 'pagarme' AND revoked_at IS NULL
+       LIMIT 1 FOR UPDATE`,
+      [tokenRowId, userId],
+    );
+    if (!owned.rows[0]) {
+      throw Object.assign(new Error("Cartão não encontrado."), { status: 404 });
+    }
+    await db.query(
+      `UPDATE user_payment_tokens SET is_default = false
+       WHERE user_id = $1 AND provider = 'pagarme' AND revoked_at IS NULL`,
+      [userId],
+    );
+    await db.query(
+      "UPDATE user_payment_tokens SET is_default = true WHERE id = $1",
+      [tokenRowId],
+    );
+    await db.query("COMMIT");
+    return { updated: true };
+  } catch (error) {
+    await db.query("ROLLBACK");
+    throw error;
+  } finally {
+    db.release();
+  }
 };
 
 const _userIdForClient = async (clientId) => {
@@ -3090,6 +3126,9 @@ module.exports = {
   statementDescriptor: (companyName) => _buildStatementDescriptor(companyName),
   listSavedCardsForClient,
   deleteSavedCardForClient,
+  listSavedCardsForUser: listSavedCards,
+  deleteSavedCardForUser: deleteSavedCard,
+  setDefaultSavedCardForUser: setDefaultSavedCard,
   verifyBasicAuth,
   handleWebhookEvent,
   reconcileOpenPaymentAttempts,

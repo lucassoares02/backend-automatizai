@@ -5,7 +5,13 @@ const TOKEN_TTL = process.env.PAGARME_PAYMENT_SESSION_TTL || "2h";
 
 const _secret = () => process.env.PAGARME_PAYMENT_SESSION_SECRET || process.env.JWT_SECRET;
 
-const createPaymentSession = ({ orderId, orderUuid, companyId, clientId }) => {
+const createPaymentSession = ({
+  orderId,
+  orderUuid,
+  companyId,
+  clientId,
+  customerVerified = false,
+}) => {
   const secret = _secret();
   if (!secret) {
     throw Object.assign(new Error("Sessão de pagamento indisponível."), { status: 503 });
@@ -17,6 +23,7 @@ const createPaymentSession = ({ orderId, orderUuid, companyId, clientId }) => {
       order_uuid: String(orderUuid || ""),
       company_id: Number(companyId),
       client_id: Number(clientId),
+      ...(customerVerified === true ? { customer_verified: true } : {}),
     },
     secret,
     { algorithm: "HS256", expiresIn: TOKEN_TTL },
