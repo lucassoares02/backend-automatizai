@@ -220,7 +220,7 @@ const withdraw = async (req, res) => {
 
 /**
  * Cobrança com cartão (card_token gerado no cliente via pagarme.js).
- * Body: { order_id, payment_session_token, request_id, card_token, saved_card_id?, document?, email?, installments?, billing_address? }
+ * Body: { order_id, payment_session_token, request_id, card_token, saved_card_id?, document?, email?, billing_address? }
  */
 const payCard = async (req, res) => {
   const orderId = req.body?.order_id ?? req.body?.orderId;
@@ -245,7 +245,8 @@ const payCard = async (req, res) => {
       email: req.body?.email,
       name: req.body?.name,
       phone: req.body?.phone,
-      installments: req.body?.installments,
+      // Parcelamento temporariamente desabilitado no produto.
+      installments: 1,
       billingAddress: req.body?.billing_address,
       savedCardId,
       saveCard: req.body?.save_card === true,

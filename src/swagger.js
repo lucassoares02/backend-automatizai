@@ -292,7 +292,7 @@ const OVERRIDES = {
   },
   "POST /api/public/pagarme/card": {
     summary: "Pagar pedido com cartão (token client-side)",
-    requestBody: body({ order_id: T.int, card_token: T.str, document: T.str, email: T.str, name: T.str, phone: T.str, installments: T.int }, { order_id: 789, card_token: "token_test_xxx", document: "12345678900", email: "ana@exemplo.com", name: "Ana Souza", phone: "5511988887777", installments: 1 }, ["order_id", "card_token"]),
+    requestBody: body({ order_id: T.int, card_token: T.str, document: T.str, email: T.str, name: T.str, phone: T.str }, { order_id: 789, card_token: "token_test_xxx", document: "12345678900", email: "ana@exemplo.com", name: "Ana Souza", phone: "5511988887777" }, ["order_id", "card_token"]),
   },
   "POST /api/public/pagarme/pix": {
     summary: "Pagar pedido com PIX",

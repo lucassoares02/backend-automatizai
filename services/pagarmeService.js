@@ -1652,7 +1652,7 @@ const deleteSavedCardForClient = async (clientId, tokenRowId) => {
  *  • cartão novo (card_token) — cobrança avulsa (comportamento padrão);
  *  • cartão novo + `saveCard:true` — salva no cofre e cobra pelo card_id;
  *  • `savedCardId` — cobra um método salvo local, resolvido no servidor.
- * `extra`: { document, email, name, phone, installments, savedCardId, saveCard }.
+ * `extra`: { document, email, name, phone, savedCardId, saveCard }.
  */
 const createCardCharge = async (orderId, cardToken, extra = {}) => {
   const savedCardId = Number(extra.savedCardId) || null;
@@ -1662,7 +1662,10 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
   }
   const order = await _loadOrderForCharge(orderId);
   const { totalCents, split } = _computeSplit(order);
-  const installments = Math.min(12, Math.max(1, Number(extra.installments) || 1));
+  // Regra atual do produto: todas as cobranças são à vista. Mantemos a regra no
+  // service (além da UI) para que payloads alterados no navegador não habilitem
+  // parcelamento sem uma mudança explícita deste contrato.
+  const installments = 1;
   const billingAddress = _buildBillingAddress(order, extra.billingAddress);
   const userId = await _ensureOrderUserId(order);
   order.client_user_id = userId;
