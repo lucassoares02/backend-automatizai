@@ -79,6 +79,24 @@ const paymentMethods = async (req, res) => {
   }
 };
 
+const createPaymentMethod = async (req, res) => {
+  const cardToken = String(req.body?.card_token || "").trim();
+  if (!cardToken) {
+    return res.status(400).json({ error: "Não foi possível validar os dados do cartão." });
+  }
+  try {
+    const card = await service.createPaymentMethod(req.customer.id, {
+      cardToken,
+      document: req.body?.document,
+      email: req.body?.email,
+      billingAddress: req.body?.billing_address,
+    });
+    return res.status(201).json(card);
+  } catch (error) {
+    return _respondError(res, error, "customer-create-payment-method");
+  }
+};
+
 const deletePaymentMethod = async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Cartão inválido." });
@@ -107,6 +125,7 @@ module.exports = {
   me,
   orders,
   paymentMethods,
+  createPaymentMethod,
   deletePaymentMethod,
   setDefaultPaymentMethod,
 };

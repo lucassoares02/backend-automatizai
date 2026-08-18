@@ -1546,11 +1546,85 @@ const _persistSavedCard = async (userId, card) => {
     "SELECT count(*)::int n FROM user_payment_tokens WHERE user_id = $1 AND provider = 'pagarme' AND revoked_at IS NULL",
     [userId],
   );
-  await pool.query(
+  const inserted = await pool.query(
     `INSERT INTO user_payment_tokens (user_id, provider, token, brand, last4, is_default)
-     VALUES ($1, 'pagarme', $2, $3, $4, $5)`,
+     VALUES ($1, 'pagarme', $2, $3, $4, $5)
+     RETURNING id, brand, last4, is_default`,
     [userId, card.id, card.brand, card.last4, count.rows[0].n === 0],
   );
+  return inserted.rows[0];
+};
+
+// Cadastra um cartão diretamente na conta autenticada do consumidor, sem criar
+// pedido ou cobrança. O navegador envia somente o token efêmero da Pagar.me;
+// PAN, validade e CVV nunca passam pela API do Arbian.
+const saveCardForUser = async (userId, rawCardToken, extra = {}) => {
+  const cardToken = String(rawCardToken || "").trim();
+  if (!SAVED_CARDS_ENABLED) {
+    throw Object.assign(new Error("Salvar cartões está indisponível no momento."), { status: 403 });
+  }
+  if (!cardToken) {
+    throw Object.assign(new Error("Não foi possível validar os dados do cartão."), { status: 400 });
+  }
+  if (!(await tableExists("user_payment_tokens")) || !(await _savedCardsEnabled())) {
+    throw Object.assign(new Error("Salvar cartões está indisponível no momento."), { status: 503 });
+  }
+
+  const profileResult = await pool.query(
+    `SELECT pu.name,
+            (SELECT value_norm FROM user_identifiers
+             WHERE user_id = pu.id AND type = 'email' AND revoked_at IS NULL
+             ORDER BY verified_at DESC NULLS LAST, id DESC LIMIT 1) AS email,
+            (SELECT value_norm FROM user_identifiers
+             WHERE user_id = pu.id AND type = 'phone' AND revoked_at IS NULL
+             ORDER BY verified_at DESC NULLS LAST, id DESC LIMIT 1) AS phone
+     FROM platform_users pu
+     WHERE pu.id = $1 AND pu.status = 'active'
+     LIMIT 1`,
+    [userId],
+  );
+  const profile = profileResult.rows[0];
+  if (!profile) {
+    throw Object.assign(new Error("Conta de cliente não encontrada."), { status: 404 });
+  }
+
+  const billingAddress = _billingAddressFromInput(extra.billingAddress);
+  const customer = _buildCustomer(profile, {
+    document: extra.document,
+    email: extra.email || profile.email,
+    phone: profile.phone,
+  }, billingAddress);
+  if (!customer.document) {
+    throw Object.assign(new Error("Informe um CPF válido para salvar o cartão."), { status: 400 });
+  }
+
+  let customerId;
+  let vaultCard;
+  try {
+    customerId = await _ensurePagarmeCustomer(userId, customer);
+    await _updatePagarmeCustomer(customerId, customer);
+    vaultCard = await _createVaultCard(customerId, cardToken, billingAddress);
+    if (!vaultCard?.id) {
+      throw Object.assign(new Error("A Pagar.me não confirmou o cadastro do cartão."), { status: 502 });
+    }
+    return await _persistSavedCard(userId, vaultCard);
+  } catch (error) {
+    // Se o cofre aceitou o cartão, mas o vínculo local falhou, remove o cartão
+    // órfão para que ele nunca fique invisível e impossível de gerenciar.
+    if (customerId && vaultCard?.id) {
+      try {
+        await getHttp().delete(`/customers/${customerId}/cards/${vaultCard.id}`);
+      } catch (_) {
+        // Best-effort; a referência não foi exposta nem persistida localmente.
+      }
+    }
+    if (error?.response) {
+      throw _wrap(error, "Não foi possível salvar o cartão");
+    }
+    if (error?.status) throw error;
+    console.error("pagarme: falha ao persistir cartão da conta:", error?.message);
+    throw Object.assign(new Error("Não foi possível salvar o cartão."), { status: 502 });
+  }
 };
 
 // Resolve um método de pagamento local para o card_id do cofre. A referência do
@@ -3130,6 +3204,7 @@ module.exports = {
   listSavedCardsForClient,
   deleteSavedCardForClient,
   listSavedCardsForUser: listSavedCards,
+  saveCardForUser,
   deleteSavedCardForUser: deleteSavedCard,
   setDefaultSavedCardForUser: setDefaultSavedCard,
   verifyBasicAuth,

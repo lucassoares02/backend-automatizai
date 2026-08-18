@@ -302,6 +302,7 @@ router.post("/public/customer-auth/register/verify", authLimiter, customerAccoun
 router.get("/public/customer-account/me", customerAuth, customerAccount.me);
 router.get("/public/customer-account/orders", customerAuth, customerAccount.orders);
 router.get("/public/customer-account/payment-methods", customerAuth, customerAccount.paymentMethods);
+router.post("/public/customer-account/payment-methods", paymentMethodsLimiter, customerAuth, customerAccount.createPaymentMethod);
 router.patch("/public/customer-account/payment-methods/:id/default", customerAuth, customerAccount.setDefaultPaymentMethod);
 router.delete("/public/customer-account/payment-methods/:id", customerAuth, customerAccount.deletePaymentMethod);
 // Página pública do motoboy (link/QR): entregas + rota + link do Maps. Sem auth.

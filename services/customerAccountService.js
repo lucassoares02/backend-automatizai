@@ -367,6 +367,13 @@ const listPaymentMethods = async (userId) => ({
   saving_available: pagarmeService.savedCardsAvailable(),
 });
 
+const createPaymentMethod = async (userId, input) =>
+  pagarmeService.saveCardForUser(userId, input?.cardToken, {
+    document: input?.document,
+    email: input?.email,
+    billingAddress: input?.billingAddress,
+  });
+
 const deletePaymentMethod = async (userId, id) =>
   pagarmeService.deleteSavedCardForUser(userId, id);
 
@@ -382,6 +389,7 @@ module.exports = {
   getProfile,
   listOrders,
   listPaymentMethods,
+  createPaymentMethod,
   deletePaymentMethod,
   setDefaultPaymentMethod,
 };
