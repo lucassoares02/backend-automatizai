@@ -90,6 +90,7 @@ const update = async (data) => {
     max_distance_meters_free_delivery,
     min_price_order,
     min_tax_delivery,
+    accepts_orders_outside_delivery_area,
   } = data;
   const client = await pool.connect();
   try {
@@ -166,10 +167,18 @@ const update = async (data) => {
           : max_distance_meters_free_delivery,
       min_price_order: min_price_order === undefined ? null : min_price_order,
       min_tax_delivery: min_tax_delivery === undefined ? null : min_tax_delivery,
+      accepts_orders_outside_delivery_area:
+        typeof accepts_orders_outside_delivery_area === "boolean"
+          ? accepts_orders_outside_delivery_area
+          : null,
     };
 
     const hasAnyPreference = Object.values(prefPayload).some((v) => v !== null);
     if (hasAnyPreference) {
+      const hasOutsideAreaPreference = await columnExists(
+        "company_preferences",
+        "accepts_orders_outside_delivery_area",
+      );
       const existing = await client.query(
         `SELECT id
          FROM company_preferences
@@ -180,36 +189,53 @@ const update = async (data) => {
       );
 
       if (existing.rows.length > 0) {
+        const outsideAreaSet = hasOutsideAreaPreference
+          ? ", accepts_orders_outside_delivery_area = COALESCE($7, accepts_orders_outside_delivery_area)"
+          : "";
+        const preferenceParams = [
+          existing.rows[0].id,
+          prefPayload.max_distance_meters_delivery,
+          prefPayload.kilometer_price,
+          prefPayload.max_distance_meters_free_delivery,
+          prefPayload.min_price_order,
+          prefPayload.min_tax_delivery,
+        ];
+        if (hasOutsideAreaPreference) {
+          preferenceParams.push(prefPayload.accepts_orders_outside_delivery_area);
+        }
         await client.query(
           `UPDATE company_preferences SET
              max_distance_meters_delivery = $2,
              kilometer_price = $3,
              max_distance_meters_free_delivery = $4,
              min_price_order = $5,
-             min_tax_delivery = $6
+             min_tax_delivery = $6${outsideAreaSet}
            WHERE id = $1`,
-          [
-            existing.rows[0].id,
-            prefPayload.max_distance_meters_delivery,
-            prefPayload.kilometer_price,
-            prefPayload.max_distance_meters_free_delivery,
-            prefPayload.min_price_order,
-            prefPayload.min_tax_delivery,
-          ],
+          preferenceParams,
         );
       } else {
+        const outsideAreaColumn = hasOutsideAreaPreference
+          ? ", accepts_orders_outside_delivery_area"
+          : "";
+        const outsideAreaPlaceholder = hasOutsideAreaPreference ? ", $7" : "";
+        const preferenceParams = [
+          id,
+          prefPayload.max_distance_meters_delivery,
+          prefPayload.kilometer_price,
+          prefPayload.max_distance_meters_free_delivery,
+          prefPayload.min_price_order,
+          prefPayload.min_tax_delivery,
+        ];
+        if (hasOutsideAreaPreference) {
+          preferenceParams.push(
+            prefPayload.accepts_orders_outside_delivery_area ?? false,
+          );
+        }
         await client.query(
           `INSERT INTO company_preferences
-             (company_id, max_distance_meters_delivery, kilometer_price, max_distance_meters_free_delivery, min_price_order, min_tax_delivery)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [
-            id,
-            prefPayload.max_distance_meters_delivery,
-            prefPayload.kilometer_price,
-            prefPayload.max_distance_meters_free_delivery,
-            prefPayload.min_price_order,
-            prefPayload.min_tax_delivery,
-          ],
+             (company_id, max_distance_meters_delivery, kilometer_price, max_distance_meters_free_delivery, min_price_order, min_tax_delivery${outsideAreaColumn})
+           VALUES ($1, $2, $3, $4, $5, $6${outsideAreaPlaceholder})`,
+          preferenceParams,
         );
       }
     }

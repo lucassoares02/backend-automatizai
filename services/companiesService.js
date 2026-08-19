@@ -8,7 +8,8 @@ const find = async (id) => {
        cp.kilometer_price,
        cp.max_distance_meters_free_delivery,
        cp.min_price_order,
-       cp.min_tax_delivery
+       cp.min_tax_delivery,
+       cp.accepts_orders_outside_delivery_area
      FROM companies c
      JOIN user_companies uc ON uc.company_id = c.id
      LEFT JOIN LATERAL (
@@ -17,7 +18,11 @@ const find = async (id) => {
          kilometer_price,
          max_distance_meters_free_delivery,
          min_price_order,
-         min_tax_delivery
+         min_tax_delivery,
+         COALESCE(
+           (to_jsonb(company_preferences)->>'accepts_orders_outside_delivery_area')::boolean,
+           false
+         ) AS accepts_orders_outside_delivery_area
        FROM company_preferences
        WHERE company_id = c.id
        ORDER BY id DESC
@@ -37,7 +42,8 @@ const findId = async (id, company) => {
        cp.kilometer_price,
        cp.max_distance_meters_free_delivery,
        cp.min_price_order,
-       cp.min_tax_delivery
+       cp.min_tax_delivery,
+       cp.accepts_orders_outside_delivery_area
      FROM companies c
      LEFT JOIN LATERAL (
        SELECT
@@ -45,7 +51,11 @@ const findId = async (id, company) => {
          kilometer_price,
          max_distance_meters_free_delivery,
          min_price_order,
-         min_tax_delivery
+         min_tax_delivery,
+         COALESCE(
+           (to_jsonb(company_preferences)->>'accepts_orders_outside_delivery_area')::boolean,
+           false
+         ) AS accepts_orders_outside_delivery_area
        FROM company_preferences
        WHERE company_id = c.id
        ORDER BY id DESC

@@ -17,6 +17,7 @@ const companiessss = require("../controllers/companiessssController");
 const company = require("../controllers/company_address_Controller");
 const payment_methods = require("../controllers/payment_methodsController");
 const connections = require("../controllers/connectionsController");
+const aiIgnoredPhoneNumbers = require("../controllers/aiIgnoredPhoneNumbersController");
 const additional_info = require("../controllers/additional_infoController");
 const orders = require("../controllers/ordersController");
 const clients = require("../controllers/clientsController");
@@ -61,6 +62,10 @@ const authorizeUpsell = authorizeByLookup("SELECT company_id FROM upsell_rules W
 const authorizeGoal = authorizeByLookup("SELECT company_id FROM purchase_goals WHERE id = $1", "id");
 const authorizeDriver = authorizeByLookup("SELECT company_id FROM delivery_drivers WHERE id = $1", "id");
 const authorizeConnection = authorizeByLookup("SELECT company_id FROM connections WHERE id = $1", "id");
+const authorizeAiIgnoredPhoneNumber = authorizeByLookup(
+  "SELECT company_id FROM ai_ignored_phone_numbers WHERE id = $1",
+  "id",
+);
 
 // ─── Webhook (opt-in): exige um segredo só se EVOLUTION_WEBHOOK_TOKEN estiver
 // configurado. Assim não quebra a integração atual até o Evolution ser ajustado.
@@ -160,6 +165,24 @@ router.get("/connections/all/:company", authMiddleware, authorizeCompanyParam("c
 router.get("/connections/qrcode/:instance", authMiddleware, connections.getQrCode);
 router.get("/connections/test/:instance", authMiddleware, connections.testConnection);
 router.get("/connections/status/:instance", authMiddleware, connections.getStatus);
+router.get(
+  "/connections/ignored-numbers/company/:companyId",
+  authMiddleware,
+  authorizeCompanyParam("companyId"),
+  aiIgnoredPhoneNumbers.findAllByCompany,
+);
+router.post(
+  "/connections/ignored-numbers",
+  authMiddleware,
+  authorizeCompanyBody("company_id"),
+  aiIgnoredPhoneNumbers.create,
+);
+router.delete(
+  "/connections/ignored-numbers/:id",
+  authMiddleware,
+  authorizeAiIgnoredPhoneNumber,
+  aiIgnoredPhoneNumbers.remove,
+);
 router.get("/connections/:id", authMiddleware, authorizeConnection, connections.find);
 // A criação de conexão envia o id da empresa na chave `company` (não `company_id`).
 router.post("/connections", authMiddleware, authorizeCompanyBody("company"), connections.create);

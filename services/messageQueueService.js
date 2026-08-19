@@ -3,6 +3,7 @@ const { Client } = require("pg");
 const pool = require("../db");
 const evolution = require("./evolutionService");
 const connectionsService = require("./connectionsService");
+const aiIgnoredPhoneNumbersService = require("./aiIgnoredPhoneNumbersService");
 
 // ─── Config (via .env, com defaults seguros) ────────────────────────────────────
 const ENABLED = (process.env.MESSAGE_QUEUE_ENABLED ?? "true").toLowerCase() !== "false";
@@ -69,6 +70,13 @@ const enqueue = async (instanceName, body) => {
 
   const conn = await connectionsService.find_by_instance(instanceName).catch(() => null);
   const companyId = conn?.company_id ?? null;
+
+  // A decisão é da API e ocorre antes de persistir/agrupar a mensagem. Assim um
+  // contato configurado como "sem resposta da IA" nunca entra no fluxo do n8n.
+  if (await aiIgnoredPhoneNumbersService.shouldIgnoreMessage({ companyId, body, remoteJid: parsed.remoteJid })) {
+    console.log(`[message-queue] mensagem ignorada pela empresa ${companyId} (${parsed.remoteJid})`);
+    return;
+  }
 
   const client = await pool.connect();
   try {
@@ -266,6 +274,29 @@ const _onForwardFailure = async (job, err) => {
     .catch((e) => console.error(`[message-queue] não consegui reagendar job ${job.id}: ${e.message}`));
 };
 
+const _finishIgnoredJob = async (job) => {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `UPDATE n8n_message_queue
+          SET status = 'done', finished_at = NOW()
+        WHERE id = $1`,
+      [job.id],
+    );
+    await client.query(
+      "UPDATE incoming_messages SET status = 'ignored' WHERE id = ANY($1::bigint[])",
+      [job.message_ids],
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
 let dispatching = false;
 let redispatchRequested = false;
 
@@ -287,6 +318,18 @@ const runDispatch = async () => {
       while ((job = await _claimNext())) {
         try {
           const payload = await _buildPayload(job);
+          // Revalida no instante do despacho. Isso cobre mensagens que já estavam
+          // no debounce quando o usuário adicionou o número à lista.
+          const ignored = await aiIgnoredPhoneNumbersService.shouldIgnoreMessage({
+            companyId: job.company_id,
+            body: payload,
+            remoteJid: job.remote_jid,
+          });
+          if (ignored) {
+            await _finishIgnoredJob(job);
+            console.log(`[message-queue] job ${job.id} ignorado pela empresa ${job.company_id} (${job.remote_jid})`);
+            continue;
+          }
           await evolution.forwardToN8n(job.instance_name, payload);
           // Marca como lida na Evolution só agora — quando a mensagem efetivamente
           // foi enviada ao N8N (não enquanto estava na fila/debounce).

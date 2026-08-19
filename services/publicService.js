@@ -231,7 +231,11 @@ const getCompanyPublicMenu = async (companyRef) => {
        kilometer_price,
        max_distance_meters_free_delivery,
        min_price_order,
-       min_tax_delivery
+       min_tax_delivery,
+       COALESCE(
+         (to_jsonb(company_preferences)->>'accepts_orders_outside_delivery_area')::boolean,
+         false
+       ) AS accepts_orders_outside_delivery_area
      FROM company_preferences
      WHERE company_id = $1
      ORDER BY id DESC
@@ -330,7 +334,11 @@ const calculatePublicDeliveryFee = async ({ company_id, destination_lat, destina
        kilometer_price,
        max_distance_meters_free_delivery,
        min_price_order,
-       min_tax_delivery
+       min_tax_delivery,
+       COALESCE(
+         (to_jsonb(company_preferences)->>'accepts_orders_outside_delivery_area')::boolean,
+         false
+       ) AS accepts_orders_outside_delivery_area
      FROM company_preferences
      WHERE company_id = $1
      ORDER BY id DESC
@@ -413,9 +421,11 @@ const calculatePublicDeliveryFee = async ({ company_id, destination_lat, destina
   const minTax = toNumber(prefs.min_tax_delivery) ?? 0;
 
   const exceedsMax = maxDistance !== null && distanceMeters > maxDistance;
+  const acceptsOutsideArea = prefs.accepts_orders_outside_delivery_area === true;
+  const deliveryFeePendingAgreement = exceedsMax && acceptsOutsideArea;
   const isFree = freeDistance !== null && distanceMeters <= freeDistance;
   let deliveryFee = 0;
-  if (!isFree) {
+  if (!isFree && !deliveryFeePendingAgreement) {
     deliveryFee = distanceKm * kilometerPrice;
     if (minTax > 0) {
       deliveryFee = Math.max(minTax, deliveryFee);
@@ -423,14 +433,20 @@ const calculatePublicDeliveryFee = async ({ company_id, destination_lat, destina
   }
 
   return {
-    ok: !exceedsMax,
+    ok: !exceedsMax || acceptsOutsideArea,
     reason: exceedsMax ? "distance_exceeded" : null,
-    message: exceedsMax ? "Endereço fora da área de entrega." : null,
+    message: deliveryFeePendingAgreement
+      ? "Endereço fora da área de entrega. O frete será combinado pelo WhatsApp."
+      : exceedsMax
+        ? "Endereço fora da área de entrega."
+        : null,
     distance_meters: distanceMeters,
     distance_text: element.distance?.text || `${distanceKm.toFixed(1)} km`,
     duration_text: element.duration?.text || null,
     delivery_fee: Number(deliveryFee.toFixed(2)),
-    is_free_delivery: isFree,
+    is_free_delivery: isFree && !deliveryFeePendingAgreement,
+    outside_delivery_area: exceedsMax,
+    delivery_fee_pending_agreement: deliveryFeePendingAgreement,
     max_distance_meters_delivery: maxDistance,
     max_distance_meters_free_delivery: freeDistance,
     kilometer_price: kilometerPrice,
@@ -652,7 +668,27 @@ const createPublicOrder = async (data) => {
   // A taxa nunca pode ser negativa (clamp), evitando "desconto" via taxa.
   const delivery_address = isPickup ? null : (data.delivery_address ?? null);
   const delivery_address_snapshot = isPickup ? null : _deliveryAddressSnapshot(data.delivery_address_snapshot);
-  const delivery_fee = isPickup ? 0 : Math.max(0, Number(data.delivery_fee ?? 0));
+  let delivery_fee_pending_agreement = false;
+  if (!isPickup && data.delivery_fee_pending_agreement === true) {
+    const quote = await calculatePublicDeliveryFee({
+      company_id,
+      destination_lat: data.delivery_lat,
+      destination_lng: data.delivery_lng,
+    });
+    if (quote.delivery_fee_pending_agreement !== true) {
+      throw Object.assign(
+        new Error(
+          quote.message ||
+            "Não foi possível confirmar o frete a combinar para este endereço.",
+        ),
+        { status: 400 },
+      );
+    }
+    delivery_fee_pending_agreement = true;
+  }
+  const delivery_fee = isPickup || delivery_fee_pending_agreement
+    ? 0
+    : Math.max(0, Number(data.delivery_fee ?? 0));
 
   // ─── Preços autoritativos do servidor ───────────────────────────────────────
   // NUNCA confiar no `unit_price` enviado pelo cliente. Buscamos o preço real de
@@ -831,8 +867,10 @@ const createPublicOrder = async (data) => {
       ? data.online_payment_method
       : null;
     const hasDeliverySnapshot = await columnExists("orders", "delivery_address_snapshot");
-    const snapshotColumn = hasDeliverySnapshot ? ", delivery_address_snapshot" : "";
-    const snapshotPlaceholder = hasDeliverySnapshot ? ", $16::jsonb" : "";
+    const hasDeliveryFeeAgreement = await columnExists(
+      "orders",
+      "delivery_fee_pending_agreement",
+    );
     const orderParams = [
       company_id,
       client_id,
@@ -850,14 +888,29 @@ const createPublicOrder = async (data) => {
       service_fee,
       onlineMethod,
     ];
-    if (hasDeliverySnapshot) orderParams.push(delivery_address_snapshot ? JSON.stringify(delivery_address_snapshot) : null);
+    let optionalColumns = "";
+    let optionalPlaceholders = "";
+    if (hasDeliverySnapshot) {
+      orderParams.push(
+        delivery_address_snapshot
+          ? JSON.stringify(delivery_address_snapshot)
+          : null,
+      );
+      optionalColumns += ", delivery_address_snapshot";
+      optionalPlaceholders += `, $${orderParams.length}::jsonb`;
+    }
+    if (hasDeliveryFeeAgreement) {
+      orderParams.push(delivery_fee_pending_agreement);
+      optionalColumns += ", delivery_fee_pending_agreement";
+      optionalPlaceholders += `, $${orderParams.length}`;
+    }
     const orderRes = await client.query(
       `INSERT INTO orders (
          company_id, client_id, status, notes, subtotal, delivery_fee, discount, total,
          payment_method_id, delivery_address, delivery_type, scheduled_for, tag, payment_provider,
-         service_fee, online_payment_method${snapshotColumn}
+         service_fee, online_payment_method${optionalColumns}
        )
-       VALUES ($1, $2, ${initialStatus}, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15${snapshotPlaceholder}) RETURNING *`,
+       VALUES ($1, $2, ${initialStatus}, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15${optionalPlaceholders}) RETURNING *`,
       orderParams,
     );
     const order = orderRes.rows[0];
@@ -1056,6 +1109,10 @@ const _PUBLIC_ORDER_SELECT = `
     o.id, o.uuid, o.company_id, o.client_id, o.status, o.notes,
     o.subtotal, o.delivery_fee, o.discount, o.service_fee, o.total,
     o.delivery_address, o.delivery_type, o.tag,
+    COALESCE(
+      (to_jsonb(o)->>'delivery_fee_pending_agreement')::boolean,
+      false
+    ) AS delivery_fee_pending_agreement,
     o.payment_status, o.payment_provider, o.online_payment_method,
     o.scheduled_for, o.created_at, o.updated_at,
     c.name AS client_name, c.phone AS client_phone,
