@@ -166,6 +166,53 @@ const getOrder = async (req, res) => {
   }
 };
 
+const createOrderPaymentSession = async (req, res) => {
+  const id = String(req.params?.id || "").trim();
+  if (!id) return res.status(400).json({ error: "Invalid order id" });
+  try {
+    const order = await service.getPublicOrder({
+      id,
+      phone: req.body?.phone ? String(req.body.phone) : null,
+    });
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (
+      order.payment_provider !== "pagarme" ||
+      Number(order.status) !== 10 ||
+      ["paid", "refunded", "refund_pending", "chargedback"].includes(
+        String(order.payment_status || ""),
+      )
+    ) {
+      return res.status(409).json({
+        error: "Este pedido não está disponível para pagamento online.",
+      });
+    }
+    if (
+      order.delivery_fee_pending_agreement === true &&
+      !order.delivery_fee_agreement_confirmed_at
+    ) {
+      return res.status(409).json({
+        error: "O pagamento será liberado depois que o frete for definido.",
+      });
+    }
+    const customerVerified = req.customer?.id
+      ? await service.publicOrderClientBelongsToUser(
+          order.client_id,
+          req.customer.id,
+        )
+      : false;
+    return res.status(200).json(
+      pagarmeService.createPublicPaymentSession(order, {
+        customerVerified,
+      }),
+    );
+  } catch (error) {
+    console.error("Error creating public payment session:", error);
+    return res
+      .status(error.status || 500)
+      .json({ error: error.message || "Failed to create payment session" });
+  }
+};
+
 const listOrdersByPhone = async (req, res) => {
   // Telefone não é autenticação. O histórico será reaberto quando o provedor de
   // OTP emitir uma sessão de cliente verificada; até lá, use links UUID de cada
@@ -232,6 +279,7 @@ module.exports = {
   changeOnlinePaymentMethod,
   calculateDeliveryFee,
   getOrder,
+  createOrderPaymentSession,
   listOrdersByPhone,
   reorder,
   cancelOrder,

@@ -669,6 +669,7 @@ const createPublicOrder = async (data) => {
   const delivery_address = isPickup ? null : (data.delivery_address ?? null);
   const delivery_address_snapshot = isPickup ? null : _deliveryAddressSnapshot(data.delivery_address_snapshot);
   let delivery_fee_pending_agreement = false;
+  let delivery_distance_meters = null;
   if (!isPickup && data.delivery_fee_pending_agreement === true) {
     const quote = await calculatePublicDeliveryFee({
       company_id,
@@ -685,6 +686,7 @@ const createPublicOrder = async (data) => {
       );
     }
     delivery_fee_pending_agreement = true;
+    delivery_distance_meters = Math.round(Number(quote.distance_meters));
   }
   const delivery_fee = isPickup || delivery_fee_pending_agreement
     ? 0
@@ -871,6 +873,10 @@ const createPublicOrder = async (data) => {
       "orders",
       "delivery_fee_pending_agreement",
     );
+    const hasDeliveryDistance = await columnExists(
+      "orders",
+      "delivery_distance_meters",
+    );
     const orderParams = [
       company_id,
       client_id,
@@ -902,6 +908,11 @@ const createPublicOrder = async (data) => {
     if (hasDeliveryFeeAgreement) {
       orderParams.push(delivery_fee_pending_agreement);
       optionalColumns += ", delivery_fee_pending_agreement";
+      optionalPlaceholders += `, $${orderParams.length}`;
+    }
+    if (hasDeliveryDistance) {
+      orderParams.push(delivery_distance_meters);
+      optionalColumns += ", delivery_distance_meters";
       optionalPlaceholders += `, $${orderParams.length}`;
     }
     const orderRes = await client.query(
@@ -1018,9 +1029,15 @@ const changePendingOnlinePaymentMethod = async ({
     await db.query("BEGIN");
     const orderRes = await db.query(
       `SELECT id, company_id, client_id, status, payment_status, payment_provider,
-              online_payment_method, pagarme_charge_id, service_fee, total
-       FROM orders
-       WHERE id = $1
+              online_payment_method, pagarme_charge_id, service_fee, total,
+              COALESCE(
+                (to_jsonb(o)->>'delivery_fee_pending_agreement')::boolean,
+                false
+              ) AS delivery_fee_pending_agreement,
+              (to_jsonb(o)->>'delivery_fee_agreement_confirmed_at')::timestamptz
+                AS delivery_fee_agreement_confirmed_at
+       FROM orders o
+       WHERE o.id = $1
        FOR UPDATE`,
       [Number(orderId)],
     );
@@ -1030,6 +1047,15 @@ const changePendingOnlinePaymentMethod = async ({
     }
     if (order.payment_provider !== "pagarme" || Number(order.status) !== 10 || ["paid", "refunded", "refund_pending", "chargedback"].includes(String(order.payment_status || ""))) {
       throw Object.assign(new Error("Este pedido não pode mais ter a forma de pagamento alterada."), { status: 409 });
+    }
+    if (
+      order.delivery_fee_pending_agreement === true &&
+      !order.delivery_fee_agreement_confirmed_at
+    ) {
+      throw Object.assign(
+        new Error("A forma de pagamento será liberada depois que o frete for definido."),
+        { status: 409 },
+      );
     }
 
     const activeAttempt = await db.query(
@@ -1113,6 +1139,8 @@ const _PUBLIC_ORDER_SELECT = `
       (to_jsonb(o)->>'delivery_fee_pending_agreement')::boolean,
       false
     ) AS delivery_fee_pending_agreement,
+    (to_jsonb(o)->>'delivery_fee_agreement_confirmed_at')::timestamptz
+      AS delivery_fee_agreement_confirmed_at,
     o.payment_status, o.payment_provider, o.online_payment_method,
     o.scheduled_for, o.created_at, o.updated_at,
     c.name AS client_name, c.phone AS client_phone,
@@ -1238,6 +1266,18 @@ const getPublicOrder = async ({ id, phone }) => {
   }
   row.payment_expires_at = await _getLatestPixExpiration(row.id);
   return row;
+};
+
+const publicOrderClientBelongsToUser = async (clientId, userId) => {
+  if (!clientId || !userId) return false;
+  const result = await pool.query(
+    `SELECT 1
+     FROM clients
+     WHERE id = $1 AND user_id = $2 AND deactivated_at IS NULL
+     LIMIT 1`,
+    [clientId, userId],
+  );
+  return result.rowCount > 0;
 };
 
 // Status que o cliente ainda pode cancelar: antes de "Saiu para entrega" (4).
@@ -1423,6 +1463,7 @@ module.exports = {
   changePendingOnlinePaymentMethod,
   calculatePublicDeliveryFee,
   getPublicOrder,
+  publicOrderClientBelongsToUser,
   cancelPublicOrder,
   findPublicOrdersByPhone,
   findPublicOrdersByUserId,

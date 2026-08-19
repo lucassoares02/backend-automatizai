@@ -962,6 +962,12 @@ const _loadOrderForCharge = async (orderId) => {
   const orderRes = await pool.query(
     `SELECT o.id, o.uuid, o.total, o.subtotal, o.delivery_fee, o.delivery_type, ${deliverySnapshotSelect}
             o.tag, o.company_id, o.client_id, o.status, o.payment_status, o.service_fee,
+            COALESCE(
+              (to_jsonb(o)->>'delivery_fee_pending_agreement')::boolean,
+              false
+            ) AS delivery_fee_pending_agreement,
+            (to_jsonb(o)->>'delivery_fee_agreement_confirmed_at')::timestamptz
+              AS delivery_fee_agreement_confirmed_at,
             c.name AS company_name, c.pagarme_recipient_id, c.pagarme_charges_enabled,
             cl.name AS client_name, cl.phone AS client_phone, cl.document AS client_document,
             cl.user_id AS client_user_id,
@@ -1017,6 +1023,15 @@ const _loadOrderForCharge = async (orderId) => {
   }
   if (![10, "10"].includes(order.status) || ["refunded", "refund_pending", "chargedback"].includes(order.payment_status)) {
     throw Object.assign(new Error("Este pedido não está disponível para pagamento online."), { status: 409 });
+  }
+  if (
+    order.delivery_fee_pending_agreement === true &&
+    !order.delivery_fee_agreement_confirmed_at
+  ) {
+    throw Object.assign(
+      new Error("O pagamento será liberado depois que o frete for definido."),
+      { status: 409 },
+    );
   }
   if (!PLATFORM_RECIPIENT_ID) {
     throw Object.assign(new Error("PAGARME_PLATFORM_RECIPIENT_ID não configurado."), { status: 503 });

@@ -2,12 +2,20 @@ const pool = require("../db");
 const orderWebhookService = require("./orderWebhookService");
 const campaignsService = require("./campaignsService");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
+const { columnExists } = require("../helpers/schema");
 const STATUS_IN_PROGRESS = [1, 2, 3, 4, 8];
 const STATUS_COMPLETED = [5, 9];
 const STATUS_CANCELLED = [6, 7];
 
 const ORDER_SELECT = `
   SELECT o.*,
+         COALESCE(
+           (to_jsonb(o)->>'delivery_fee_pending_agreement')::boolean,
+           false
+         ) AS delivery_fee_pending_agreement,
+         (to_jsonb(o)->>'delivery_distance_meters')::integer AS delivery_distance_meters,
+         (to_jsonb(o)->>'delivery_fee_agreement_confirmed_at')::timestamptz
+           AS delivery_fee_agreement_confirmed_at,
          c.name  AS client_name,
          c.phone AS client_phone,
          pm.label AS payment_method_label,
@@ -384,6 +392,50 @@ const updateStatus = async (id, status, cancelReason) => {
   try {
     await client.query("BEGIN");
 
+    const currentResult = await client.query(
+      `SELECT
+         o.status,
+         o.payment_status,
+         o.payment_provider,
+         COALESCE(
+           (to_jsonb(o)->>'delivery_fee_pending_agreement')::boolean,
+           false
+         ) AS delivery_fee_pending_agreement,
+         (to_jsonb(o)->>'delivery_fee_agreement_confirmed_at')::timestamptz
+           AS delivery_fee_agreement_confirmed_at
+       FROM orders o
+       WHERE o.id = $1
+       FOR UPDATE`,
+      [id],
+    );
+    const current = currentResult.rows[0];
+    if (!current) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+
+    const isCancellation = STATUS_CANCELLED.includes(Number(status));
+    if (
+      current.delivery_fee_pending_agreement === true &&
+      !current.delivery_fee_agreement_confirmed_at &&
+      !isCancellation
+    ) {
+      throw Object.assign(
+        new Error("Confirme que o frete foi combinado antes de mudar a etapa do pedido."),
+        { status: 409 },
+      );
+    }
+    const isOnlinePaymentPending =
+      Number(current.status) === 10 &&
+      ["pagarme", "stripe"].includes(String(current.payment_provider || "")) &&
+      !["paid", "refunded"].includes(String(current.payment_status || ""));
+    if (isOnlinePaymentPending && !isCancellation) {
+      throw Object.assign(
+        new Error("Aguarde a confirmação do pagamento antes de mudar a etapa do pedido."),
+        { status: 409 },
+      );
+    }
+
     const result = await client.query(
       `UPDATE orders
        SET status = $2,
@@ -421,9 +473,111 @@ const updateStatus = async (id, status, cancelReason) => {
   }
 };
 
+const confirmDeliveryFeeAgreement = async (id, deliveryFee) => {
+  const amount = Number(deliveryFee);
+  if (!Number.isFinite(amount) || amount < 0 || amount > 99999.99) {
+    throw Object.assign(
+      new Error("Informe um valor de frete válido."),
+      { status: 400 },
+    );
+  }
+  if (!(await columnExists("orders", "delivery_fee_agreement_confirmed_at"))) {
+    throw Object.assign(
+      new Error("A confirmação do frete aguarda a aplicação da alteração de banco."),
+      { status: 503 },
+    );
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const currentResult = await client.query(
+      `SELECT
+         o.id,
+         o.total,
+         o.delivery_fee,
+         o.payment_status,
+         o.pagarme_charge_id,
+         COALESCE(
+           (to_jsonb(o)->>'delivery_fee_pending_agreement')::boolean,
+           false
+         ) AS delivery_fee_pending_agreement,
+         (to_jsonb(o)->>'delivery_fee_agreement_confirmed_at')::timestamptz
+           AS delivery_fee_agreement_confirmed_at
+       FROM orders o
+       WHERE o.id = $1
+       FOR UPDATE`,
+      [id],
+    );
+    const current = currentResult.rows[0];
+    if (!current) {
+      throw Object.assign(new Error("Pedido não encontrado."), { status: 404 });
+    }
+    if (current.delivery_fee_pending_agreement !== true) {
+      throw Object.assign(
+        new Error("Este pedido não possui frete pendente de combinação."),
+        { status: 409 },
+      );
+    }
+    if (current.delivery_fee_agreement_confirmed_at) {
+      throw Object.assign(
+        new Error("O frete deste pedido já foi definido."),
+        { status: 409 },
+      );
+    }
+    if (
+      ["paid", "refunded", "refund_pending", "chargedback"].includes(
+        String(current.payment_status || ""),
+      ) ||
+      current.pagarme_charge_id
+    ) {
+      throw Object.assign(
+        new Error("Não é possível alterar o frete depois que a cobrança foi iniciada."),
+        { status: 409 },
+      );
+    }
+
+    const total = Number(
+      (
+        Number(current.total || 0) -
+        Number(current.delivery_fee || 0) +
+        amount
+      ).toFixed(2),
+    );
+    const result = await client.query(
+      `UPDATE orders
+       SET delivery_fee = $2,
+           total = $3,
+           delivery_fee_agreement_confirmed_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [id, Number(amount.toFixed(2)), total],
+    );
+    await client.query("COMMIT");
+    return result.rows[0];
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
 const remove = async (id) => {
   const result = await pool.query("DELETE FROM orders WHERE id = $1 RETURNING *", [id]);
   return result.rows[0];
 };
 
-module.exports = { findByCompany, findTodayByCompany, find, summarize, create, upsertCart, quoteCart, updateStatus, remove };
+module.exports = {
+  findByCompany,
+  findTodayByCompany,
+  find,
+  summarize,
+  create,
+  upsertCart,
+  quoteCart,
+  updateStatus,
+  confirmDeliveryFeeAgreement,
+  remove,
+};

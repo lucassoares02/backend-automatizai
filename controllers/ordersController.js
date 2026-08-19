@@ -129,7 +129,26 @@ const updateStatus = async (req, res) => {
     return res.status(200).json(updated);
   } catch (error) {
     console.error("Error updating order status:", error);
-    return res.status(500).json({ error: "Failed to update order status" });
+    return res
+      .status(error.status || 500)
+      .json({ error: error.message || "Failed to update order status" });
+  }
+};
+
+const confirmDeliveryFeeAgreement = async (req, res) => {
+  const { id } = req.params;
+  if (!id || isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
+  try {
+    const updated = await service.confirmDeliveryFeeAgreement(
+      id,
+      req.body?.delivery_fee,
+    );
+    return res.status(200).json(updated);
+  } catch (error) {
+    console.error("Error confirming delivery fee agreement:", error);
+    return res
+      .status(error.status || 500)
+      .json({ error: error.message || "Failed to confirm delivery fee agreement" });
   }
 };
 
@@ -146,4 +165,15 @@ const remove = async (req, res) => {
   }
 };
 
-module.exports = { findByCompany, findTodayByCompany, find, summarize, create, upsert, quote, updateStatus, remove };
+module.exports = {
+  findByCompany,
+  findTodayByCompany,
+  find,
+  summarize,
+  create,
+  upsert,
+  quote,
+  updateStatus,
+  confirmDeliveryFeeAgreement,
+  remove,
+};

@@ -226,6 +226,12 @@ router.post("/orders/upsert", authMiddleware, authorizeCompanyBody(), orders.ups
 // sem gravar nada no banco. Mesmo esquema de auth do upsert.
 router.post("/orders/quote", authMiddleware, authorizeCompanyBody(), orders.quote);
 router.patch("/orders/:id/status", authMiddleware, authorizeOrder, orders.updateStatus);
+router.patch(
+  "/orders/:id/delivery-fee-agreement",
+  authMiddleware,
+  authorizeOrder,
+  orders.confirmDeliveryFeeAgreement,
+);
 router.delete("/orders/:id", authMiddleware, authorizeOrder, orders.remove);
 
 // deliveries — gestão inteligente de entregas (pedidos em rota + rotas otimizadas)
@@ -338,6 +344,12 @@ router.post("/public/clients", publicLimiter, optionalCustomerAuth, publicCtrl.c
 router.patch("/public/clients/:id", publicLimiter, publicCtrl.updateClient);
 router.post("/public/orders", publicLimiter, optionalCustomerAuth, publicCtrl.createOrder);
 router.patch("/public/orders/:id/online-payment-method", paymentMethodsLimiter, publicCtrl.changeOnlinePaymentMethod);
+router.post(
+  "/public/orders/:id/payment-session",
+  paymentMethodsLimiter,
+  optionalCustomerAuth,
+  publicCtrl.createOrderPaymentSession,
+);
 router.get("/public/orders", publicLimiter, publicCtrl.listOrdersByPhone);
 router.get("/public/orders/:id/reorder", publicLimiter, publicCtrl.reorder);
 router.get("/public/orders/:id", publicLimiter, publicCtrl.getOrder);
