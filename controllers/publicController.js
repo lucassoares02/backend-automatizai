@@ -114,6 +114,7 @@ const changeOnlinePaymentMethod = async (req, res) => {
       companyId: session.company_id,
       clientId: session.client_id,
       onlinePaymentMethod: req.body?.online_payment_method,
+      paymentMethodId: req.body?.payment_method_id,
     });
     return res.status(200).json(order);
   } catch (error) {

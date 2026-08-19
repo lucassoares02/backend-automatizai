@@ -944,9 +944,16 @@ const changePendingOnlinePaymentMethod = async ({
   companyId,
   clientId,
   onlinePaymentMethod,
+  paymentMethodId,
 }) => {
+  // Duas modalidades de troca:
+  //  1) entre sub-métodos ONLINE (card <-> pix), mantendo Pagar.me e a taxa.
+  //  2) para um método OFFLINE cadastrado (dinheiro/vale/transferência): abandona
+  //     o provedor online, remove a taxa de serviço e devolve o pedido ao fluxo
+  //     presencial ("Aguardando"), pago na entrega/retirada.
+  const wantsOffline = paymentMethodId != null && paymentMethodId !== "";
   const method = String(onlinePaymentMethod || "").trim().toLowerCase();
-  if (!["card", "pix"].includes(method)) {
+  if (!wantsOffline && !["card", "pix"].includes(method)) {
     throw Object.assign(new Error("Escolha cartão ou PIX para continuar."), { status: 400 });
   }
   if (!(await tableExists("payment_attempts"))) {
@@ -958,7 +965,7 @@ const changePendingOnlinePaymentMethod = async ({
     await db.query("BEGIN");
     const orderRes = await db.query(
       `SELECT id, company_id, client_id, status, payment_status, payment_provider,
-              online_payment_method, pagarme_charge_id
+              online_payment_method, pagarme_charge_id, service_fee, total
        FROM orders
        WHERE id = $1
        FOR UPDATE`,
@@ -989,6 +996,42 @@ const changePendingOnlinePaymentMethod = async ({
         new Error("Já existe uma cobrança em andamento para este pedido. Aguarde a confirmação antes de trocar a forma de pagamento."),
         { status: 409 },
       );
+    }
+
+    if (wantsOffline) {
+      // Valida o método offline: precisa existir, ser da empresa e estar ativo.
+      const pmRes = await db.query(
+        `SELECT id FROM payment_methods
+         WHERE id = $1 AND company_id = $2 AND active = true`,
+        [Number(paymentMethodId), Number(companyId)],
+      );
+      if (!pmRes.rows[0]) {
+        throw Object.assign(new Error("Forma de pagamento indisponível."), { status: 400 });
+      }
+      // A taxa de serviço só existe em pagamentos online; ao sair do provedor,
+      // ela é removida e o total recalculado.
+      const currentFee = Number(order.service_fee || 0);
+      const newTotal = Number((Number(order.total || 0) - currentFee).toFixed(2));
+      const updated = await db.query(
+        `UPDATE orders
+         SET payment_provider = NULL,
+             online_payment_method = NULL,
+             payment_method_id = $2,
+             service_fee = 0,
+             total = $3,
+             payment_status = 'pending',
+             status = 1,
+             updated_at = now()
+         WHERE id = $1
+         RETURNING id, payment_method_id, total`,
+        [order.id, Number(paymentMethodId), newTotal],
+      );
+      await db.query(
+        "INSERT INTO order_status_history (order_id, status) VALUES ($1, $2)",
+        [order.id, "1"],
+      );
+      await db.query("COMMIT");
+      return updated.rows[0];
     }
 
     const updated = await db.query(
