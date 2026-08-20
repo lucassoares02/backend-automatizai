@@ -405,7 +405,7 @@ const remove = async (id, companyId) => {
 
 const _postWebhook = async (payload) => {
   const url = `${n8nUrlWebhook}${WEBHOOK_PATH}`;
-  console.log(`URl Webhook: ${n8nUrlWebhook}`);
+  console.log(`URl Webhook: ${url}`);
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: WEBHOOK_AUTH_HEADER },
