@@ -160,12 +160,25 @@ const MIN_WITHDRAWAL = Number(process.env.PAGARME_MIN_WITHDRAWAL_AMOUNT ?? 1);
 const SAVED_CARDS_ENABLED = String(process.env.PAGARME_SAVED_CARDS_ENABLED || "false").toLowerCase() === "true";
 const WEBHOOK_AUTH_REQUIRED = String(process.env.PAGARME_WEBHOOK_AUTH_REQUIRED || "true").toLowerCase() !== "false";
 // Texto exibido na fatura do cartão do cliente. Enviado como `soft_descriptor`
-// no payload (ver createCardPayment/PIX); helper mantém o nome genérico.
-// Fixo e global para todas as lojas — máx. 13 caracteres, só letras/números/espaço.
-// Se não configurado, cai no nome da empresa (comportamento anterior).
+// no payload (ver createCardPayment/PIX).
+// Env global usada como fallback quando a loja não tem um nome utilizável.
 const STATEMENT_DESCRIPTOR = String(process.env.PAGARME_STATEMENT_DESCRIPTOR || "").trim();
-const _buildStatementDescriptor = (fallback) =>
-  String(STATEMENT_DESCRIPTOR || fallback || "Loja").replace(/[^a-zA-Z0-9 ]/g, "").trim().slice(0, 13);
+// Normaliza qualquer texto para o formato aceito pela Pagar.me no descriptor:
+// remove acentos (á->a, ç->c), troca demais caracteres especiais por espaço,
+// colapsa espaços e limita a 13 caracteres. Retorna "" quando nada aproveitável
+// sobra (ex.: string só com símbolos), para permitir cair no próximo fallback.
+const _sanitizeDescriptor = (value) =>
+  String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // acentos/diacríticos
+    .replace(/[^a-zA-Z0-9 ]/g, " ") // demais especiais viram espaço
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 13)
+    .trim();
+// Prioridade: nome da loja que recebe o pedido -> env global -> "Loja".
+const _buildStatementDescriptor = (companyName) =>
+  _sanitizeDescriptor(companyName) || _sanitizeDescriptor(STATEMENT_DESCRIPTOR) || "Loja";
 const THREE_DS_ENABLED = String(process.env.PAGARME_3DS_ENABLED || "false").toLowerCase() === "true";
 const THREE_DS_API_URL = (process.env.PAGARME_3DS_API_URL || (
   /^(sk|pk)_test_/.test(String(process.env.PAGARME_SECRET_KEY || ""))

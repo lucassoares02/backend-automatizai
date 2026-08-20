@@ -572,21 +572,43 @@ const _periodStartHour = (period) => {
   return 8; // morning ou sem período
 };
 
-// Retorna campanhas 'scheduled' cuja data+janela já começou.
+// Fuso de referência do negócio (BRT, UTC-3, sem horário de verão desde 2019).
+// A janela por período (08/12/18h) é sempre no horário local de Brasília — o
+// servidor de produção costuma rodar em UTC, então NÃO podemos usar
+// `new Date().getHours()`/`CURRENT_DATE`, que seguem o timezone do servidor e
+// disparariam a campanha adiantada (ex.: 09h BRT = 12h UTC = janela "tarde").
+const CAMPAIGN_TZ = "America/Sao_Paulo";
+
+// Data (YYYY-MM-DD) e hora (0-23) atuais no fuso de Brasília, independentes do
+// timezone do processo Node.
+const _brazilNow = () => {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: CAMPAIGN_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date());
+  const get = (t) => parts.find((p) => p.type === t)?.value;
+  return { date: `${get("year")}-${get("month")}-${get("day")}`, hour: Number(get("hour")) };
+};
+
+// Retorna campanhas 'scheduled' cuja data+janela já começou (no fuso de Brasília).
 const findDueCampaigns = async () => {
+  // `scheduled_date` vem como texto 'YYYY-MM-DD' (data-calendário escolhida pelo
+  // comerciante), evitando a ambiguidade de fuso do parse de DATE pelo driver.
   const res = await pool.query(
-    `SELECT id, period, scheduled_date FROM campaigns
+    `SELECT id, period, to_char(scheduled_date, 'YYYY-MM-DD') AS scheduled_date FROM campaigns
       WHERE status = 'scheduled' AND schedule_type = 'scheduled' AND scheduled_date IS NOT NULL
-        AND scheduled_date <= CURRENT_DATE
       ORDER BY scheduled_date ASC`,
   );
-  const now = new Date();
+  const { date: today, hour } = _brazilNow();
   return res.rows.filter((r) => {
-    const d = new Date(r.scheduled_date);
-    // Dias passados: dispara já. Hoje: respeita a hora de início da janela.
-    const isToday = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
-    if (!isToday) return true;
-    return now.getHours() >= _periodStartHour(r.period);
+    const d = r.scheduled_date; // 'YYYY-MM-DD' — comparação lexicográfica é válida
+    if (d < today) return true; // dias passados: dispara já
+    if (d > today) return false; // futuro: ainda não
+    return hour >= _periodStartHour(r.period); // hoje: respeita a janela do período
   });
 };
 
