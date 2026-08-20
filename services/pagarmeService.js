@@ -159,7 +159,8 @@ const APP_URL = (process.env.PUBLIC_APP_URL || process.env.ORIGIN || "").replace
 const MIN_WITHDRAWAL = Number(process.env.PAGARME_MIN_WITHDRAWAL_AMOUNT ?? 1);
 const SAVED_CARDS_ENABLED = String(process.env.PAGARME_SAVED_CARDS_ENABLED || "false").toLowerCase() === "true";
 const WEBHOOK_AUTH_REQUIRED = String(process.env.PAGARME_WEBHOOK_AUTH_REQUIRED || "true").toLowerCase() !== "false";
-// Texto exibido na fatura do cartão do cliente (soft/statement descriptor).
+// Texto exibido na fatura do cartão do cliente. Enviado como `soft_descriptor`
+// no payload (ver createCardPayment/PIX); helper mantém o nome genérico.
 // Fixo e global para todas as lojas — máx. 13 caracteres, só letras/números/espaço.
 // Se não configurado, cai no nome da empresa (comportamento anterior).
 const STATEMENT_DESCRIPTOR = String(process.env.PAGARME_STATEMENT_DESCRIPTOR || "").trim();
@@ -1787,7 +1788,10 @@ const createCardCharge = async (orderId, cardToken, extra = {}) => {
   const creditCardBase = {
     operation_type: "auth_and_capture",
     installments,
-    statement_descriptor: _buildStatementDescriptor(order.company_name),
+    // Campo do texto da fatura do cartão. Observação: a API v5 (`/orders`) usa
+    // `statement_descriptor`; `soft_descriptor` é o nome legado (v4) e é
+    // ignorado pela v5 — enviado aqui por decisão de produto.
+    soft_descriptor: _buildStatementDescriptor(order.company_name),
   };
   const riskContext = _buildOrderRiskContext(order, extra);
   const { shipping_source: shippingSource, ...pagarmeRiskContext } = riskContext;
@@ -2063,7 +2067,10 @@ const createPixCharge = async (orderId, extra = {}) => {
       payments: [
         {
           payment_method: "pix",
-          pix: { expires_in: expiresIn },
+          // `soft_descriptor` enviado por paridade com o cartão. A API v5 não
+          // possui descriptor para PIX (não há fatura de cartão), então o
+          // provedor ignora este campo — o pagador vê o nome do recebedor.
+          pix: { expires_in: expiresIn, soft_descriptor: _buildStatementDescriptor(order.company_name) },
           split,
         },
       ],
