@@ -39,6 +39,19 @@ const findId = async (req, res) => {
 };
 
 /**
+ * Lista todas as lojas (somente admin do sistema) para o switcher do header.
+ */
+const findAll = async (req, res) => {
+  try {
+    const items = await service.findAllCompanies();
+    return res.status(200).json(items);
+  } catch (error) {
+    console.error("Error fetching all companies:", error);
+    return res.status(500).json({ error: "Failed to fetch companies" });
+  }
+};
+
+/**
  * Get Providers by City
  */
 const findProvidersCity = async (req, res) => {
@@ -89,4 +102,4 @@ const setOpenStatus = async (req, res) => {
   }
 };
 
-module.exports = { find, findId, findProvidersCity, update, setOpenStatus };
+module.exports = { find, findId, findAll, findProvidersCity, update, setOpenStatus };

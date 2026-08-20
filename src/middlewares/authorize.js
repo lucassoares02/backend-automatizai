@@ -20,11 +20,38 @@ const getUserCompanyIds = async (userId) => {
   return result.rows.map((r) => r.company_id);
 };
 
+// Contexto de acesso do usuário: empresas vinculadas + flag de admin do sistema.
+// Admin do sistema mantém o acesso PADRÃO, mas o `_isMember` passa a liberar
+// qualquer empresa (ele enxerga/alterna entre todas as lojas).
+const getUserAuthContext = async (userId) => {
+  // Carregamento das empresas é crítico para a autorização; a flag de admin é
+  // opcional e NÃO pode derrubar o acesso caso a coluna ainda não exista
+  // (antes da migration). Por isso as consultas são independentes.
+  const companyIds = await getUserCompanyIds(userId);
+  let isSystemAdmin = false;
+  try {
+    const adminRes = await pool.query("SELECT is_system_admin FROM users WHERE id = $1", [userId]);
+    isSystemAdmin = adminRes.rows[0]?.is_system_admin === true;
+  } catch (e) {
+    // Coluna is_system_admin ainda não migrada: trata como não-admin.
+    isSystemAdmin = false;
+  }
+  return { companyIds, isSystemAdmin };
+};
+
 const _isMember = (req, companyId) => {
+  // Admin do sistema tem acesso a todas as empresas.
+  if (req.isSystemAdmin) return true;
   const cid = Number(companyId);
   if (!Number.isFinite(cid)) return false;
   const list = Array.isArray(req.userCompanies) ? req.userCompanies : [];
   return list.map(Number).includes(cid);
+};
+
+// Restringe uma rota a admins do sistema (ou ao principal de serviço).
+const requireSystemAdmin = (req, res, next) => {
+  if (req.isService || req.isSystemAdmin) return next();
+  return res.status(403).json({ error: "Acesso restrito a administradores do sistema" });
 };
 
 const _deny = (res) => res.status(403).json({ error: "Acesso negado a esta empresa" });
@@ -73,6 +100,8 @@ const authorizeByLookup = (sql, paramName = "id") => async (req, res, next) => {
 
 module.exports = {
   getUserCompanyIds,
+  getUserAuthContext,
+  requireSystemAdmin,
   authorizeCompanyParam,
   authorizeCompanyBody,
   authorizeByLookup,

@@ -27,6 +27,8 @@ const validateLogin = async (email, password) => {
 
   const { password: _, ...userWithoutPassword } = user;
   userWithoutPassword.company = await findPrimaryCompanyId(user.id);
+  // Normaliza a flag de admin (coluna pode não existir antes da migration).
+  userWithoutPassword.is_system_admin = user.is_system_admin === true;
 
   return userWithoutPassword;
 };

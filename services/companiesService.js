@@ -1,5 +1,19 @@
 const pool = require("../db");
 
+// Lista TODAS as lojas (uso do admin do sistema no switcher do header).
+// Nome amigável: prioriza nome_fantasia e cai em razao_social; aliasado como
+// `razao_social` para reaproveitar o CompaniesModel do Portal.
+const findAllCompanies = async () => {
+  const result = await pool.query(
+    `SELECT id,
+            COALESCE(NULLIF(TRIM(nome_fantasia), ''), razao_social) AS razao_social,
+            cnpj
+       FROM companies
+      ORDER BY COALESCE(NULLIF(TRIM(nome_fantasia), ''), razao_social) ASC NULLS LAST`,
+  );
+  return result.rows;
+};
+
 const find = async (id) => {
   const result = await pool.query(
     `SELECT
@@ -98,4 +112,4 @@ const setOpenStatus = async (companyId, manualOpen) => {
   return result.rows[0] || null;
 };
 
-module.exports = { find, findId, findProvidersCity, update, setOpenStatus };
+module.exports = { find, findId, findAllCompanies, findProvidersCity, update, setOpenStatus };

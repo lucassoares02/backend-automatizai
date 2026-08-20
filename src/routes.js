@@ -4,7 +4,7 @@ const user = require("../controllers/userController");
 const login = require("../controllers/loginController");
 const googleAuth = require("../controllers/googleAuthController");
 const authMiddleware = require("../src/middlewares/middleware");
-const { authorizeCompanyParam, authorizeCompanyBody, authorizeByLookup } = require("../src/middlewares/authorize");
+const { authorizeCompanyParam, authorizeCompanyBody, authorizeByLookup, requireSystemAdmin } = require("../src/middlewares/authorize");
 const rateLimit = require("../src/middlewares/rateLimit");
 const mailer = require("../controllers/maillerController");
 const register = require("../controllers/registerController");
@@ -98,6 +98,9 @@ router.post("/companies", authLimiter, register.createCompanies);
 router.get("/cnpj/:cnpj", authLimiter, register.find);
 
 router.get("/companies", authMiddleware, companies.find);
+// Somente admin do sistema: lista todas as lojas para o switcher do header.
+// Declarado antes de "/companies/:company" para não ser capturado pelo param.
+router.get("/companies/all", authMiddleware, requireSystemAdmin, companies.findAll);
 router.patch("/companies", authMiddleware, authorizeCompanyBody("id"), companies.update);
 router.patch("/companies/:companyId/open-status", authMiddleware, authorizeCompanyParam("companyId"), companies.setOpenStatus);
 router.get("/companies/:company", authMiddleware, authorizeCompanyParam("company"), companies.findId);

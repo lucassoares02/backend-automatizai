@@ -1,6 +1,6 @@
 const { verifyToken } = require('../../helpers/jwt');
 const { logAccess } = require('../../services/logService');
-const { getUserCompanyIds } = require('./authorize');
+const { getUserAuthContext } = require('./authorize');
 const { isValidServiceKey, SERVICE_PRINCIPAL } = require('../../helpers/serviceAuth');
 
 const authMiddleware = async (req, res, next) => {
@@ -15,6 +15,7 @@ const authMiddleware = async (req, res, next) => {
         req.user = { ...SERVICE_PRINCIPAL };
         req.isService = true;
         req.userCompanies = [];
+        req.isSystemAdmin = false;
 
         logAccess({
             userId: SERVICE_PRINCIPAL.id,
@@ -40,10 +41,13 @@ const authMiddleware = async (req, res, next) => {
         // Falha de leitura não bloqueia a autenticação, mas deixa a lista vazia
         // (os middlewares de autorização então negam por padrão — fail-closed).
         try {
-            req.userCompanies = await getUserCompanyIds(decoded.id);
+            const ctx = await getUserAuthContext(decoded.id);
+            req.userCompanies = ctx.companyIds;
+            req.isSystemAdmin = ctx.isSystemAdmin;
         } catch (e) {
             console.error('Failed to load user companies:', e.message);
             req.userCompanies = [];
+            req.isSystemAdmin = false;
         }
 
         logAccess({
