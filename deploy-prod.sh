@@ -19,3 +19,5 @@ echo "🔐 Conectando ao servidor..."
 ssh -x root@89.167.90.225 "cd /srv/app && ./deploy.sh"
 
 echo "✅ Deploy concluído!"
+
+echo ""
