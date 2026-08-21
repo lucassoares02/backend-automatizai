@@ -50,13 +50,19 @@ const _normalizeBrazilPhone = (raw) => {
 
 // Janela de validade do desconto no carrinho. Recebe 'yyyy-MM-dd' opcional;
 // default = fim do dia da data agendada (ou de hoje, quando 'Agora').
+//
+// IMPORTANTE (fuso): a coluna `discount_valid_until` é TIMESTAMP (sem fuso) e a
+// comparação de validade usa `NOW()` (timestamptz). Sem um offset explícito,
+// "23:59:59" seria interpretado no fuso da SESSÃO do Postgres — que em produção
+// roda em UTC — fazendo o desconto expirar às 20:59:59 de Brasília (3h cedo).
+// Por isso gravamos sempre com o offset de Brasília (BRT, UTC-3). Assim o instante
+// armazenado fica correto independentemente do fuso do servidor/sessão.
 const _computeValidUntil = (validUntil, scheduledDate) => {
   const base = validUntil || scheduledDate;
-  if (base) return `${String(base).slice(0, 10)} 23:59:59`;
-  const d = new Date();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${d.getFullYear()}-${mm}-${dd} 23:59:59`;
+  // "Hoje" também precisa ser o dia de Brasília: perto da meia-noite, o dia do
+  // servidor em UTC já virou e escolheria a data errada.
+  const day = base ? String(base).slice(0, 10) : _brazilNow().date;
+  return `${day} 23:59:59${BRT_UTC_OFFSET}`;
 };
 
 // Calcula o preço final a partir do desconto (percentual ou fixo). Nunca negativo.
@@ -578,6 +584,10 @@ const _periodStartHour = (period) => {
 // `new Date().getHours()`/`CURRENT_DATE`, que seguem o timezone do servidor e
 // disparariam a campanha adiantada (ex.: 09h BRT = 12h UTC = janela "tarde").
 const CAMPAIGN_TZ = "America/Sao_Paulo";
+// Offset fixo de Brasília (UTC-3, sem horário de verão desde 2019). Usado ao gravar
+// timestamps "de parede" (ex.: fim do dia da validade do desconto) para que o
+// instante fique correto mesmo com o Postgres/servidor em UTC. Ver _computeValidUntil.
+const BRT_UTC_OFFSET = "-03:00";
 
 // Data (YYYY-MM-DD) e hora (0-23) atuais no fuso de Brasília, independentes do
 // timezone do processo Node.

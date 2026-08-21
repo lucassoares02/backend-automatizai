@@ -1,15 +1,13 @@
 const pool = require("../db");
 
 // Lista TODAS as lojas (uso do admin do sistema no switcher do header).
-// Nome amigável: prioriza nome_fantasia e cai em razao_social; aliasado como
-// `razao_social` para reaproveitar o CompaniesModel do Portal.
+// A tabela `companies` usa a coluna `name` como nome da loja (não existe
+// `nome_fantasia`/`razao_social`/`cnpj`). O CompaniesModel do Portal lê `name`.
 const findAllCompanies = async () => {
   const result = await pool.query(
-    `SELECT id,
-            COALESCE(NULLIF(TRIM(nome_fantasia), ''), razao_social) AS razao_social,
-            cnpj
+    `SELECT id, name
        FROM companies
-      ORDER BY COALESCE(NULLIF(TRIM(nome_fantasia), ''), razao_social) ASC NULLS LAST`,
+      ORDER BY name ASC NULLS LAST`,
   );
   return result.rows;
 };
