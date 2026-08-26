@@ -179,12 +179,14 @@ const createOrderPaymentSession = async (req, res) => {
       String(order.payment_status || ""),
     );
     // Sessão liberada para: pagamento online pendente (Pagar.me, status 10) e
-    // pedidos presenciais em aberto (sem provedor, status 1) — estes usam a sessão
-    // apenas para autorizar a troca da forma de pagamento (inclusive migrar p/ online).
+    // pedidos presenciais ainda ativos (sem provedor, status não terminal) — estes
+    // usam a sessão apenas para autorizar a troca da forma de pagamento.
+    const ACTIVE_OFFLINE_STATUSES = [1, 2, 3, 4, 8];
     const onlinePending =
       order.payment_provider === "pagarme" && Number(order.status) === 10;
     const offlineChangeable =
-      !order.payment_provider && Number(order.status) === 1;
+      !order.payment_provider &&
+      ACTIVE_OFFLINE_STATUSES.includes(Number(order.status));
     if ((!onlinePending && !offlineChangeable) || settled) {
       return res.status(409).json({
         error: "Este pedido não está disponível para pagamento online.",

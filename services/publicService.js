@@ -1046,10 +1046,14 @@ const changePendingOnlinePaymentMethod = async ({
       throw Object.assign(new Error("Pedido não encontrado."), { status: 404 });
     }
     const settled = ["paid", "refunded", "refund_pending", "chargedback"].includes(String(order.payment_status || ""));
-    // Online pendente (Pagar.me, status 10) ou presencial em aberto (sem provedor,
-    // status 1 "Aguardando" — antes de a loja aceitar) podem trocar a forma.
+    // Online pendente (Pagar.me, status 10) pode trocar de sub-método ou migrar
+    // para presencial. Pedido presencial (sem provedor) pode trocar de forma
+    // enquanto ainda estiver ativo — pagamento presencial só acontece na
+    // entrega/retirada, então vale até estar "Pronto p/ retirada" (8). Estados
+    // terminais (5,6,7,9) ficam de fora.
+    const ACTIVE_OFFLINE_STATUSES = [1, 2, 3, 4, 8];
     const changeableOnline = order.payment_provider === "pagarme" && Number(order.status) === 10;
-    const changeableOffline = !order.payment_provider && Number(order.status) === 1;
+    const changeableOffline = !order.payment_provider && ACTIVE_OFFLINE_STATUSES.includes(Number(order.status));
     if ((!changeableOnline && !changeableOffline) || settled) {
       throw Object.assign(new Error("Este pedido não pode mais ter a forma de pagamento alterada."), { status: 409 });
     }
@@ -1092,8 +1096,23 @@ const changePendingOnlinePaymentMethod = async ({
       if (!pmRes.rows[0]) {
         throw Object.assign(new Error("Forma de pagamento indisponível."), { status: 400 });
       }
-      // A taxa de serviço só existe em pagamentos online; ao sair do provedor,
-      // ela é removida e o total recalculado.
+
+      if (changeableOffline) {
+        // Presencial -> presencial: só troca o método. O pedido já não tem taxa
+        // de serviço nem provedor; mantém o status atual (não regride o fluxo).
+        const swapped = await db.query(
+          `UPDATE orders
+           SET payment_method_id = $2, updated_at = now()
+           WHERE id = $1
+           RETURNING id, payment_method_id, total`,
+          [order.id, Number(paymentMethodId)],
+        );
+        await db.query("COMMIT");
+        return swapped.rows[0];
+      }
+
+      // Online -> presencial: abandona o provedor online, remove a taxa de
+      // serviço, recalcula o total e devolve o pedido a "Aguardando" (1).
       const currentFee = Number(order.service_fee || 0);
       const newTotal = Number((Number(order.total || 0) - currentFee).toFixed(2));
       const updated = await db.query(
@@ -1119,6 +1138,14 @@ const changePendingOnlinePaymentMethod = async ({
     }
 
     if (changeableOffline) {
+      // Presencial -> online: só faz sentido antes de a loja confirmar (status 1),
+      // pois recoloca o pedido em "Pagamento pendente".
+      if (Number(order.status) !== 1) {
+        throw Object.assign(
+          new Error("Para pagar online, troque a forma antes de a loja confirmar o pedido."),
+          { status: 409 },
+        );
+      }
       // Presencial -> online: passa a exigir pagamento pelo provedor. A taxa de
       // serviço (que só existe no online) volta ao total e o pedido entra em
       // "Pagamento pendente" (status 10), aguardando cartão/PIX.
