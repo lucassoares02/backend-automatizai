@@ -1045,7 +1045,12 @@ const changePendingOnlinePaymentMethod = async ({
     if (!order || Number(order.company_id) !== Number(companyId) || Number(order.client_id) !== Number(clientId)) {
       throw Object.assign(new Error("Pedido não encontrado."), { status: 404 });
     }
-    if (order.payment_provider !== "pagarme" || Number(order.status) !== 10 || ["paid", "refunded", "refund_pending", "chargedback"].includes(String(order.payment_status || ""))) {
+    const settled = ["paid", "refunded", "refund_pending", "chargedback"].includes(String(order.payment_status || ""));
+    // Online pendente (Pagar.me, status 10) ou presencial em aberto (sem provedor,
+    // status 1 "Aguardando" — antes de a loja aceitar) podem trocar a forma.
+    const changeableOnline = order.payment_provider === "pagarme" && Number(order.status) === 10;
+    const changeableOffline = !order.payment_provider && Number(order.status) === 1;
+    if ((!changeableOnline && !changeableOffline) || settled) {
       throw Object.assign(new Error("Este pedido não pode mais ter a forma de pagamento alterada."), { status: 409 });
     }
     if (
@@ -1113,6 +1118,35 @@ const changePendingOnlinePaymentMethod = async ({
       return updated.rows[0];
     }
 
+    if (changeableOffline) {
+      // Presencial -> online: passa a exigir pagamento pelo provedor. A taxa de
+      // serviço (que só existe no online) volta ao total e o pedido entra em
+      // "Pagamento pendente" (status 10), aguardando cartão/PIX.
+      const SERVICE_FEE_AMOUNT = Number(process.env.PUBLIC_SERVICE_FEE_AMOUNT ?? 1.49);
+      const fee = Number(SERVICE_FEE_AMOUNT.toFixed(2));
+      const newTotal = Number((Number(order.total || 0) + fee).toFixed(2));
+      const promoted = await db.query(
+        `UPDATE orders
+         SET payment_provider = 'pagarme',
+             online_payment_method = $2,
+             payment_method_id = NULL,
+             service_fee = $3,
+             total = $4,
+             payment_status = 'pending',
+             status = 10,
+             updated_at = now()
+         WHERE id = $1
+         RETURNING id, online_payment_method, total`,
+        [order.id, method, fee, newTotal],
+      );
+      await db.query(
+        "INSERT INTO order_status_history (order_id, status) VALUES ($1, $2)",
+        [order.id, "10"],
+      );
+      await db.query("COMMIT");
+      return promoted.rows[0];
+    }
+
     const updated = await db.query(
       `UPDATE orders
        SET online_payment_method = $2, updated_at = now()
@@ -1156,6 +1190,7 @@ const _PUBLIC_ORDER_SELECT = `
       )), '')
       FROM company_addresses ca WHERE ca.company_id = o.company_id ORDER BY ca.id DESC LIMIT 1
     ) AS company_address,
+    o.payment_method_id,
     pm.label AS payment_method_label, pm.type AS payment_method_type,
     COALESCE(
       (

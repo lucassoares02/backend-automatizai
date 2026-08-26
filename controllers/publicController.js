@@ -175,13 +175,17 @@ const createOrderPaymentSession = async (req, res) => {
       phone: req.body?.phone ? String(req.body.phone) : null,
     });
     if (!order) return res.status(404).json({ error: "Order not found" });
-    if (
-      order.payment_provider !== "pagarme" ||
-      Number(order.status) !== 10 ||
-      ["paid", "refunded", "refund_pending", "chargedback"].includes(
-        String(order.payment_status || ""),
-      )
-    ) {
+    const settled = ["paid", "refunded", "refund_pending", "chargedback"].includes(
+      String(order.payment_status || ""),
+    );
+    // Sessão liberada para: pagamento online pendente (Pagar.me, status 10) e
+    // pedidos presenciais em aberto (sem provedor, status 1) — estes usam a sessão
+    // apenas para autorizar a troca da forma de pagamento (inclusive migrar p/ online).
+    const onlinePending =
+      order.payment_provider === "pagarme" && Number(order.status) === 10;
+    const offlineChangeable =
+      !order.payment_provider && Number(order.status) === 1;
+    if ((!onlinePending && !offlineChangeable) || settled) {
       return res.status(409).json({
         error: "Este pedido não está disponível para pagamento online.",
       });
