@@ -71,6 +71,13 @@ const enqueue = async (instanceName, body) => {
   const conn = await connectionsService.find_by_instance(instanceName).catch(() => null);
   const companyId = conn?.company_id ?? null;
 
+  // Atendimento com IA desligado para esta conexão? Então a instância não deve
+  // acionar o fluxo do n8n de forma alguma — nem persiste/agrupa a mensagem.
+  if (conn && conn.ai_enabled === false) {
+    console.log(`[message-queue] atendimento com IA desligado para a conexão "${instanceName}" — mensagem ignorada`);
+    return;
+  }
+
   // A decisão é da API e ocorre antes de persistir/agrupar a mensagem. Assim um
   // contato configurado como "sem resposta da IA" nunca entra no fluxo do n8n.
   if (await aiIgnoredPhoneNumbersService.shouldIgnoreMessage({ companyId, body, remoteJid: parsed.remoteJid })) {
@@ -318,6 +325,14 @@ const runDispatch = async () => {
       while ((job = await _claimNext())) {
         try {
           const payload = await _buildPayload(job);
+          // Revalida o toggle "Atendimento com IA" no instante do despacho: cobre
+          // jobs que já estavam no debounce quando o usuário desligou a IA da conexão.
+          const conn = await connectionsService.find_by_instance(job.instance_name).catch(() => null);
+          if (conn && conn.ai_enabled === false) {
+            await _finishIgnoredJob(job);
+            console.log(`[message-queue] job ${job.id} ignorado: atendimento com IA desligado (${job.instance_name})`);
+            continue;
+          }
           // Revalida no instante do despacho. Isso cobre mensagens que já estavam
           // no debounce quando o usuário adicionou o número à lista.
           const ignored = await aiIgnoredPhoneNumbersService.shouldIgnoreMessage({

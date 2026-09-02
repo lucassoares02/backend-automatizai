@@ -10,6 +10,7 @@ const findAll = async (company) => {
             integration,
             status,
             hash,
+            ai_enabled    AS "aiEnabled",
             created_at    AS "createdAt"
      FROM connections
      WHERE company_id = $1
@@ -42,14 +43,17 @@ const create = async (data) => {
 
 const update = async (data) => {
   const { id, instanceName, status, description } = data;
+  // aceita camelCase (Flutter) e snake_case (n8n/serviço)
+  const aiEnabled = data.aiEnabled ?? data.ai_enabled ?? null;
   const result = await pool.query(
     `UPDATE connections
      SET instance_name = COALESCE($2, instance_name),
          status        = COALESCE($3, status),
-         description   = COALESCE($4, description)
+         description   = COALESCE($4, description),
+         ai_enabled    = COALESCE($5, ai_enabled)
      WHERE id = $1
      RETURNING *`,
-    [id, instanceName ?? null, status ?? null, description ?? null],
+    [id, instanceName ?? null, status ?? null, description ?? null, aiEnabled],
   );
   return result.rows[0];
 };
