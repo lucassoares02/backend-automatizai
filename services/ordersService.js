@@ -585,19 +585,26 @@ const remove = async (id) => {
       );
     }
 
-    // 2) Eventos de rastreamento vinculados às sessões deste pedido.
+    // 2) Eventos de rastreamento: ligados às sessões pelo token textual
+    // `session_id` (varchar) — NÃO há FK e o casamento é varchar = varchar,
+    // por isso comparamos com session_id (e não com o id numérico da sessão).
     if (
       (await tableExists("tracking_events")) &&
       (await tableExists("customer_tracking_sessions"))
     ) {
       await client.query(
         `DELETE FROM tracking_events
-          WHERE session_id IN (SELECT id FROM customer_tracking_sessions WHERE order_id = $1)`,
+          WHERE session_id IN (
+            SELECT session_id FROM customer_tracking_sessions WHERE order_id = $1
+          )`,
         [id],
       );
     }
 
-    // 3) Dependências diretas por order_id (ordem irrelevante entre si).
+    // 3) Dependências diretas por order_id. Só `payment_attempts` (ON DELETE
+    // NO ACTION) realmente bloqueia a exclusão do pedido; as demais são CASCADE
+    // ou SET NULL, mas removemos explicitamente para não deixar órfãos. Guardado
+    // por tableExists + columnExists para tolerar diferenças de schema.
     const dependents = [
       "customer_tracking_sessions",
       "payment_attempts",
@@ -607,7 +614,10 @@ const remove = async (id) => {
       "order_items",
     ];
     for (const table of dependents) {
-      if (await tableExists(table)) {
+      if (
+        (await tableExists(table)) &&
+        (await columnExists(table, "order_id"))
+      ) {
         await client.query(`DELETE FROM ${table} WHERE order_id = $1`, [id]);
       }
     }
