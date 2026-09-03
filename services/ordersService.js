@@ -2,7 +2,7 @@ const pool = require("../db");
 const orderWebhookService = require("./orderWebhookService");
 const campaignsService = require("./campaignsService");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
-const { columnExists } = require("../helpers/schema");
+const { columnExists, tableExists } = require("../helpers/schema");
 const STATUS_IN_PROGRESS = [1, 2, 3, 4, 8];
 const STATUS_COMPLETED = [5, 9];
 const STATUS_CANCELLED = [6, 7];
@@ -564,9 +564,68 @@ const confirmDeliveryFeeAgreement = async (id, deliveryFee) => {
   }
 };
 
+// Exclui um pedido e TODOS os seus dependentes numa única transação. As tabelas
+// order_items e order_status_history possuem ON DELETE CASCADE, mas as demais
+// (mensagens, rastreamento, tentativas de pagamento, rotas de entrega) não
+// necessariamente — então limpamos explicitamente, em ordem segura de FK.
+// Cada dependente é protegido por tableExists para tolerar ambientes onde a
+// tabela ainda não existe. Os nomes de tabela são constantes do próprio código
+// (não vêm do usuário), então não há risco de injeção.
 const remove = async (id) => {
-  const result = await pool.query("DELETE FROM orders WHERE id = $1 RETURNING *", [id]);
-  return result.rows[0];
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // 1) Filhos dos itens do pedido (opções escolhidas em cada item).
+    if (await tableExists("order_item_options")) {
+      await client.query(
+        `DELETE FROM order_item_options
+          WHERE order_item_id IN (SELECT id FROM order_items WHERE order_id = $1)`,
+        [id],
+      );
+    }
+
+    // 2) Eventos de rastreamento vinculados às sessões deste pedido.
+    if (
+      (await tableExists("tracking_events")) &&
+      (await tableExists("customer_tracking_sessions"))
+    ) {
+      await client.query(
+        `DELETE FROM tracking_events
+          WHERE session_id IN (SELECT id FROM customer_tracking_sessions WHERE order_id = $1)`,
+        [id],
+      );
+    }
+
+    // 3) Dependências diretas por order_id (ordem irrelevante entre si).
+    const dependents = [
+      "customer_tracking_sessions",
+      "payment_attempts",
+      "order_messages",
+      "delivery_route_orders",
+      "order_status_history",
+      "order_items",
+    ];
+    for (const table of dependents) {
+      if (await tableExists(table)) {
+        await client.query(`DELETE FROM ${table} WHERE order_id = $1`, [id]);
+      }
+    }
+
+    // 4) Por fim, o próprio pedido.
+    const result = await client.query(
+      "DELETE FROM orders WHERE id = $1 RETURNING *",
+      [id],
+    );
+
+    await client.query("COMMIT");
+    return result.rows[0];
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 };
 
 module.exports = {
