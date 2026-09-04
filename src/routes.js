@@ -27,6 +27,7 @@ const address = require("../controllers/addressController");
 const promotions = require("../controllers/promotionsController");
 const campaigns = require("../controllers/campaignsController");
 const upsell = require("../controllers/upsellController");
+const coupons = require("../controllers/couponsController");
 const searchAnalytics = require("../controllers/searchAnalyticsController");
 const orderMessages = require("../controllers/orderMessagesController");
 const productOptions = require("../controllers/productOptionsController");
@@ -59,6 +60,7 @@ const authorizeClient = authorizeByLookup("SELECT company_id FROM clients WHERE 
 const authorizePromotion = authorizeByLookup("SELECT company_id FROM promotions WHERE id = $1", "id");
 const authorizeCampaign = authorizeByLookup("SELECT company_id FROM campaigns WHERE id = $1", "id");
 const authorizeUpsell = authorizeByLookup("SELECT company_id FROM upsell_rules WHERE id = $1", "id");
+const authorizeCoupon = authorizeByLookup("SELECT company_id FROM coupons WHERE id = $1", "id");
 const authorizeGoal = authorizeByLookup("SELECT company_id FROM purchase_goals WHERE id = $1", "id");
 const authorizeDriver = authorizeByLookup("SELECT company_id FROM delivery_drivers WHERE id = $1", "id");
 const authorizeConnection = authorizeByLookup("SELECT company_id FROM connections WHERE id = $1", "id");
@@ -279,6 +281,17 @@ router.delete("/upsell/:id", authMiddleware, authorizeUpsell, upsell.remove);
 
 // upsell public — no auth
 router.get("/public/upsell/suggestions", publicLimiter, upsell.getSuggestions);
+
+// coupons (authenticated)
+router.get("/coupons/company/:companyId", authMiddleware, authorizeCompanyParam("companyId"), coupons.findByCompany);
+router.get("/coupons/:id/redemptions", authMiddleware, authorizeCoupon, coupons.redemptions);
+router.post("/coupons", authMiddleware, authorizeCompanyBody(), coupons.create);
+router.patch("/coupons/:id", authMiddleware, authorizeCoupon, coupons.update);
+router.patch("/coupons/:id/status", authMiddleware, authorizeCoupon, coupons.toggleStatus);
+router.delete("/coupons/:id", authMiddleware, authorizeCoupon, coupons.remove);
+
+// coupons public — validação do código (sem auth)
+router.post("/public/coupons/validate", publicLimiter, coupons.publicValidate);
 
 // search analytics — public ingest (no auth), report endpoints (auth)
 router.post("/public/search-analytics", publicLimiter, searchAnalytics.track);

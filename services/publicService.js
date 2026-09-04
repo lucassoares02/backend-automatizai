@@ -6,6 +6,7 @@ const stripeService = require("./stripeService");
 const pagarmeService = require("./pagarmeService");
 const ordersService = require("./ordersService");
 const campaignsService = require("./campaignsService");
+const couponsService = require("./couponsService");
 const identityService = require("./identityService");
 const { normalizePhone } = require("../helpers/phone");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
@@ -853,12 +854,40 @@ const createPublicOrder = async (data) => {
   const SERVICE_FEE_AMOUNT = Number(process.env.PUBLIC_SERVICE_FEE_AMOUNT ?? 1.49);
   const service_fee = payment_provider ? Number(SERVICE_FEE_AMOUNT.toFixed(2)) : 0;
 
-  const total = Number((subtotalOrder + delivery_fee - manualDiscount + service_fee).toFixed(2));
+  const totalBeforeCoupon = Number(
+    (subtotalOrder + delivery_fee - manualDiscount + service_fee).toFixed(2),
+  );
+  const couponCode = data.coupon_code ? String(data.coupon_code).trim() : null;
 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     const tag = await generateUniqueOrderTag(client);
+
+    // Cupom de desconto: revalida e incrementa o uso atomicamente dentro da
+    // transação. Se o cupom ficou inválido, lança erro 400 e faz ROLLBACK.
+    // O desconto incide sobre o subtotal dos produtos.
+    let couponId = null;
+    let couponDiscount = 0;
+    if (couponCode) {
+      const redeemed = await couponsService.redeemForOrder(client, {
+        companyId: company_id,
+        code: couponCode,
+        clientId: client_id,
+        subtotal: subtotalOrder,
+        deliveryFee: delivery_fee,
+        items: enrichedItems.map((i) => ({
+          menu_item_id: i.menu_item_id ?? null,
+          subtotal: Number(i.subtotal || 0),
+        })),
+      });
+      couponId = redeemed.coupon_id;
+      couponDiscount = redeemed.discount;
+    }
+    const total = Number((totalBeforeCoupon - couponDiscount).toFixed(2));
+    const hasCouponCols =
+      (await columnExists("orders", "coupon_id")) &&
+      (await columnExists("orders", "coupon_discount"));
     // Status inicial: pedidos com pagamento online nascem em "Pagamento Pendente"
     // (10) e só vão para "Aguardando" (1) quando o pagamento é confirmado. Pedidos
     // sem provedor online (dinheiro/na entrega) começam direto em "Aguardando".
@@ -915,6 +944,14 @@ const createPublicOrder = async (data) => {
       optionalColumns += ", delivery_distance_meters";
       optionalPlaceholders += `, $${orderParams.length}`;
     }
+    if (hasCouponCols) {
+      orderParams.push(couponId);
+      optionalColumns += ", coupon_id";
+      optionalPlaceholders += `, $${orderParams.length}`;
+      orderParams.push(couponDiscount);
+      optionalColumns += ", coupon_discount";
+      optionalPlaceholders += `, $${orderParams.length}`;
+    }
     const orderRes = await client.query(
       `INSERT INTO orders (
          company_id, client_id, status, notes, subtotal, delivery_fee, discount, total,
@@ -925,6 +962,16 @@ const createPublicOrder = async (data) => {
       orderParams,
     );
     const order = orderRes.rows[0];
+
+    // Histórico de uso do cupom (best-effort, dentro da mesma transação).
+    if (couponId) {
+      await couponsService.recordRedemption(client, {
+        couponId,
+        orderId: order.id,
+        clientId: client_id,
+        discount: couponDiscount,
+      });
+    }
 
     for (const item of enrichedItems) {
       const itemRes = await client.query(
