@@ -218,9 +218,21 @@ const remove = async (id) => {
   return result.rows[0];
 };
 
+// Basic Auth do webhook n8n (mesmas credenciais do automatic-update-order).
+const _webhookAuthHeader = () => {
+  const u = process.env.WEBHOOK_N8N_USER;
+  const p = process.env.WEBHOOK_N8N_PASS;
+  if (!u && !p) return null;
+  return `Basic ${Buffer.from(`${u}:${p}`).toString("base64")}`;
+};
+
 // Solicita ao n8n o perfil/bio do cliente. Proxy para o webhook `bio-client`
 // (evita CORS no navegador e mantém o host do n8n fora do frontend). Retorna o
 // JSON do n8n (que inclui `bio_client`, `perfil_dashboard`, etc.).
+//
+// IMPORTANTE: o webhook exige Basic Auth (senão responde 401) e espera o corpo
+// como um ARRAY [{ client_id, company_id, phone }] — enviar um objeto simples
+// faz o workflow do n8n falhar (500 "Error in workflow").
 const bioProfile = async (clientId) => {
   const { rows } = await pool.query(
     "SELECT id, company_id, phone FROM clients WHERE id = $1",
@@ -234,17 +246,23 @@ const bioProfile = async (clientId) => {
   }
 
   const url = `${n8nUrlWebhook}bio-client`;
+  const auth = _webhookAuthHeader();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 45000);
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        client_id: client.id,
-        company_id: client.company_id,
-        phone: client.phone,
-      }),
+      headers: {
+        "Content-Type": "application/json",
+        ...(auth ? { Authorization: auth } : {}),
+      },
+      body: JSON.stringify([
+        {
+          client_id: client.id,
+          company_id: client.company_id,
+          phone: client.phone,
+        },
+      ]),
       signal: controller.signal,
     });
     const text = await res.text();
@@ -255,12 +273,15 @@ const bioProfile = async (clientId) => {
       e.status = 502;
       throw e;
     }
+    let data;
     try {
-      return JSON.parse(text);
+      data = JSON.parse(text);
     } catch {
       // n8n pode responder texto puro — devolve num envelope mínimo.
       return { bio_client: text };
     }
+    // n8n pode devolver o objeto direto ou dentro de um array — normaliza.
+    return Array.isArray(data) ? data[0] || {} : data;
   } catch (err) {
     if (err.name === "AbortError") {
       const e = new Error("Tempo esgotado ao gerar o perfil do cliente.");
