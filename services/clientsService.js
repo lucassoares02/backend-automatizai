@@ -1,5 +1,6 @@
 const pool = require("../db");
 const identityService = require("./identityService");
+const { n8nUrlWebhook } = require("./evolutionService");
 
 const findAllWithStats = async (companyId, search = "", filter = "all") => {
   const searchParam = search.trim() ? `%${search.trim()}%` : "";
@@ -217,4 +218,59 @@ const remove = async (id) => {
   return result.rows[0];
 };
 
-module.exports = { findAllWithStats, getSummary, getDetails, find, create, update, remove };
+// Solicita ao n8n o perfil/bio do cliente. Proxy para o webhook `bio-client`
+// (evita CORS no navegador e mantém o host do n8n fora do frontend). Retorna o
+// JSON do n8n (que inclui `bio_client`, `perfil_dashboard`, etc.).
+const bioProfile = async (clientId) => {
+  const { rows } = await pool.query(
+    "SELECT id, company_id, phone FROM clients WHERE id = $1",
+    [clientId],
+  );
+  const client = rows[0];
+  if (!client) {
+    const e = new Error("Client not found");
+    e.status = 404;
+    throw e;
+  }
+
+  const url = `${n8nUrlWebhook}bio-client`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 45000);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: client.id,
+        company_id: client.company_id,
+        phone: client.phone,
+      }),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      const e = new Error(
+        `Falha ao gerar o perfil do cliente (n8n ${res.status}).`,
+      );
+      e.status = 502;
+      throw e;
+    }
+    try {
+      return JSON.parse(text);
+    } catch {
+      // n8n pode responder texto puro — devolve num envelope mínimo.
+      return { bio_client: text };
+    }
+  } catch (err) {
+    if (err.name === "AbortError") {
+      const e = new Error("Tempo esgotado ao gerar o perfil do cliente.");
+      e.status = 504;
+      throw e;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+module.exports = { findAllWithStats, getSummary, getDetails, find, create, update, remove, bioProfile };

@@ -207,6 +207,7 @@ router.delete("/additional_info/:id", authMiddleware, additional_info.remove);
 router.get("/clients/company/:id/summary", authMiddleware, authorizeCompanyParam("id"), clients.getSummary);
 router.get("/clients/company/:id", authMiddleware, authorizeCompanyParam("id"), clients.findAllWithStats);
 router.get("/clients/:id/details", authMiddleware, authorizeClient, clients.getDetails);
+router.post("/clients/:id/bio-profile", authMiddleware, authorizeClient, clients.bioProfile);
 router.get("/clients/:id", authMiddleware, authorizeClient, clients.find);
 router.post("/clients", authMiddleware, authorizeCompanyBody(), clients.create);
 router.patch("/clients/:id", authMiddleware, authorizeClient, clients.update);

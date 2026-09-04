@@ -91,4 +91,21 @@ const remove = async (req, res) => {
   }
 };
 
-module.exports = { findAllWithStats, getSummary, getDetails, find, create, update, remove };
+// Gera o perfil/bio do cliente via n8n e retorna o JSON completo.
+const bioProfile = async (req, res) => {
+  const { id } = req.params;
+  if (!id || isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
+  try {
+    const data = await service.bioProfile(parseInt(id));
+    return res.status(200).json(data);
+  } catch (error) {
+    if (!error.status || error.status >= 500) {
+      console.error("Error generating client bio:", error);
+    }
+    return res
+      .status(error.status || 500)
+      .json({ error: error.message || "Failed to generate client profile" });
+  }
+};
+
+module.exports = { findAllWithStats, getSummary, getDetails, find, create, update, remove, bioProfile };
