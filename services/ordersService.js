@@ -20,6 +20,9 @@ const ORDER_SELECT = `
          c.phone AS client_phone,
          pm.label AS payment_method_label,
          pm.type  AS payment_method_type,
+         (to_jsonb(o)->>'coupon_discount')::numeric AS coupon_discount,
+         (SELECT cp.code FROM coupons cp
+           WHERE cp.id = (to_jsonb(o)->>'coupon_id')::int) AS coupon_code,
          COALESCE(
            (SELECT json_agg(
               json_build_object(
