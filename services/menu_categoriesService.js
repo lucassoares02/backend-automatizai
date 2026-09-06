@@ -55,11 +55,25 @@ const create = async (data) => {
 };
 
 const update = async (data) => {
-  // espera um objeto com propriedades em camelCase + id
-  const { id, companyId, name, sortOrder, active } = data;
+  // Aceita camelCase e snake_case (o portal envia company_id/sort_order).
+  const id = data.id;
+  const companyId = data.companyId ?? data.company_id ?? null;
+  const sortOrder = data.sortOrder ?? data.sort_order ?? 0;
+  const active = data.active ?? true;
+  const name = (data.name ?? "").trim();
+  if (!companyId) {
+    const err = new Error("company_id é obrigatório");
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!name) {
+    const err = new Error("name é obrigatório");
+    err.statusCode = 400;
+    throw err;
+  }
   const result = await pool.query(
-    "UPDATE menu_categories SET id = $1, company_id = $2, name = $3, sort_order = $4, active = $5 WHERE id = $6 RETURNING *",
-    [id, companyId, name, sortOrder, active, id]
+    "UPDATE menu_categories SET company_id = $1, name = $2, sort_order = $3, active = $4 WHERE id = $5 RETURNING *",
+    [companyId, name, sortOrder, active, id]
   );
   return result.rows[0];
 };
