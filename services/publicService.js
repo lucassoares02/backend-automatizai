@@ -20,6 +20,93 @@ const toNumber = (value) => {
   return Number.isFinite(n) ? n : null;
 };
 
+const _hasStockControlSchema = async () => {
+  const [unlimited, quantity, threshold, reserved, reservationItems] = await Promise.all([
+    columnExists("menu_items", "stock_unlimited"),
+    columnExists("menu_items", "stock_quantity"),
+    columnExists("menu_items", "low_stock_threshold"),
+    columnExists("orders", "stock_reserved"),
+    columnExists("orders", "stock_reservation_items"),
+  ]);
+  return unlimited && quantity && threshold && reserved && reservationItems;
+};
+
+const _collectStockRequirements = (items) => {
+  const requiredByItem = new Map();
+  const add = (menuItemId, quantity) => {
+    const id = Number(menuItemId);
+    const qty = Number(quantity);
+    if (!Number.isInteger(id) || id <= 0) return;
+    if (!Number.isInteger(qty) || qty <= 0) {
+      throw Object.assign(new Error("A quantidade de cada produto deve ser um número inteiro maior que zero."), {
+        status: 400,
+      });
+    }
+    requiredByItem.set(id, (requiredByItem.get(id) || 0) + qty);
+  };
+
+  for (const item of items) {
+    if (item.menu_item_id != null) {
+      add(item.menu_item_id, item.quantity);
+      continue;
+    }
+    // Compatibilidade com o payload de combo não expandido: cada subitem usa a
+    // quantidade configurada no combo multiplicada pela quantidade do combo.
+    if (item.promotion_id && Array.isArray(item.promotion_items)) {
+      const comboQuantity = Number(item.quantity ?? 1);
+      if (!Number.isInteger(comboQuantity) || comboQuantity <= 0) {
+        throw Object.assign(new Error("A quantidade do combo deve ser maior que zero."), {
+          status: 400,
+        });
+      }
+      for (const sub of item.promotion_items) {
+        add(sub?.menu_item_id, Number(sub?.quantity ?? 1) * comboQuantity);
+      }
+    }
+  }
+  return requiredByItem;
+};
+
+const _reserveStock = async (client, companyId, requirements) => {
+  for (const [menuItemId, quantity] of requirements) {
+    const reserved = await client.query(
+      `UPDATE menu_items
+       SET stock_quantity = CASE
+         WHEN COALESCE(stock_unlimited, true) THEN stock_quantity
+         ELSE stock_quantity - $3
+       END
+       WHERE id = $1
+         AND company_id = $2
+         AND available = true
+         AND deleted_at IS NULL
+         AND (
+           COALESCE(stock_unlimited, true)
+           OR COALESCE(stock_quantity, 0) >= $3
+         )
+       RETURNING id, name, stock_unlimited, stock_quantity, low_stock_threshold`,
+      [menuItemId, companyId, quantity],
+    );
+    if (reserved.rows[0]) continue;
+
+    const product = await client.query(
+      `SELECT name
+       FROM menu_items
+       WHERE id = $1 AND company_id = $2
+       LIMIT 1`,
+      [menuItemId, companyId],
+    );
+    const name = product.rows[0]?.name;
+    throw Object.assign(
+      new Error(
+        name
+          ? `"${name}" não possui unidades suficientes para este pedido.`
+          : "Um produto do carrinho não está mais disponível.",
+      ),
+      { status: 409, code: "STOCK_UNAVAILABLE" },
+    );
+  }
+};
+
 // company_opening_hours.weekday segue a convenção do portal: 1=segunda … 7=domingo.
 // JS Date.getDay() usa 0=domingo … 6=sábado. Segunda–sábado coincidem (1–6); só o
 // DOMINGO diverge (getDay()=0 vs weekday=7). Este helper casa a linha do dia atual
@@ -133,14 +220,24 @@ const getCompanyPublicMenu = async (companyRef) => {
 
   // Selos do produto: só seleciona a coluna se ela já existir (a migration em
   // DB_CHANGES_NEEDED.md pode não ter sido aplicada). Sem ela, devolve array vazio.
-  const hasItemSelos = await columnExists("menu_items", "dietary_restrictions");
+  const [hasItemSelos, hasStockControl] = await Promise.all([
+    columnExists("menu_items", "dietary_restrictions"),
+    _hasStockControlSchema(),
+  ]);
   const selosSelect = hasItemSelos
     ? "mi.dietary_restrictions,"
     : "NULL::text[] AS dietary_restrictions,";
+  const stockSelect = hasStockControl
+    ? `COALESCE(mi.stock_unlimited, true) AS stock_unlimited,
+       CASE WHEN COALESCE(mi.stock_unlimited, true) THEN NULL ELSE mi.stock_quantity END AS stock_quantity,
+       CASE WHEN COALESCE(mi.stock_unlimited, true) THEN NULL ELSE mi.low_stock_threshold END AS low_stock_threshold,`
+    : `true AS stock_unlimited,
+       NULL::integer AS stock_quantity,
+       NULL::integer AS low_stock_threshold,`;
 
   const menuRes = await pool.query(
     `SELECT mi.id, mi.name, mi.description, mi.price, mi.image_url, mi.category_id,
-            mi.prep_time_minutes, mi.featured, ${selosSelect}
+            mi.prep_time_minutes, mi.featured, ${stockSelect} ${selosSelect}
             mc.name AS category_name, mc.sort_order AS cat_sort,
             EXISTS(
               SELECT 1 FROM product_option_groups pog
@@ -698,6 +795,7 @@ const createPublicOrder = async (data) => {
   // cada produto (menu_items.price) e de cada combo (promotions.final_price)
   // diretamente no banco, restritos à empresa do pedido. Isso impede fraude de
   // preço (comprar por centavos) sem alterar o payload da API pública.
+  const hasStockControl = await _hasStockControlSchema();
   const menuItemIds = [...new Set(items.map((i) => i.menu_item_id).filter(Boolean).map(Number))];
   const promotionIds = [...new Set(items.map((i) => i.promotion_id).filter(Boolean).map(Number))];
 
@@ -710,7 +808,12 @@ const createPublicOrder = async (data) => {
     // que faz o desconto "valer de verdade" no valor cobrado do cliente.
     const activeCampaignPrices = await campaignsService.getActivePricesMap(company_id);
     const r = await pool.query(
-      "SELECT id, price FROM menu_items WHERE company_id = $1 AND id = ANY($2::int[])",
+      `SELECT id, price
+       FROM menu_items
+       WHERE company_id = $1
+         AND id = ANY($2::int[])
+         AND available = true
+         AND deleted_at IS NULL`,
       [company_id, menuItemIds],
     );
     for (const row of r.rows) {
@@ -773,6 +876,12 @@ const createPublicOrder = async (data) => {
     }
 
     const qty = Number(item.quantity ?? 1);
+    if (!Number.isInteger(qty) || qty <= 0) {
+      throw Object.assign(
+        new Error("A quantidade de cada produto deve ser um número inteiro maior que zero."),
+        { status: 400 },
+      );
+    }
 
     // Preço base resolvido no servidor (ignora o unit_price do cliente).
     let baseUnit;
@@ -864,6 +973,20 @@ const createPublicOrder = async (data) => {
     await client.query("BEGIN");
     const tag = await generateUniqueOrderTag(client);
 
+    const stockRequirements = hasStockControl
+      ? _collectStockRequirements(enrichedItems)
+      : new Map();
+    const stockReserved = stockRequirements.size > 0;
+    const stockReservationItems = stockReserved
+      ? Array.from(stockRequirements, ([menu_item_id, quantity]) => ({
+          menu_item_id,
+          quantity,
+        }))
+      : null;
+    if (stockReserved) {
+      await _reserveStock(client, company_id, stockRequirements);
+    }
+
     // Cupom de desconto: revalida e incrementa o uso atomicamente dentro da
     // transação. Se o cupom ficou inválido, lança erro 400 e faz ROLLBACK.
     // O desconto incide sobre o subtotal dos produtos.
@@ -951,6 +1074,14 @@ const createPublicOrder = async (data) => {
       orderParams.push(couponDiscount);
       optionalColumns += ", coupon_discount";
       optionalPlaceholders += `, $${orderParams.length}`;
+    }
+    if (hasStockControl) {
+      orderParams.push(stockReserved);
+      optionalColumns += ", stock_reserved";
+      optionalPlaceholders += `, $${orderParams.length}`;
+      orderParams.push(stockReservationItems ? JSON.stringify(stockReservationItems) : null);
+      optionalColumns += ", stock_reservation_items";
+      optionalPlaceholders += `, $${orderParams.length}::jsonb`;
     }
     const orderRes = await client.query(
       `INSERT INTO orders (

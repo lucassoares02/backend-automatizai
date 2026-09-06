@@ -73,7 +73,7 @@ const create = async (req, res) => {
     return res.status(201).json(newItem);
   } catch (error) {
     console.error("Error creating MenuItems:", error);
-    return res.status(500).json({ error: "Failed to create MenuItems" });
+    return res.status(error.status || 500).json({ error: error.message || "Failed to create MenuItems" });
   }
 };
 
@@ -92,7 +92,7 @@ const update = async (req, res) => {
     return res.status(200).json(updated);
   } catch (error) {
     console.error("Error updating MenuItems:", error);
-    return res.status(500).json({ error: "Failed to update MenuItems" });
+    return res.status(error.status || 500).json({ error: error.message || "Failed to update MenuItems" });
   }
 };
 

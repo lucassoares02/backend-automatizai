@@ -7,6 +7,33 @@ const STATUS_IN_PROGRESS = [1, 2, 3, 4, 8];
 const STATUS_COMPLETED = [5, 9];
 const STATUS_CANCELLED = [6, 7];
 
+const _hasStockReservationSchema = async () => {
+  const [unlimited, quantity, reserved, reservationItems] = await Promise.all([
+    columnExists("menu_items", "stock_unlimited"),
+    columnExists("menu_items", "stock_quantity"),
+    columnExists("orders", "stock_reserved"),
+    columnExists("orders", "stock_reservation_items"),
+  ]);
+  return unlimited && quantity && reserved && reservationItems;
+};
+
+const _restoreReservedStock = async (client, reservationItems) => {
+  if (!Array.isArray(reservationItems)) return;
+  for (const entry of reservationItems) {
+    const menuItemId = Number(entry?.menu_item_id);
+    const quantity = Number(entry?.quantity);
+    if (!Number.isInteger(menuItemId) || menuItemId <= 0) continue;
+    if (!Number.isInteger(quantity) || quantity <= 0) continue;
+    await client.query(
+      `UPDATE menu_items
+       SET stock_quantity = stock_quantity + $2
+       WHERE id = $1
+         AND COALESCE(stock_unlimited, true) = false`,
+      [menuItemId, quantity],
+    );
+  }
+};
+
 const ORDER_SELECT = `
   SELECT o.*,
          COALESCE(
@@ -391,15 +418,23 @@ const upsertCart = async ({ order: orderId, company_id, client_id, items }) => {
 };
 
 const updateStatus = async (id, status, cancelReason) => {
+  const hasStockReservation = await _hasStockReservationSchema();
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+
+    const stockReservationSelect = hasStockReservation
+      ? `COALESCE(o.stock_reserved, false) AS stock_reserved,
+         o.stock_reservation_items,`
+      : `false AS stock_reserved,
+         NULL::jsonb AS stock_reservation_items,`;
 
     const currentResult = await client.query(
       `SELECT
          o.status,
          o.payment_status,
          o.payment_provider,
+         ${stockReservationSelect}
          COALESCE(
            (to_jsonb(o)->>'delivery_fee_pending_agreement')::boolean,
            false
@@ -418,6 +453,11 @@ const updateStatus = async (id, status, cancelReason) => {
     }
 
     const isCancellation = STATUS_CANCELLED.includes(Number(status));
+    const shouldReleaseStock =
+      hasStockReservation &&
+      isCancellation &&
+      !STATUS_CANCELLED.includes(Number(current.status)) &&
+      current.stock_reserved === true;
     if (
       current.delivery_fee_pending_agreement === true &&
       !current.delivery_fee_agreement_confirmed_at &&
@@ -439,11 +479,17 @@ const updateStatus = async (id, status, cancelReason) => {
       );
     }
 
+    if (shouldReleaseStock) {
+      await _restoreReservedStock(client, current.stock_reservation_items);
+    }
+
+    const releaseStockSet = shouldReleaseStock ? ", stock_reserved = false" : "";
+
     const result = await client.query(
       `UPDATE orders
        SET status = $2,
            cancel_reason = CASE WHEN $2 = ANY($4::int[]) THEN $3 ELSE cancel_reason END,
-           updated_at = NOW()
+           updated_at = NOW()${releaseStockSet}
        WHERE id = $1
        RETURNING *`,
       [id, status, cancelReason ?? null, STATUS_CANCELLED],
