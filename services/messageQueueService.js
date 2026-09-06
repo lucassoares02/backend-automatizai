@@ -62,14 +62,22 @@ const _parseMessage = (body) => {
 /**
  * Recebe um MESSAGES_UPSERT da Evolution, grava no buffer e (re)arma a janela de
  * debounce do job pendente daquela conversa. Mensagens de mídia forçam flush
- * imediato. Mensagens próprias (fromMe) e sem remoteJid são ignoradas.
+ * imediato. Mensagens próprias (`fromMe`) só entram na fila quando o
+ * Atendimento com IA estiver desabilitado, para o n8n acompanhar as respostas
+ * manuais sem iniciar uma nova resposta automática.
  */
 const enqueue = async (instanceName, body) => {
   const parsed = _parseMessage(body);
-  if (!parsed.remoteJid || parsed.fromMe) return;
+  if (!parsed.remoteJid) return;
 
   const conn = await connectionsService.find_by_instance(instanceName).catch(() => null);
   const companyId = conn?.company_id ?? null;
+  const aiEnabled = conn?.ai_enabled !== false;
+
+  // Com a IA ativa, ignora mensagens enviadas pela própria conta para evitar
+  // que respostas do atendente/automação retornem ao n8n e criem loops. Com a
+  // IA desligada, mantém essas mensagens como contexto para o fluxo.
+  if (parsed.fromMe && aiEnabled) return;
 
   // A decisão é da API e ocorre antes de persistir/agrupar a mensagem. Assim um
   // contato configurado como "sem resposta da IA" nunca entra no fluxo do n8n.
