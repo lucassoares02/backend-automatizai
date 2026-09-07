@@ -62,9 +62,9 @@ const _parseMessage = (body) => {
 /**
  * Recebe um MESSAGES_UPSERT da Evolution, grava no buffer e (re)arma a janela de
  * debounce do job pendente daquela conversa. Mensagens de mídia forçam flush
- * imediato. Mensagens próprias (`fromMe`) só entram na fila quando o
- * Atendimento com IA estiver desabilitado, para o n8n acompanhar as respostas
- * manuais sem iniciar uma nova resposta automática.
+ * imediato. Com Atendimento com IA ativo, mensagens próprias (`fromMe`) seguem
+ * diretamente ao n8n para registrar o contexto sem passar pela fila ou pelas
+ * regras de bloqueio de contatos.
  */
 const enqueue = async (instanceName, body) => {
   const parsed = _parseMessage(body);
@@ -74,10 +74,26 @@ const enqueue = async (instanceName, body) => {
   const companyId = conn?.company_id ?? null;
   const aiEnabled = conn?.ai_enabled !== false;
 
-  // Com a IA ativa, ignora mensagens enviadas pela própria conta para evitar
-  // que respostas do atendente/automação retornem ao n8n e criem loops. Com a
-  // IA desligada, mantém essas mensagens como contexto para o fluxo.
-  if (parsed.fromMe && aiEnabled) return;
+  // Nova regra: com a IA ativa, a mensagem da própria conta precisa chegar ao
+  // n8n imediatamente. Ela não passa por debounce, persistência na fila ou
+  // pelas regras de contatos ignorados. O envelope da Evolution é preservado,
+  // inclusive `data.key.fromMe = true`, para o fluxo distinguir a direção.
+  if (parsed.fromMe && aiEnabled) {
+    const payload = JSON.parse(JSON.stringify(body || {}));
+    payload.ai_enabled = true;
+    payload._queue = {
+      immediate: true,
+      direction: "outbound",
+      instance_name: instanceName,
+      remote_jid: parsed.remoteJid,
+      message_count: 1,
+      aggregated_text: parsed.text || "",
+      ai_enabled: true,
+    };
+    await evolution.forwardToN8n(instanceName, payload);
+    console.log(`[message-queue] mensagem enviada despachada imediatamente (${parsed.remoteJid})`);
+    return;
+  }
 
   // A decisão é da API e ocorre antes de persistir/agrupar a mensagem. Assim um
   // contato configurado como "sem resposta da IA" nunca entra no fluxo do n8n.
