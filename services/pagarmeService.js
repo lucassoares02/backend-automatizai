@@ -3,6 +3,7 @@ const crypto = require("crypto");
 const net = require("net");
 const pool = require("../db");
 const identityService = require("./identityService");
+const orderWebhookService = require("./orderWebhookService");
 const { columnExists, tableExists } = require("../helpers/schema");
 const { createPaymentSession } = require("../helpers/publicPaymentSession");
 
@@ -2266,21 +2267,33 @@ const _markOrderPaid = async (orderId, chargeId, pagarmeOrderId) => {
   // Marca como pago e, se o pedido estava em "Pagamento Pendente" (10), avança
   // para "Aguardando" (1) — a partir daí a loja passa a tratar o pedido.
   const r = await pool.query(
-    `UPDATE orders
-     SET payment_status = 'paid', payment_provider = 'pagarme',
-         pagarme_charge_id = COALESCE($2, pagarme_charge_id),
-         status = CASE WHEN status = '10' THEN '1' ELSE status END
-     WHERE id = $1
-       AND COALESCE(payment_status, '') NOT IN ('refunded', 'refund_pending', 'chargedback')
-       AND (
-         ($2::text IS NOT NULL AND pagarme_charge_id = $2)
-         OR ($3::text IS NOT NULL AND pagarme_order_id = $3)
-       )
-     RETURNING status`,
+    `WITH target AS (
+       SELECT id, status AS previous_status
+       FROM orders
+       WHERE id = $1
+         AND COALESCE(payment_status, '') NOT IN ('refunded', 'refund_pending', 'chargedback')
+         AND (
+           ($2::text IS NOT NULL AND pagarme_charge_id = $2)
+           OR ($3::text IS NOT NULL AND pagarme_order_id = $3)
+         )
+       FOR UPDATE
+     )
+     UPDATE orders o
+     SET payment_status = 'paid',
+         payment_provider = 'pagarme',
+         pagarme_charge_id = COALESCE($2, o.pagarme_charge_id),
+         status = CASE WHEN o.status = '10' THEN '1' ELSE o.status END
+     FROM target
+     WHERE o.id = target.id
+     RETURNING o.status, target.previous_status`,
     [orderId, chargeId || null, pagarmeOrderId || null],
   );
-  // Registra a entrada em "Aguardando" no histórico (sem duplicar se já existir).
-  if (r.rows[0]?.status === "1") {
+  const enteredAwaiting =
+    Number(r.rows[0]?.previous_status) === 10 &&
+    Number(r.rows[0]?.status) === 1;
+  // Registra e notifica somente na transição de pagamento pendente para
+  // "Aguardando", para não reenviar em webhooks duplicados do provedor.
+  if (enteredAwaiting) {
     await pool.query(
       `INSERT INTO order_status_history (order_id, status)
        SELECT $1, '1'
@@ -2289,6 +2302,7 @@ const _markOrderPaid = async (orderId, chargeId, pagarmeOrderId) => {
        )`,
       [orderId],
     );
+    orderWebhookService.notifyAwaitingOrder(orderId);
   }
 };
 

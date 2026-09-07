@@ -204,7 +204,11 @@ const create = async (data) => {
     }
 
     await client.query("COMMIT");
-    return await find(order.id);
+    const createdOrder = await find(order.id);
+    // Pedido criado por este fluxo é presencial e já nasce em "Aguardando".
+    // O webhook é assíncrono e só começa depois da transação estar confirmada.
+    orderWebhookService.notifyAwaitingOrder(order.id);
+    return createdOrder;
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -408,7 +412,12 @@ const upsertCart = async ({ order: orderId, company_id, client_id, items }) => {
     }
 
     await client.query("COMMIT");
-    return _cartResponse(await find(order.id));
+    const savedOrder = await find(order.id);
+    if (orderId == null) {
+      // O upsert cria pedidos presenciais diretamente em "Aguardando".
+      orderWebhookService.notifyAwaitingOrder(order.id);
+    }
+    return _cartResponse(savedOrder);
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -512,6 +521,9 @@ const updateStatus = async (id, status, cancelReason) => {
     // Fire-and-forget: o service decide se o status dispara e nunca lança —
     // falha do n8n não pode impactar a atualização do pedido.
     orderWebhookService.notifyStatusChange(order, Number(status));
+    if (Number(status) === 1 && Number(current.status) !== 1) {
+      orderWebhookService.notifyAwaitingOrder(order.id);
+    }
 
     return order;
   } catch (err) {

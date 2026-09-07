@@ -1,4 +1,5 @@
 const pool = require("../db");
+const orderWebhookService = require("./orderWebhookService");
 
 // ─── Cliente Stripe (lazy) ─────────────────────────────────────────────────────
 // Inicializa sob demanda para não derrubar o boot quando a chave não está setada
@@ -293,12 +294,37 @@ const constructEvent = (rawBody, signature) => {
 };
 
 const _markOrderPaid = async (orderId, paymentIntentId) => {
-  await pool.query(
-    `UPDATE orders
-     SET payment_status = 'paid', payment_provider = 'stripe', stripe_payment_intent_id = $2
-     WHERE id = $1`,
+  const result = await pool.query(
+    `WITH target AS (
+       SELECT id, status AS previous_status
+       FROM orders
+       WHERE id = $1
+       FOR UPDATE
+     )
+     UPDATE orders o
+     SET payment_status = 'paid',
+         payment_provider = 'stripe',
+         stripe_payment_intent_id = $2,
+         status = CASE WHEN o.status = '10' THEN '1' ELSE o.status END
+     FROM target
+     WHERE o.id = target.id
+     RETURNING o.status, target.previous_status`,
     [orderId, paymentIntentId || null],
   );
+  const enteredAwaiting =
+    Number(result.rows[0]?.previous_status) === 10 &&
+    Number(result.rows[0]?.status) === 1;
+  if (enteredAwaiting) {
+    await pool.query(
+      `INSERT INTO order_status_history (order_id, status)
+       SELECT $1, '1'
+       WHERE NOT EXISTS (
+         SELECT 1 FROM order_status_history WHERE order_id = $1 AND status = '1'
+       )`,
+      [orderId],
+    );
+    orderWebhookService.notifyAwaitingOrder(orderId);
+  }
 };
 
 const handleWebhookEvent = async (event) => {

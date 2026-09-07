@@ -5,6 +5,7 @@ const purchaseGoalsService = require("./purchaseGoalsService");
 const stripeService = require("./stripeService");
 const pagarmeService = require("./pagarmeService");
 const ordersService = require("./ordersService");
+const orderWebhookService = require("./orderWebhookService");
 const campaignsService = require("./campaignsService");
 const couponsService = require("./couponsService");
 const identityService = require("./identityService");
@@ -1168,6 +1169,10 @@ const createPublicOrder = async (data) => {
 
     await client.query("INSERT INTO order_status_history (order_id, status) VALUES ($1, $2)", [order.id, String(initialStatus)]);
     await client.query("COMMIT");
+    if (initialStatus === 1) {
+      // Métodos presenciais entram direto em "Aguardando".
+      orderWebhookService.notifyAwaitingOrder(order.id);
+    }
     return order;
   } catch (err) {
     await client.query("ROLLBACK");
@@ -1312,6 +1317,8 @@ const changePendingOnlinePaymentMethod = async ({
         [order.id, "1"],
       );
       await db.query("COMMIT");
+      // A troca para um método presencial libera o pedido imediatamente.
+      orderWebhookService.notifyAwaitingOrder(order.id);
       return updated.rows[0];
     }
 

@@ -2,7 +2,9 @@ const pool = require("../db");
 const { n8nUrlWebhook } = require("./evolutionService");
 
 const WEBHOOK_PATH = "automatic-update-order";
+const NEW_ORDER_WEBHOOK_PATH = "arbian-avisos";
 const FETCH_TIMEOUT_MS = 15000;
+const STATUS_AWAITING = 1;
 
 // Basic Auth do webhook n8n.
 const WEBHOOK_AUTH_USER = process.env.WEBHOOK_N8N_USER;
@@ -48,6 +50,123 @@ const _buildPayload = (order, status, extra) => ({
   created_at: order.created_at,
   updated_at: order.updated_at,
 });
+
+// Carrega um retrato completo do pedido no momento da notificação. Usamos os
+// JSONs das próprias tabelas para não perder campos adicionados ao pedido no
+// futuro, e agregamos os detalhes que vivem nas tabelas filhas.
+const _findAwaitingOrderPayload = async (orderId) => {
+  const orderResult = await pool.query(
+    `SELECT
+       to_jsonb(o) AS order,
+       to_jsonb(comp) AS company,
+       to_jsonb(cli) AS customer,
+       to_jsonb(pm) AS payment_method,
+       COALESCE((
+         SELECT jsonb_agg(
+           to_jsonb(oi) || jsonb_build_object(
+             'options', COALESCE((
+               SELECT jsonb_agg(to_jsonb(oio) ORDER BY oio.id)
+               FROM order_item_options oio
+               WHERE oio.order_item_id = oi.id
+             ), '[]'::jsonb)
+           )
+           ORDER BY oi.id
+         )
+         FROM order_items oi
+         WHERE oi.order_id = o.id
+       ), '[]'::jsonb) AS items,
+       COALESCE((
+         SELECT jsonb_agg(to_jsonb(osh) ORDER BY osh.created_at, osh.id)
+         FROM order_status_history osh
+         WHERE osh.order_id = o.id
+       ), '[]'::jsonb) AS status_history
+     FROM orders o
+     JOIN companies comp ON comp.id = o.company_id
+     JOIN clients cli ON cli.id = o.client_id
+     LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id
+     WHERE o.id = $1
+       AND o.status = $2`,
+    [orderId, STATUS_AWAITING],
+  );
+  const row = orderResult.rows[0];
+  if (!row) return null;
+
+  // Não enviamos `hash`: ele é um dado de provisionamento da conexão e não é
+  // necessário para o fluxo de avisos. Todas as conexões abertas da empresa
+  // são retornadas, inclusive quando houver mais de uma simultaneamente.
+  const connectionsResult = await pool.query(
+    `SELECT id,
+            company_id AS "companyId",
+            instance_name AS "instanceName",
+            instance_id AS "instanceId",
+            description,
+            integration,
+            status,
+            ai_enabled AS "aiEnabled",
+            created_at AS "createdAt"
+       FROM connections
+      WHERE company_id = $1
+        AND LOWER(TRIM(COALESCE(status, ''))) = 'open'
+      ORDER BY id`,
+    [row.order.company_id],
+  );
+
+  return {
+    event: "new_order",
+    status: {
+      id: STATUS_AWAITING,
+      name: "Aguardando",
+    },
+    order: {
+      ...row.order,
+      company: row.company,
+      customer: row.customer,
+      payment_method: row.payment_method,
+      items: row.items,
+      status_history: row.status_history,
+    },
+    connections: connectionsResult.rows,
+    notified_at: new Date().toISOString(),
+  };
+};
+
+/**
+ * Notifica o fluxo de avisos sobre um pedido que entrou em "Aguardando".
+ *
+ * Chamar somente depois do commit. O método é best-effort para que uma falha
+ * no n8n jamais reverta a criação do pedido ou a confirmação do pagamento.
+ */
+const notifyAwaitingOrder = async (orderId) => {
+  try {
+    if (!Number.isInteger(Number(orderId)) || Number(orderId) <= 0) return;
+
+    const payload = await _findAwaitingOrderPayload(Number(orderId));
+    if (!payload) return;
+
+    const res = await fetch(`${n8nUrlWebhook}${NEW_ORDER_WEBHOOK_PATH}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: WEBHOOK_AUTH_HEADER,
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+
+    console.log(
+      `Webhook arbian-avisos enviado com sucesso. order=${orderId} connections=${payload.connections.length}`,
+    );
+  } catch (err) {
+    console.error(
+      `Erro ao enviar webhook arbian-avisos. order=${orderId} erro=${err.message}`,
+    );
+  }
+};
 
 /**
  * Notifica o n8n sobre mudança de status de pedido.
@@ -98,4 +217,9 @@ const notifyStatusChange = async (order, status) => {
   }
 };
 
-module.exports = { notifyStatusChange, TRIGGER_STATUSES, STATUS_NAMES };
+module.exports = {
+  notifyStatusChange,
+  notifyAwaitingOrder,
+  TRIGGER_STATUSES,
+  STATUS_NAMES,
+};
