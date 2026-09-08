@@ -1,5 +1,6 @@
 const pool = require("../db");
 const { n8nUrlWebhook } = require("./evolutionService");
+const orderStatusNotificationService = require("./orderStatusNotificationService");
 
 const WEBHOOK_PATH = "automatic-update-order";
 const NEW_ORDER_WEBHOOK_PATH = "arbian-avisos";
@@ -18,10 +19,13 @@ const TRIGGER_STATUSES = new Set([2, 4, 6, 7, 8]);
 
 const STATUS_NAMES = {
   2: "Confirmado",
+  3: "Em Preparo",
   4: "Saiu para entrega",
+  5: "Entregue",
   6: "Cancelado",
   7: "Rejeitado",
   8: "Pronto para retirada",
+  9: "Retirado",
 };
 
 const _deliveryTypeLabel = (value) => {
@@ -30,11 +34,26 @@ const _deliveryTypeLabel = (value) => {
   return null;
 };
 
-const _buildPayload = (order, status, extra) => ({
+// Substitui os placeholders da mensagem configurada pelo comerciante.
+const _renderMessage = (template, order, status, extra) => {
+  if (!template) return "";
+  const code =
+    extra.tag && String(extra.tag).trim() !== ""
+      ? String(extra.tag).trim()
+      : `PED-${order.id}`;
+  return String(template)
+    .replaceAll("{cliente}", extra.client_name ?? "")
+    .replaceAll("{pedido}", code)
+    .replaceAll("{loja}", extra.company_name ?? "")
+    .replaceAll("{status}", STATUS_NAMES[status] ?? "");
+};
+
+const _buildPayload = (order, status, extra, message) => ({
   order_id: order.id,
   order_code: `PED-${order.id}`,
   status_id: status,
   status_name: STATUS_NAMES[status],
+  message: message ?? null,
   company: {
     id: order.company_id,
     name: extra.company_name,
@@ -176,7 +195,16 @@ const notifyAwaitingOrder = async (orderId) => {
  */
 const notifyStatusChange = async (order, status) => {
   try {
-    if (!order?.id || !TRIGGER_STATUSES.has(Number(status))) return;
+    if (!order?.id) return;
+
+    // A empresa decide, por etapa, se a mudança de status notifica o cliente e
+    // qual mensagem enviar. Sem linha personalizada, cai nos defaults (que
+    // preservam o comportamento histórico de disparar nos status 2,4,6,7,8).
+    const notif = await orderStatusNotificationService.resolveForStatus(
+      order.company_id,
+      Number(status),
+    );
+    if (!notif.enabled) return;
 
     const extraRes = await pool.query(
       `SELECT comp.name AS company_name, cli.name AS client_name, cli.phone AS client_phone, o.tag
@@ -189,7 +217,8 @@ const notifyStatusChange = async (order, status) => {
     const extra = extraRes.rows[0];
     if (!extra) return;
 
-    const payload = _buildPayload(order, Number(status), extra);
+    const message = _renderMessage(notif.message, order, Number(status), extra);
+    const payload = _buildPayload(order, Number(status), extra, message);
     const url = `${n8nUrlWebhook}${WEBHOOK_PATH}`;
 
     const res = await fetch(url, {

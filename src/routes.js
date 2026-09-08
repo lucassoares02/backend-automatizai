@@ -30,6 +30,7 @@ const upsell = require("../controllers/upsellController");
 const coupons = require("../controllers/couponsController");
 const searchAnalytics = require("../controllers/searchAnalyticsController");
 const orderMessages = require("../controllers/orderMessagesController");
+const orderStatusNotifications = require("../controllers/orderStatusNotificationController");
 const productOptions = require("../controllers/productOptionsController");
 const purchaseGoals = require("../controllers/purchaseGoalsController");
 const customerTracking = require("../controllers/customerTrackingController");
@@ -239,6 +240,20 @@ router.patch(
   orders.confirmDeliveryFeeAgreement,
 );
 router.delete("/orders/:id", authMiddleware, authorizeOrder, orders.remove);
+
+// order status notifications — config por etapa de notificação via WhatsApp/n8n
+router.get(
+  "/order-status-notifications/company/:companyId",
+  authMiddleware,
+  authorizeCompanyParam("companyId"),
+  orderStatusNotifications.findByCompany,
+);
+router.put(
+  "/order-status-notifications",
+  authMiddleware,
+  authorizeCompanyBody(),
+  orderStatusNotifications.upsert,
+);
 
 // deliveries — gestão inteligente de entregas (pedidos em rota + rotas otimizadas)
 router.get("/deliveries/active/:companyId", authMiddleware, authorizeCompanyParam("companyId"), deliveries.getActive);
