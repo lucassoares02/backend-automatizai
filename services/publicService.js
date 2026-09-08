@@ -12,6 +12,7 @@ const identityService = require("./identityService");
 const { normalizePhone } = require("../helpers/phone");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 const { columnExists, tableExists } = require("../helpers/schema");
+const { UUID_RE: _UUID_RE } = require("../helpers/companySlug");
 const {
   inclusiveLeadDayOffset,
   meetsInclusiveLeadDays,
@@ -177,13 +178,24 @@ const _buildAddressLine = (row) => {
   return parts.length ? parts.join(", ") : null;
 };
 
-// Aceita o UUID público da empresa OU o id numérico (retrocompatível com os
-// links antigos `/order?company={id}`).
-const _UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Aceita slug, UUID público ou id numérico (retrocompatível com os links
+// antigos `/order?company={id}`).
+const _COMPANY_SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 const getCompanyPublicMenu = async (companyRef) => {
   const ref = String(companyRef).trim();
   const byUuid = _UUID_RE.test(ref);
+  const byId = /^\d+$/.test(ref);
+  const hasCompanySlug = await columnExists("companies", "slug");
+  const normalizedSlugRef = ref.toLowerCase();
+  const bySlug =
+    !byUuid &&
+    !byId &&
+    hasCompanySlug &&
+    _COMPANY_SLUG_RE.test(normalizedSlugRef);
+  if (!byUuid && !byId && !bySlug) return null;
+  const slugSelect = hasCompanySlug ? "slug," : "NULL::text AS slug,";
+  const lookupColumn = byUuid ? "uuid" : byId ? "id" : "slug";
   // accepts_scheduling pode não ter sido migrada; sem a coluna devolve false.
   const hasScheduling = await columnExists("companies", "accepts_scheduling");
   const schedulingCol = hasScheduling ? "accepts_scheduling," : "false AS accepts_scheduling,";
@@ -198,7 +210,7 @@ const getCompanyPublicMenu = async (companyRef) => {
     ? "COALESCE(scheduling_open_days_only, true) AS scheduling_open_days_only,"
     : "true AS scheduling_open_days_only,";
   const companyRes = await pool.query(
-    `SELECT id, uuid, name, description, phone, status, manual_open,
+    `SELECT id, uuid, ${slugSelect} name, description, phone, status, manual_open,
             logo_url, banner_url, brand_color,
             accepts_delivery, accepts_pickup, ${schedulingCol}
             ${schedWindowCols}
@@ -206,8 +218,8 @@ const getCompanyPublicMenu = async (companyRef) => {
             cuisine_type, dietary_restrictions, custom_dietary_restrictions,
             stripe_account_id, stripe_charges_enabled,
             pagarme_recipient_id, pagarme_charges_enabled
-     FROM companies WHERE ${byUuid ? "uuid = $1" : "id = $1"}`,
-    [ref],
+     FROM companies WHERE ${lookupColumn} = $1`,
+    [bySlug ? normalizedSlugRef : ref],
   );
   const company = companyRes.rows[0];
   if (!company) return null;
@@ -1734,10 +1746,12 @@ const _isOpenNow = (hours) => {
 };
 
 const listPublicRestaurants = async () => {
+  const hasCompanySlug = await columnExists("companies", "slug");
+  const slugSelect = hasCompanySlug ? "c.slug," : "NULL::text AS slug,";
   // Ranking: pedidos válidos (não cancelados/rejeitados) > faturamento > mais
   // recentes — melhor métrica disponível na estrutura atual.
   const restaurantsRes = await pool.query(
-    `SELECT c.id, c.uuid, c.name, c.description, c.logo_url, c.banner_url, c.brand_color,
+    `SELECT c.id, c.uuid, ${slugSelect} c.name, c.description, c.logo_url, c.banner_url, c.brand_color,
             c.cuisine_type,
             (SELECT COUNT(*)::int FROM orders o
               WHERE o.company_id = c.id AND o.status NOT IN (6, 7)) AS orders_count,

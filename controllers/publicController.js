@@ -15,7 +15,7 @@ const listRestaurants = async (_req, res) => {
 
 const getCompanyMenu = async (req, res) => {
   const { companyId } = req.params;
-  // companyId pode ser o UUID público ou o id numérico (retrocompatível).
+  // companyId pode ser o slug, UUID público ou id numérico (retrocompatível).
   if (!companyId || !String(companyId).trim()) return res.status(400).json({ error: "Invalid company reference" });
   try {
     const data = await service.getCompanyPublicMenu(companyId);

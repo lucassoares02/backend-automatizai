@@ -1,5 +1,6 @@
 const pool = require("../db");
 const { columnExists } = require("../helpers/schema");
+const { insertWithUniqueCompanySlug } = require("../helpers/companySlug");
 
 /**
  * Normaliza a lista de restrições alimentares antes de persistir:
@@ -62,13 +63,25 @@ const find = async (id) => {
 const create = async (data) => {
   // espera um objeto com propriedades em camelCase (ex: { someField: 'x' })
   const { id, name, description, status, phone } = data;
-  const result = await pool.query("INSERT INTO companies (id, name, description, status, phone) VALUES ($1, $2, $3, $4, $5) RETURNING *", [
-    id,
-    name,
-    description,
-    status,
-    phone,
-  ]);
+  const hasSlug = await columnExists("companies", "slug");
+  const result = hasSlug
+    ? await insertWithUniqueCompanySlug({
+        db: pool,
+        name,
+        insert: (slug) =>
+          pool.query(
+            `INSERT INTO companies (id, name, description, status, phone, slug)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING *`,
+            [id, name, description, status, phone, slug],
+          ),
+      })
+    : await pool.query(
+        `INSERT INTO companies (id, name, description, status, phone)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING *`,
+        [id, name, description, status, phone],
+      );
   return result.rows[0];
 };
 

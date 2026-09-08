@@ -1,5 +1,7 @@
 const pool = require("../db");
 const { hashPassword } = require("../helpers/hash");
+const { columnExists } = require("../helpers/schema");
+const { insertWithUniqueCompanySlug } = require("../helpers/companySlug");
 const axios = require("axios");
 
 /**
@@ -27,14 +29,25 @@ const createCompanies = async (data) => {
   const { name, description, phone, user, type } = data;
 
   // 1. Cria a empresa no PostgreSQL
-  const result = await pool.query(
-    `
-    INSERT INTO companies (name, description, phone)
-    VALUES ($1, $2, $3)
-    RETURNING *
-    `,
-    [name, description, phone],
-  );
+  const hasSlug = await columnExists("companies", "slug");
+  const result = hasSlug
+    ? await insertWithUniqueCompanySlug({
+        db: pool,
+        name,
+        insert: (slug) =>
+          pool.query(
+            `INSERT INTO companies (name, description, phone, slug)
+             VALUES ($1, $2, $3, $4)
+             RETURNING *`,
+            [name, description, phone, slug],
+          ),
+      })
+    : await pool.query(
+        `INSERT INTO companies (name, description, phone)
+         VALUES ($1, $2, $3)
+         RETURNING *`,
+        [name, description, phone],
+      );
 
   const company = result.rows[0];
 
