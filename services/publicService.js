@@ -12,6 +12,10 @@ const identityService = require("./identityService");
 const { normalizePhone } = require("../helpers/phone");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 const { columnExists, tableExists } = require("../helpers/schema");
+const {
+  inclusiveLeadDayOffset,
+  meetsInclusiveLeadDays,
+} = require("../helpers/preorder");
 
 const MAPS_KEY = process.env.GOOGLE_API_KEY;
 
@@ -30,6 +34,45 @@ const _hasStockControlSchema = async () => {
     columnExists("orders", "stock_reservation_items"),
   ]);
   return unlimited && quantity && threshold && reserved && reservationItems;
+};
+
+const _hasPreorderSchema = async () => {
+  const [preorderOnly, leadDays] = await Promise.all([
+    columnExists("menu_items", "preorder_only"),
+    columnExists("menu_items", "preorder_lead_days"),
+  ]);
+  return preorderOnly && leadDays;
+};
+
+const _getPreorderRequirement = async (companyId, menuItemIds, promotionIds) => {
+  if (!(await _hasPreorderSchema())) return null;
+  const result = await pool.query(
+    `SELECT mi.id, mi.name, mi.preorder_lead_days
+     FROM menu_items mi
+     WHERE mi.company_id = $1
+       AND mi.preorder_only = true
+       AND mi.preorder_lead_days IS NOT NULL
+       AND (
+         mi.id = ANY($2::int[])
+         OR EXISTS (
+           SELECT 1
+           FROM promotion_items pi
+           JOIN promotions p ON p.id = pi.promotion_id
+           WHERE pi.menu_item_id = mi.id
+             AND p.company_id = $1
+             AND p.id = ANY($3::int[])
+         )
+       )
+     ORDER BY mi.preorder_lead_days DESC, mi.id
+     LIMIT 1`,
+    [companyId, menuItemIds, promotionIds],
+  );
+  const item = result.rows[0];
+  if (!item) return null;
+  return {
+    itemName: item.name,
+    leadDays: Number(item.preorder_lead_days),
+  };
 };
 
 const _collectStockRequirements = (items) => {
@@ -221,9 +264,10 @@ const getCompanyPublicMenu = async (companyRef) => {
 
   // Selos do produto: só seleciona a coluna se ela já existir (a migration em
   // DB_CHANGES_NEEDED.md pode não ter sido aplicada). Sem ela, devolve array vazio.
-  const [hasItemSelos, hasStockControl] = await Promise.all([
+  const [hasItemSelos, hasStockControl, hasPreorder] = await Promise.all([
     columnExists("menu_items", "dietary_restrictions"),
     _hasStockControlSchema(),
+    _hasPreorderSchema(),
   ]);
   const selosSelect = hasItemSelos
     ? "mi.dietary_restrictions,"
@@ -235,10 +279,15 @@ const getCompanyPublicMenu = async (companyRef) => {
     : `true AS stock_unlimited,
        NULL::integer AS stock_quantity,
        NULL::integer AS low_stock_threshold,`;
+  const preorderSelect = hasPreorder
+    ? `COALESCE(mi.preorder_only, false) AS preorder_only,
+       mi.preorder_lead_days,`
+    : `false AS preorder_only,
+       NULL::integer AS preorder_lead_days,`;
 
   const menuRes = await pool.query(
     `SELECT mi.id, mi.name, mi.description, mi.price, mi.image_url, mi.category_id,
-            mi.prep_time_minutes, mi.featured, ${stockSelect} ${selosSelect}
+            mi.prep_time_minutes, mi.featured, ${stockSelect} ${selosSelect} ${preorderSelect}
             mc.name AS category_name, mc.sort_order AS cat_sort,
             EXISTS(
               SELECT 1 FROM product_option_groups pog
@@ -286,6 +335,11 @@ const getCompanyPublicMenu = async (companyRef) => {
     }
   }
 
+  const promotionPreorderFields = hasPreorder
+    ? `'preorder_only', COALESCE(mi.preorder_only, false),
+                  'preorder_lead_days', mi.preorder_lead_days,`
+    : `'preorder_only', false,
+                  'preorder_lead_days', NULL,`;
   const promotionsRes = await pool.query(
     `SELECT p.id, p.name, p.description, p.image_url, p.active,
             p.original_price, p.discount_percent, p.final_price,
@@ -299,6 +353,7 @@ const getCompanyPublicMenu = async (companyRef) => {
                   'price', mi.price,
                   'image_url', mi.image_url,
                   'subtotal', (COALESCE(mi.price, 0) * pi.quantity),
+                  ${promotionPreorderFields}
                   'has_options', EXISTS (
                     SELECT 1 FROM product_option_groups pog WHERE pog.product_id = pi.menu_item_id
                   )
@@ -729,6 +784,26 @@ const createPublicOrder = async (data) => {
     }
   }
 
+  const menuItemIds = [
+    ...new Set(items.map((i) => i.menu_item_id).filter(Boolean).map(Number)),
+  ];
+  const promotionIds = [
+    ...new Set(items.map((i) => i.promotion_id).filter(Boolean).map(Number)),
+  ];
+  const preorderRequirement = await _getPreorderRequirement(
+    company_id,
+    menuItemIds,
+    promotionIds,
+  );
+  if (preorderRequirement && !scheduled_for) {
+    throw Object.assign(
+      new Error(
+        `"${preorderRequirement.itemName}" é vendido somente sob encomenda. Escolha uma data de agendamento.`,
+      ),
+      { status: 400, code: "PREORDER_SCHEDULE_REQUIRED" },
+    );
+  }
+
   // Agendamento: quando enviado, valida contra a janela [hoje+min, hoje+max]
   // configurada pela empresa (defaults 0/7 sem a coluna migrada). A checagem é
   // por DIA e com 1 dia de tolerância nas pontas para não rejeitar por diferença
@@ -737,6 +812,29 @@ const createPublicOrder = async (data) => {
     const when = new Date(scheduled_for);
     if (isNaN(when.getTime())) {
       throw new Error("Data de agendamento inválida.");
+    }
+    const now = new Date();
+    if (preorderRequirement) {
+      if (when <= now) {
+        throw Object.assign(
+          new Error("Escolha um horário futuro para a encomenda."),
+          { status: 400, code: "PREORDER_SCHEDULE_INVALID" },
+        );
+      }
+      if (
+        !meetsInclusiveLeadDays({
+          orderedAt: now,
+          scheduledAt: when,
+          leadDays: preorderRequirement.leadDays,
+        })
+      ) {
+        throw Object.assign(
+          new Error(
+            `"${preorderRequirement.itemName}" exige ${preorderRequirement.leadDays} dias de antecedência, contando hoje como o primeiro dia.`,
+          ),
+          { status: 400, code: "PREORDER_LEAD_TIME_NOT_MET" },
+        );
+      }
     }
     let minDays = 0;
     let maxDays = 7;
@@ -756,6 +854,11 @@ const createPublicOrder = async (data) => {
       d.setDate(d.getDate() + addDays);
       return d;
     };
+    const preorderMinDays = preorderRequirement
+      ? inclusiveLeadDayOffset(preorderRequirement.leadDays)
+      : 0;
+    minDays = Math.max(minDays, preorderMinDays);
+    maxDays = Math.max(maxDays, minDays);
     const lower = dayStart(minDays - 1); // tolerância de 1 dia
     const upper = dayStart(maxDays + 2); // +1 dia de tolerância além do fim do dia
     if (when < lower || when >= upper) {
@@ -797,9 +900,6 @@ const createPublicOrder = async (data) => {
   // diretamente no banco, restritos à empresa do pedido. Isso impede fraude de
   // preço (comprar por centavos) sem alterar o payload da API pública.
   const hasStockControl = await _hasStockControlSchema();
-  const menuItemIds = [...new Set(items.map((i) => i.menu_item_id).filter(Boolean).map(Number))];
-  const promotionIds = [...new Set(items.map((i) => i.promotion_id).filter(Boolean).map(Number))];
-
   const menuPriceById = new Map();
   // Preço "cheio" (sem campanha) por item — usado para ratear o desconto do combo
   // proporcionalmente, coerente com como `promotions.original_price` foi calculado.
