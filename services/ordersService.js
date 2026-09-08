@@ -150,7 +150,15 @@ const summarize = async (companyId) => {
 };
 
 const create = async (data) => {
-  const { company_id, client_id, notes, items, payment_method_id, delivery_address } = data;
+  const {
+    company_id,
+    client_id,
+    notes,
+    items,
+    payment_method_id,
+    delivery_address,
+    scheduled_for,
+  } = data;
 
   // delivery_type é BOOLEAN no DB (TRUE = entrega, FALSE = retirada).
   // Aceita boolean direto, ou string 'delivery'/'pickup' por compatibilidade.
@@ -167,6 +175,17 @@ const create = async (data) => {
   const discount = Number(data.discount ?? 0);
   const subtotal = items.reduce((sum, i) => sum + Number(i.subtotal), 0);
   const total = subtotal + delivery_fee - discount;
+  let scheduledFor = null;
+  if (scheduled_for != null) {
+    const parsed = new Date(scheduled_for);
+    if (Number.isNaN(parsed.getTime())) {
+      throw Object.assign(new Error("Data de agendamento inválida."), { status: 400 });
+    }
+    if (parsed.getTime() <= Date.now()) {
+      throw Object.assign(new Error("O agendamento deve ser para um horário futuro."), { status: 400 });
+    }
+    scheduledFor = parsed.toISOString();
+  }
 
   const client = await pool.connect();
   try {
@@ -176,8 +195,8 @@ const create = async (data) => {
     const orderRes = await client.query(
       `INSERT INTO orders
          (company_id, client_id, status, notes, subtotal, delivery_fee, discount, total,
-          payment_method_id, delivery_address, delivery_type, tag)
-       VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          payment_method_id, delivery_address, delivery_type, scheduled_for, tag)
+       VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING *`,
       [
         company_id,
@@ -190,6 +209,7 @@ const create = async (data) => {
         payment_method_id ?? null,
         delivery_address ?? null,
         delivery_type ?? null,
+        scheduledFor,
         tag,
       ],
     );

@@ -213,7 +213,7 @@ const OVERRIDES = {
     requestBody: body(
       {
         company_id: T.int, client_id: T.int, delivery_type: { type: "string", enum: ["delivery", "pickup"], description: "ou boolean (true=entrega)" },
-        delivery_fee: T.num, discount: T.num, payment_method_id: T.int, delivery_address: T.str, notes: T.str,
+        delivery_fee: T.num, discount: T.num, payment_method_id: T.int, delivery_address: T.str, scheduled_for: T.str, notes: T.str,
         items: T.arr(T.obj({ menu_item_id: T.int, name: T.str, quantity: T.int, unit_price: T.num, subtotal: T.num })),
       },
       { company_id: 12, client_id: 34, delivery_type: "delivery", delivery_fee: 7.5, discount: 0, payment_method_id: 2, delivery_address: "Rua A, 100 - Centro", notes: "Sem cebola", items: [{ menu_item_id: 55, name: "Pizza Margherita", quantity: 2, unit_price: 49.9, subtotal: 99.8 }] },

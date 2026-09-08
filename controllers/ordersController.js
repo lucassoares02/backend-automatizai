@@ -60,7 +60,9 @@ const create = async (req, res) => {
     return res.status(201).json(order);
   } catch (error) {
     console.error("Error creating order:", error);
-    return res.status(500).json({ error: "Failed to create order" });
+    return res
+      .status(error.status || 500)
+      .json({ error: error.status ? error.message : "Failed to create order" });
   }
 };
 
