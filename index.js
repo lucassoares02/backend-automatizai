@@ -41,6 +41,21 @@ const isProduction = ["production", "prod"].includes(
   String(process.env.NODE_ENV || process.env.ENVIROMENT || "").toLowerCase(),
 );
 
+// Cada entrada da allowlist vira um matcher. Origens sem '*' casam por igualdade
+// exata (comportamento anterior). Entradas com '*' viram um padrão: cada '*'
+// representa UM único nível de subdomínio ([^.]+) e todo o resto é escapado —
+// inclusive os pontos, para que "https://evilarbian.com.br" NÃO case com
+// "https://*.arbian.com.br". A resposta continua ecoando a origem exata que
+// casou (a lib `cors` reflete o header Origin), nunca '*'.
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const buildOriginMatcher = (pattern) => {
+  if (!pattern.includes("*")) return (origin) => origin === pattern;
+  const source = pattern.split("*").map(escapeRegExp).join("[^.]+");
+  const re = new RegExp(`^${source}$`);
+  return (origin) => re.test(origin);
+};
+const originMatchers = allowedOrigins.map(buildOriginMatcher);
+
 const corsOptions = {
   origin(origin, callback) {
     // Requisições sem Origin (curl, apps mobile, webhooks server-to-server) são
@@ -48,9 +63,10 @@ const corsOptions = {
     if (!origin) return callback(null, true);
     if (allowedOrigins.length === 0 && !isProduction) return callback(null, true);
     if (allowedOrigins.length === 0) return callback(new Error("CORS não configurado para produção"));
-    if (allowedOrigins.includes(origin)) return callback(null, true);
+    if (originMatchers.some((match) => match(origin))) return callback(null, true);
     return callback(new Error("Not allowed by CORS"));
   },
+  credentials: true,
   allowedHeaders: ["Content-Type", "Authorization"],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 };
