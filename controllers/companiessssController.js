@@ -75,6 +75,12 @@ const update = async (req, res) => {
     return res.status(200).json(updated);
   } catch (error) {
     console.error("Error updating Companiessss:", error);
+    // Conflito de slug (reservado, duplicado ou violação UNIQUE no banco).
+    if (error?.status === 409 || error?.code === "23505") {
+      return res.status(409).json({
+        error: error.message || "Este endereço já está em uso.",
+      });
+    }
     return res.status(500).json({ error: "Failed to update Companiessss" });
   }
 };

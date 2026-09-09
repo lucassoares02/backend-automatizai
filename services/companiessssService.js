@@ -1,6 +1,14 @@
 const pool = require("../db");
 const { columnExists } = require("../helpers/schema");
-const { insertWithUniqueCompanySlug } = require("../helpers/companySlug");
+const {
+  insertWithUniqueCompanySlug,
+  slugifyCompanyName,
+} = require("../helpers/companySlug");
+
+// Slugs reservados para hosts da plataforma (ver redirect por subdomínio no
+// portal). Quando a empresa não tem slug próprio, o padrão é "portal", então
+// esses valores não podem ser usados como endereço de um tenant.
+const RESERVED_COMPANY_SLUGS = new Set(["portal", "www", "dash"]);
 
 /**
  * Normaliza a lista de restrições alimentares antes de persistir:
@@ -87,7 +95,7 @@ const create = async (data) => {
 
 const update = async (data) => {
   const {
-    id, name, description, status, phone,
+    id, name, description, status, phone, slug,
     logo_url, brand_color, banner_url,
     ai_name, ai_gender, ai_personality, cuisine_type, dietary_restrictions,
     custom_dietary_restrictions,
@@ -154,6 +162,45 @@ const update = async (data) => {
       openDaysOnlySet = `, scheduling_open_days_only = COALESCE($${params.length}, scheduling_open_days_only)`;
     }
 
+    // Slug público (endereço do subdomínio/cardápio). Só é tocado quando muda:
+    // string vazia/null LIMPA o slug (volta ao padrão "portal"); um valor novo é
+    // normalizado, barrado se for reservado e validado como único (excluindo a
+    // própria empresa). Ignora quando a coluna ainda não existe ou o campo nem
+    // veio no payload — assim edições de outros campos não afetam o slug.
+    let slugSet = "";
+    if (slug !== undefined && (await columnExists("companies", "slug"))) {
+      const currentRes = await client.query(
+        "SELECT slug FROM companies WHERE id = $1",
+        [id],
+      );
+      const currentSlug = currentRes.rows[0]?.slug ?? null;
+      const raw = typeof slug === "string" ? slug.trim() : "";
+      const normalized = raw === "" ? null : slugifyCompanyName(raw);
+
+      if (normalized !== currentSlug) {
+        if (normalized !== null) {
+          if (RESERVED_COMPANY_SLUGS.has(normalized)) {
+            throw Object.assign(
+              new Error("Este endereço é reservado. Escolha outro."),
+              { status: 409 },
+            );
+          }
+          const conflict = await client.query(
+            "SELECT 1 FROM companies WHERE slug = $1 AND id <> $2 LIMIT 1",
+            [normalized, id],
+          );
+          if (conflict.rows.length > 0) {
+            throw Object.assign(
+              new Error("Já existe uma empresa usando este endereço."),
+              { status: 409 },
+            );
+          }
+        }
+        params.push(normalized);
+        slugSet = `, slug = $${params.length}`;
+      }
+    }
+
     const companyRes = await client.query(
       `UPDATE companies SET
          name = $2, description = $3, status = $4, phone = $5,
@@ -163,7 +210,7 @@ const update = async (data) => {
          custom_dietary_restrictions = $14,
          custom_ai_personalities = $15,
          accepts_delivery = COALESCE($16, accepts_delivery),
-         accepts_pickup = COALESCE($17, accepts_pickup)${schedulingSet}${schedWindowSet}${openDaysOnlySet}
+         accepts_pickup = COALESCE($17, accepts_pickup)${schedulingSet}${schedWindowSet}${openDaysOnlySet}${slugSet}
        WHERE id = $1 RETURNING *`,
       params,
     );
