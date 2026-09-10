@@ -61,8 +61,13 @@ test("monta o payload da cotação com loja, cliente e valor em centavos", () =>
   assert.equal(payload.external_store_id, "monchou");
   assert.equal(payload.pickup_latitude, -20.196466);
   assert.equal(payload.dropoff_longitude, -40.242989);
-  assert.equal(payload.pickup_ready_dt, "2026-09-10T15:20:00.000Z");
-  assert.equal(payload.dropoff_deadline_dt, "2026-09-10T16:00:00.000Z");
+  assert.equal(payload.pickup_ready_dt, "2026-09-10T16:10:00.000Z");
+  assert.equal(payload.dropoff_ready_dt, payload.pickup_ready_dt);
+  assert.equal(payload.dropoff_deadline_dt, "2026-09-10T17:05:00.000Z");
+  assert.ok(
+    new Date(payload.dropoff_ready_dt) <=
+      new Date(payload.pickup_deadline_dt),
+  );
 });
 
 test("usa o snapshot imutável do pedido para o endereço de destino", () => {

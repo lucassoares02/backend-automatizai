@@ -112,11 +112,14 @@ const quoteTimeWindow = (prepMinutes, now = new Date()) => {
   // Além do tempo de preparo, adiciona 50 min de folga antes do courier retirar.
   const pickupReady = addMinutes(now, safePrep + 50);
   const pickupDeadline = addMinutes(pickupReady, 20);
-  const dropoffReady = addMinutes(pickupDeadline, 5);
+  // O destinatário já precisa estar apto a receber antes do limite de coleta.
+  // A Uber rejeita dropoff_ready_dt posterior a pickup_deadline_dt com
+  // `dropoff_ready_after_pickup_deadline`.
+  const dropoffReady = pickupReady;
   // A Uber Direct exige que o dropoff_deadline seja pelo menos 20 min após o
-  // dropoff_ready (erro dropoff_deadline_too_early). Usamos 30 min de janela
-  // para dar margem e evitar recusa por diferença exata no limite.
-  const dropoffDeadline = addMinutes(dropoffReady, 30);
+  // dropoff_ready (erro dropoff_deadline_too_early). Mantemos o prazo final que
+  // já era usado, 35 min após o limite de coleta, sem encurtar a entrega.
+  const dropoffDeadline = addMinutes(pickupDeadline, 35);
   return {
     pickup_ready_dt: pickupReady.toISOString(),
     pickup_deadline_dt: pickupDeadline.toISOString(),
