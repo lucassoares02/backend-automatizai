@@ -109,10 +109,14 @@ const quoteTimeWindow = (prepMinutes, now = new Date()) => {
         : DEFAULT_PREP_MINUTES,
     ),
   );
-  const pickupReady = addMinutes(now, safePrep);
+  // Além do tempo de preparo, adiciona 50 min de folga antes do courier retirar.
+  const pickupReady = addMinutes(now, safePrep + 50);
   const pickupDeadline = addMinutes(pickupReady, 20);
   const dropoffReady = addMinutes(pickupDeadline, 5);
-  const dropoffDeadline = addMinutes(dropoffReady, 15);
+  // A Uber Direct exige que o dropoff_deadline seja pelo menos 20 min após o
+  // dropoff_ready (erro dropoff_deadline_too_early). Usamos 30 min de janela
+  // para dar margem e evitar recusa por diferença exata no limite.
+  const dropoffDeadline = addMinutes(dropoffReady, 30);
   return {
     pickup_ready_dt: pickupReady.toISOString(),
     pickup_deadline_dt: pickupDeadline.toISOString(),
