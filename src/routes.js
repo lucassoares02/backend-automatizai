@@ -4,7 +4,7 @@ const user = require("../controllers/userController");
 const login = require("../controllers/loginController");
 const googleAuth = require("../controllers/googleAuthController");
 const authMiddleware = require("../src/middlewares/middleware");
-const { authorizeCompanyParam, authorizeCompanyBody, authorizeByLookup, requireSystemAdmin } = require("../src/middlewares/authorize");
+const { authorizeCompanyParam, authorizeCompanyBody, authorizeByLookup, requireSystemAdmin, requireAdminUser } = require("../src/middlewares/authorize");
 const rateLimit = require("../src/middlewares/rateLimit");
 const mailer = require("../controllers/maillerController");
 const register = require("../controllers/registerController");
@@ -20,6 +20,7 @@ const connections = require("../controllers/connectionsController");
 const aiIgnoredPhoneNumbers = require("../controllers/aiIgnoredPhoneNumbersController");
 const additional_info = require("../controllers/additional_infoController");
 const orders = require("../controllers/ordersController");
+const uberDirect = require("../controllers/uberDirectController");
 const clients = require("../controllers/clientsController");
 const publicCtrl = require("../controllers/publicController");
 const dashboard = require("../controllers/dashboardController");
@@ -232,6 +233,14 @@ router.post("/orders/upsert", authMiddleware, authorizeCompanyBody(), orders.ups
 // Orçamento/preview: calcula os valores de { company_id, items:[{id,quantity}] }
 // sem gravar nada no banco. Mesmo esquema de auth do upsert.
 router.post("/orders/quote", authMiddleware, authorizeCompanyBody(), orders.quote);
+// Apenas cota o valor: esta rota não cria nem solicita uma corrida.
+router.post(
+  "/orders/:id/delivery-quote",
+  authMiddleware,
+  requireAdminUser,
+  authorizeOrder,
+  uberDirect.quoteOrderDelivery,
+);
 router.patch("/orders/:id/status", authMiddleware, authorizeOrder, orders.updateStatus);
 router.patch(
   "/orders/:id/delivery-fee-agreement",

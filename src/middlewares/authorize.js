@@ -54,6 +54,14 @@ const requireSystemAdmin = (req, res, next) => {
   return res.status(403).json({ error: "Acesso restrito a administradores do sistema" });
 };
 
+// Administrador da conta (users.type = 0) ou administrador global. Diferente de
+// requireSystemAdmin, este middleware não libera o principal de serviço: a
+// cotação de entrega é, inicialmente, uma ação manual do comerciante.
+const requireAdminUser = (req, res, next) => {
+  if (req.isSystemAdmin || Number(req.user?.type) === 0) return next();
+  return res.status(403).json({ error: "Acesso restrito a administradores" });
+};
+
 const _deny = (res) => res.status(403).json({ error: "Acesso negado a esta empresa" });
 
 /**
@@ -102,6 +110,7 @@ module.exports = {
   getUserCompanyIds,
   getUserAuthContext,
   requireSystemAdmin,
+  requireAdminUser,
   authorizeCompanyParam,
   authorizeCompanyBody,
   authorizeByLookup,
