@@ -1,9 +1,27 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const axios = require("axios");
+const pool = require("../db");
 
 const { _private } = require("../services/uberDirectService");
 const { requireAdminUser } = require("../src/middlewares/authorize");
+
+test("preserva o UUID do usuário do cliente ao carregar o pedido", async () => {
+  const originalQuery = pool.query;
+  const clientUserId = "dca96acd-beeb-456b-9718-890bf858ed0d";
+  pool.query = async (sql) => {
+    assert.match(sql, /to_jsonb\(c\)->>'user_id' AS client_user_id/);
+    assert.doesNotMatch(sql, /user_id'\)::bigint/);
+    return { rows: [{ id: 142, client_user_id: clientUserId }] };
+  };
+
+  try {
+    const order = await _private.getOrderContext(142);
+    assert.equal(order.client_user_id, clientUserId);
+  } finally {
+    pool.query = originalQuery;
+  }
+});
 
 test("monta o payload da cotação com loja, cliente e valor em centavos", () => {
   const payload = _private.buildQuotePayload({

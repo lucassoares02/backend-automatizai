@@ -126,7 +126,7 @@ const getOrderContext = async (orderId) => {
        (to_jsonb(o)->>'delivery_lng')::numeric AS delivery_lng,
        to_jsonb(o)->'delivery_address_snapshot' AS delivery_address_snapshot,
        c.name AS client_name, c.phone AS client_phone,
-       (to_jsonb(c)->>'user_id')::bigint AS client_user_id,
+       to_jsonb(c)->>'user_id' AS client_user_id,
        co.name AS company_name, co.phone AS company_phone,
        to_jsonb(co)->>'slug' AS company_slug,
        COALESCE((
@@ -434,6 +434,7 @@ module.exports = {
     buildQuotePayload,
     findMatchingSavedAddress,
     clearOAuthTokenCache,
+    getOrderContext,
     getOAuthToken,
     normalizeQuote,
     quoteTimeWindow,
