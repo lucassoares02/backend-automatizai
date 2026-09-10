@@ -14,6 +14,7 @@ const quoteOrderDelivery = async (req, res) => {
     return res.status(error.status || 500).json({
       error: error.message || "Não foi possível cotar a entrega.",
       ...(error.code ? { code: error.code } : {}),
+      ...(error.details ? { details: error.details } : {}),
     });
   }
 };

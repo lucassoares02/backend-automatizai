@@ -191,3 +191,54 @@ test("obtém e reutiliza o access token OAuth da Uber", async () => {
     }
   }
 });
+
+test("não deixa AxiosError 400 escapar como erro interno", async () => {
+  const originalPost = axios.post;
+  const previousClientId = process.env.UBER_DIRECT_CLIENT_ID;
+  const previousClientSecret = process.env.UBER_DIRECT_CLIENT_SECRET;
+  process.env.UBER_DIRECT_CLIENT_ID = "client-id";
+  process.env.UBER_DIRECT_CLIENT_SECRET = "client-secret";
+  _private.clearOAuthTokenCache();
+  axios.post = async () => {
+    throw Object.assign(new Error("Request failed with status code 400"), {
+      status: 400,
+      code: "ERR_BAD_REQUEST",
+      response: {
+        status: 400,
+        data: {
+          error: "invalid_scope",
+          error_description: "The requested scope is invalid",
+        },
+      },
+    });
+  };
+
+  try {
+    await assert.rejects(
+      () => _private.getOAuthToken(),
+      (error) => {
+        assert.equal(error.status, 502);
+        assert.equal(error.code, "UBER_DIRECT_AUTH_FAILED");
+        assert.match(error.message, /requested scope is invalid/i);
+        assert.deepEqual(error.details, {
+          provider_status: 400,
+          provider_code: "invalid_scope",
+        });
+        return true;
+      },
+    );
+  } finally {
+    axios.post = originalPost;
+    _private.clearOAuthTokenCache();
+    if (previousClientId === undefined) {
+      delete process.env.UBER_DIRECT_CLIENT_ID;
+    } else {
+      process.env.UBER_DIRECT_CLIENT_ID = previousClientId;
+    }
+    if (previousClientSecret === undefined) {
+      delete process.env.UBER_DIRECT_CLIENT_SECRET;
+    } else {
+      process.env.UBER_DIRECT_CLIENT_SECRET = previousClientSecret;
+    }
+  }
+});

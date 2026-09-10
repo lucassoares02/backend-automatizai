@@ -15,10 +15,14 @@ let oauthTokenRequest = null;
 
 const serviceError = (status, message, code, details) =>
   Object.assign(new Error(message), {
+    isUberDirectServiceError: true,
     status,
     code,
     ...(details ? { details } : {}),
   });
+
+const isServiceError = (error) =>
+  error?.isUberDirectServiceError === true;
 
 const toNumber = (value) => {
   if (value === null || value === undefined || value === "") return null;
@@ -296,7 +300,7 @@ const requestOAuthToken = async () => {
     };
     return accessToken;
   } catch (error) {
-    if (error.status) throw error;
+    if (isServiceError(error)) throw error;
     const providerData = error.response?.data;
     const providerMessage =
       providerData?.error_description || providerData?.message || null;
@@ -306,6 +310,13 @@ const requestOAuthToken = async () => {
         ? `Não foi possível autenticar na Uber Direct: ${providerMessage}`
         : "Não foi possível autenticar na Uber Direct.",
       "UBER_DIRECT_AUTH_FAILED",
+      {
+        provider_status: error.response?.status ?? null,
+        provider_code:
+          (typeof providerData?.error === "string" && providerData.error) ||
+          providerData?.code ||
+          null,
+      },
     );
   }
 };
@@ -408,8 +419,13 @@ const createDeliveryQuote = async (orderId) => {
       },
     };
   } catch (error) {
-    if (error.status) throw error;
+    if (isServiceError(error)) throw error;
     const providerData = error.response?.data;
+    const providerCode =
+      providerData?.code ||
+      (typeof providerData?.error === "string" ? providerData.error : null) ||
+      providerData?.error?.code ||
+      null;
     const providerMessage =
       providerData?.message ||
       (typeof providerData?.error === "string"
@@ -423,6 +439,10 @@ const createDeliveryQuote = async (orderId) => {
         ? `A Uber Direct não conseguiu gerar a cotação: ${providerMessage}`
         : "Não foi possível obter a cotação da Uber Direct. Tente novamente.",
       "UBER_DIRECT_QUOTE_FAILED",
+      {
+        provider_status: error.response?.status ?? null,
+        provider_code: providerCode,
+      },
     );
   }
 };
