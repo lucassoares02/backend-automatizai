@@ -16,7 +16,7 @@ else
 fi
 
 echo "🔐 Conectando ao servidor..."
-ssh -x root@147.93.12.83 "cd /srv/app && ./deploy.sh"
+ssh -x root@147.93.12.83 "cd /opt/arbian && ./deploy.sh"
 
 echo "✅ Deploy concluído!"
 
