@@ -274,6 +274,20 @@ const OVERRIDES = {
     summary: "Salvar/atualizar merchant iFood (vazio desvincula)",
     requestBody: body({ company_id: T.int, merchant_id: T.str }, { company_id: 12, merchant_id: "abc-123-def" }, ["company_id"]),
   },
+  "GET /api/ifood/consult/{companyId}": {
+    summary: "Consultar perfil, produtos e pedidos no iFood",
+    description:
+      "`merchant_id` é opcional. Quando informado, tem prioridade sobre o perfil salvo para a empresa.",
+    parameters: [
+      {
+        name: "merchant_id",
+        in: "query",
+        required: false,
+        description: "ID do merchant/perfil da loja no iFood",
+        schema: { type: "string", maxLength: 128 },
+      },
+    ],
+  },
 
   // ── Pagamentos ───────────────────────────────────────────────────────────────
   "POST /api/stripe/connect": {
@@ -395,12 +409,16 @@ function buildSpec() {
     methods.forEach((method) => {
       const key = `${method.toUpperCase()} ${oaPath}`;
       const ov = OVERRIDES[key] || {};
+      const operationParams = [
+        ...params,
+        ...(Array.isArray(ov.parameters) ? ov.parameters : []),
+      ];
       const op = {
         tags: [tag],
         summary: ov.summary || summarize(method, rawPath),
         description: ov.description,
         security: requiresAuth ? [{ bearerAuth: [] }, { apiKey: [] }] : [],
-        parameters: params.length ? params : undefined,
+        parameters: operationParams.length ? operationParams : undefined,
         responses: {
           200: { description: "Sucesso" },
           ...(requiresAuth ? { 401: { description: "Não autenticado (token/API key ausente ou inválido)" }, 403: { description: "Sem acesso a esta empresa (multi-tenant)" } } : {}),

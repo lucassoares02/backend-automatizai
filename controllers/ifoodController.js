@@ -36,13 +36,19 @@ const saveMerchant = async (req, res) => {
 
 // ─── GET /ifood/consult/:companyId ──────────────────────────────────────────────
 // Consulta consolidada na API do iFood: nome, produtos e pedidos.
+// Query opcional: merchant_id. Quando ausente, usa o perfil salvo da empresa.
 const consult = async (req, res) => {
   const companyId = parseInt(req.params.companyId, 10);
   if (!companyId || Number.isNaN(companyId)) {
     return res.status(400).json({ error: "INVALID_COMPANY", message: "companyId inválido." });
   }
+  const rawMerchantId = req.query?.merchant_id ?? req.query?.merchantId;
+  const merchantId = rawMerchantId == null ? null : String(rawMerchantId).trim();
+  if (rawMerchantId != null && (!merchantId || merchantId.length > 128)) {
+    return res.status(400).json({ error: "INVALID_MERCHANT", message: "merchant_id inválido." });
+  }
   try {
-    const data = await service.consult(companyId);
+    const data = await service.consult(companyId, merchantId);
     return res.status(200).json({ success: true, ...data });
   } catch (error) {
     console.error("iFood consult error:", error.message, error.detail || "");

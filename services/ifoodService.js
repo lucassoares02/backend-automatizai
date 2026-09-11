@@ -297,18 +297,19 @@ const fetchOrders = async (merchantId, limit = 20) => {
 };
 
 /**
- * Consulta consolidada: detalhes do merchant + produtos + pedidos. Cada seção é
- * resiliente — uma falha isolada não derruba as demais (retorna erro por seção).
+ * Consulta consolidada: detalhes do merchant + produtos + pedidos. O merchant
+ * informado na requisição tem prioridade; quando ausente, usa o perfil salvo.
+ * Cada seção é resiliente — uma falha isolada não derruba as demais.
  */
-const consult = async (companyId) => {
+const consult = async (companyId, requestedMerchantId = null) => {
   const saved = await getSavedMerchant(companyId);
-  if (!saved.merchantId) {
+  const merchantId = (requestedMerchantId || saved.merchantId || "").toString().trim();
+  if (!merchantId) {
     throw Object.assign(new Error("Nenhum perfil iFood informado para esta empresa."), {
       status: 400,
       code: "NO_MERCHANT",
     });
   }
-  const merchantId = saved.merchantId;
 
   const result = { merchantId, merchant: null, products: [], orders: [], errors: {} };
 
