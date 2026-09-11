@@ -98,3 +98,112 @@ test("controller encaminha merchant_id da query para o service", async () => {
     service.consult = originalConsult;
   }
 });
+
+test("normaliza o item flat com grupos e complementos", () => {
+  const result = service._private.normalizeProductDetails({
+    item: {
+      id: "item-1",
+      productId: "product-1",
+      categoryId: "category-1",
+      type: "DEFAULT",
+      status: "AVAILABLE",
+      price: { value: 20, originalValue: 24 },
+    },
+    products: [
+      {
+        id: "product-1",
+        name: "Sanduíche",
+        description: "Pão, carne e queijo",
+        imagePath: "https://images.example/sanduiche.jpg",
+        optionGroups: [{ id: "group-1", min: 1, max: 2 }],
+      },
+      {
+        id: "product-option-1",
+        name: "Queijo extra",
+        description: "Uma fatia adicional",
+      },
+    ],
+    optionGroups: [
+      {
+        id: "group-1",
+        name: "Adicionais",
+        optionIds: ["option-1"],
+      },
+    ],
+    options: [
+      {
+        id: "option-1",
+        productId: "product-option-1",
+        status: "AVAILABLE",
+        price: { value: 3.5 },
+      },
+    ],
+  });
+
+  assert.equal(result.id, "item-1");
+  assert.equal(result.name, "Sanduíche");
+  assert.equal(result.price, 20);
+  assert.equal(result.originalPrice, 24);
+  assert.equal(result.optionGroups.length, 1);
+  assert.equal(result.optionGroups[0].name, "Adicionais");
+  assert.equal(result.optionGroups[0].min, 1);
+  assert.equal(result.optionGroups[0].max, 2);
+  assert.deepEqual(result.optionGroups[0].options[0], {
+    id: "option-1",
+    productId: "product-option-1",
+    name: "Queijo extra",
+    description: "Uma fatia adicional",
+    price: 3.5,
+    status: "AVAILABLE",
+    externalCode: null,
+    imageUrl: null,
+  });
+});
+
+test("controller encaminha item e merchant para a consulta detalhada", async () => {
+  const originalFetchProductDetails = service.fetchProductDetails;
+  const merchantId = "3fbf567f-7c4e-4541-be05-83168d2793e8";
+  const itemId = "058e0631-a643-45dd-b833-20a2178d2ae7";
+  let received;
+
+  service.fetchProductDetails = async (
+    companyId,
+    requestedItemId,
+    requestedMerchantId,
+  ) => {
+    received = { companyId, requestedItemId, requestedMerchantId };
+    return { merchantId: requestedMerchantId, itemId: requestedItemId, product: {} };
+  };
+
+  const response = {
+    statusCode: null,
+    body: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body) {
+      this.body = body;
+      return this;
+    },
+  };
+
+  try {
+    await controller.getProductDetails(
+      {
+        params: { companyId: "25", itemId },
+        query: { merchant_id: merchantId },
+      },
+      response,
+    );
+    assert.deepEqual(received, {
+      companyId: 25,
+      requestedItemId: itemId,
+      requestedMerchantId: merchantId,
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.itemId, itemId);
+  } finally {
+    service.fetchProductDetails = originalFetchProductDetails;
+  }
+});

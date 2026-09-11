@@ -56,4 +56,29 @@ const consult = async (req, res) => {
   }
 };
 
-module.exports = { getMerchant, saveMerchant, consult };
+// ─── GET /ifood/product/:companyId/:itemId ───────────────────────────────────
+// Consulta sob demanda o item completo (produto, grupos e complementos).
+const getProductDetails = async (req, res) => {
+  const companyId = parseInt(req.params.companyId, 10);
+  const itemId = (req.params.itemId || "").toString().trim();
+  const rawMerchantId = req.query?.merchant_id ?? req.query?.merchantId;
+  const merchantId = rawMerchantId == null ? null : String(rawMerchantId).trim();
+  if (!companyId || Number.isNaN(companyId)) {
+    return res.status(400).json({ error: "INVALID_COMPANY", message: "companyId inválido." });
+  }
+  if (!itemId || itemId.length > 128) {
+    return res.status(400).json({ error: "INVALID_ITEM", message: "itemId inválido." });
+  }
+  if (rawMerchantId != null && (!merchantId || merchantId.length > 128)) {
+    return res.status(400).json({ error: "INVALID_MERCHANT", message: "merchant_id inválido." });
+  }
+  try {
+    const data = await service.fetchProductDetails(companyId, itemId, merchantId);
+    return res.status(200).json({ success: true, ...data });
+  } catch (error) {
+    console.error("iFood getProductDetails error:", error.message, error.detail || "");
+    return res.status(error.status || 500).json({ error: error.code || "UNKNOWN", message: error.message });
+  }
+};
+
+module.exports = { getMerchant, saveMerchant, consult, getProductDetails };

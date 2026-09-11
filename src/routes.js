@@ -137,6 +137,12 @@ router.post("/ifood/import", authMiddleware, ifoodImport.importMenu);
 router.get("/ifood/merchant/:companyId", authMiddleware, authorizeCompanyParam("companyId"), ifood.getMerchant);
 router.post("/ifood/merchant", authMiddleware, authorizeCompanyBody(), ifood.saveMerchant);
 router.get("/ifood/consult/:companyId", authMiddleware, authorizeCompanyParam("companyId"), ifood.consult);
+router.get(
+  "/ifood/product/:companyId/:itemId",
+  authMiddleware,
+  authorizeCompanyParam("companyId"),
+  ifood.getProductDetails,
+);
 
 //menu_items
 router.get("/menu_items", menu_items.findAll);

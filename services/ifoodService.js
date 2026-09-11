@@ -193,6 +193,109 @@ const _cacheMerchantName = async (companyId, name) => {
   await pool.query("UPDATE companies SET ifood_merchant_name = $2 WHERE id = $1", [companyId, name]);
 };
 
+const _resolveMerchantId = async (companyId, requestedMerchantId = null) => {
+  const saved = await getSavedMerchant(companyId);
+  const merchantId = (requestedMerchantId || saved.merchantId || "").toString().trim();
+  if (!merchantId) {
+    throw Object.assign(new Error("Nenhum perfil iFood informado para esta empresa."), {
+      status: 400,
+      code: "NO_MERCHANT",
+    });
+  }
+  return merchantId;
+};
+
+const _priceValue = (price) => {
+  if (price == null) return null;
+  if (typeof price === "object") return price.value ?? null;
+  return price;
+};
+
+const _resourceId = (resource) => {
+  if (resource == null) return null;
+  if (typeof resource !== "object") return resource.toString();
+  return (resource.id || resource.optionId || resource.optionGroupId || "").toString() || null;
+};
+
+/**
+ * Transforma o retorno `flat` do catálogo em um contrato simples para o Portal.
+ * O iFood devolve item, produtos, grupos e opções em coleções relacionadas por
+ * ids; aqui as opções já ficam aninhadas em seus respectivos grupos.
+ */
+const normalizeProductDetails = (payload) => {
+  const data = payload?.data && typeof payload.data === "object" ? payload.data : payload || {};
+  const item = data.item && typeof data.item === "object" ? data.item : {};
+  const products = Array.isArray(data.products) ? data.products : [];
+  const optionGroups = Array.isArray(data.optionGroups) ? data.optionGroups : [];
+  const options = Array.isArray(data.options) ? data.options : [];
+  const productsById = new Map(products.map((product) => [_resourceId(product), product]));
+  const groupsById = new Map(optionGroups.map((group) => [_resourceId(group), group]));
+  const optionsById = new Map(options.map((option) => [_resourceId(option), option]));
+  const mainProduct = productsById.get(_resourceId(item.productId)) || products[0] || {};
+  const groupReferences = Array.isArray(mainProduct.optionGroups)
+    ? mainProduct.optionGroups
+    : Array.isArray(item.optionGroups)
+      ? item.optionGroups
+      : [];
+  const selectedGroups = groupReferences.length ? groupReferences : optionGroups;
+
+  const normalizedGroups = selectedGroups.map((reference) => {
+    const groupId = _resourceId(reference);
+    const group = groupsById.get(groupId) || (typeof reference === "object" ? reference : {});
+    const nestedOptions = Array.isArray(group.options) ? group.options : [];
+    const optionIds = Array.isArray(group.optionIds) ? group.optionIds.map(_resourceId).filter(Boolean) : [];
+    let selectedOptions = optionIds.map((id) => optionsById.get(id)).filter(Boolean);
+    if (!selectedOptions.length && nestedOptions.length) selectedOptions = nestedOptions;
+    if (!selectedOptions.length) {
+      selectedOptions = options.filter((option) => {
+        const optionGroupId = _resourceId(option.optionGroupId || option.groupId);
+        return optionGroupId && optionGroupId === groupId;
+      });
+    }
+    if (!selectedOptions.length && selectedGroups.length === 1) selectedOptions = options;
+
+    const minimum = Number(reference?.min ?? reference?.minimum ?? group?.min ?? group?.minimum ?? 0);
+    const maximum = Number(reference?.max ?? reference?.maximum ?? group?.max ?? group?.maximum ?? 0);
+
+    return {
+      id: groupId,
+      name: group?.name || "Complementos",
+      status: group?.status || null,
+      type: group?.optionGroupType || group?.type || null,
+      min: Number.isFinite(minimum) ? minimum : 0,
+      max: Number.isFinite(maximum) ? maximum : 0,
+      options: selectedOptions.map((option) => {
+        const optionProduct = productsById.get(_resourceId(option?.productId)) || {};
+        return {
+          id: _resourceId(option),
+          productId: _resourceId(option?.productId),
+          name: optionProduct?.name || option?.name || "Complemento",
+          description: optionProduct?.description || option?.description || null,
+          price: _priceValue(option?.price),
+          status: option?.status || optionProduct?.status || null,
+          externalCode: option?.externalCode || optionProduct?.externalCode || null,
+          imageUrl: optionProduct?.imagePath || optionProduct?.imageUrl || optionProduct?.image || null,
+        };
+      }),
+    };
+  });
+
+  return {
+    id: _resourceId(item) || null,
+    productId: _resourceId(item.productId),
+    name: mainProduct?.name || item?.name || null,
+    description: mainProduct?.description || item?.description || null,
+    imageUrl: mainProduct?.imagePath || mainProduct?.imageUrl || mainProduct?.image || item?.imagePath || null,
+    type: item?.type || null,
+    status: item?.status || null,
+    categoryId: _resourceId(item.categoryId),
+    externalCode: item?.externalCode || mainProduct?.externalCode || null,
+    price: _priceValue(item?.price),
+    originalPrice: item?.price && typeof item.price === "object" ? item.price.originalValue ?? null : null,
+    optionGroups: normalizedGroups,
+  };
+};
+
 // ─── Consultas à API do iFood ───────────────────────────────────────────────────
 
 /**
@@ -253,6 +356,22 @@ const fetchProducts = async (merchantId) => {
 };
 
 /**
+ * Carrega um único item no formato `flat`, incluindo grupos e complementos.
+ * É chamado sob demanda quando o comerciante abre os detalhes no Portal.
+ */
+const fetchProductDetails = async (companyId, itemId, requestedMerchantId = null) => {
+  const merchantId = await _resolveMerchantId(companyId, requestedMerchantId);
+  const raw = await _authGet(
+    `/catalog/v2.0/merchants/${encodeURIComponent(merchantId)}/items/${encodeURIComponent(itemId)}/flat`,
+  );
+  return {
+    merchantId,
+    itemId,
+    product: normalizeProductDetails(raw),
+  };
+};
+
+/**
  * Pedidos recentes do merchant via polling de eventos. Para cada evento de
  * pedido, hidrata os detalhes (até `limit` pedidos).
  */
@@ -302,14 +421,7 @@ const fetchOrders = async (merchantId, limit = 20) => {
  * Cada seção é resiliente — uma falha isolada não derruba as demais.
  */
 const consult = async (companyId, requestedMerchantId = null) => {
-  const saved = await getSavedMerchant(companyId);
-  const merchantId = (requestedMerchantId || saved.merchantId || "").toString().trim();
-  if (!merchantId) {
-    throw Object.assign(new Error("Nenhum perfil iFood informado para esta empresa."), {
-      status: 400,
-      code: "NO_MERCHANT",
-    });
-  }
+  const merchantId = await _resolveMerchantId(companyId, requestedMerchantId);
 
   const result = { merchantId, merchant: null, products: [], orders: [], errors: {} };
 
@@ -342,6 +454,8 @@ module.exports = {
   saveMerchant,
   fetchMerchantDetails,
   fetchProducts,
+  fetchProductDetails,
   fetchOrders,
   consult,
+  _private: { normalizeProductDetails },
 };

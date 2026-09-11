@@ -288,6 +288,20 @@ const OVERRIDES = {
       },
     ],
   },
+  "GET /api/ifood/product/{companyId}/{itemId}": {
+    summary: "Consultar detalhes e complementos de um produto do iFood",
+    description:
+      "Carrega sob demanda o item no formato flat do iFood, incluindo grupos e opções de complementos.",
+    parameters: [
+      {
+        name: "merchant_id",
+        in: "query",
+        required: false,
+        description: "ID do merchant/perfil da loja no iFood",
+        schema: { type: "string", maxLength: 128 },
+      },
+    ],
+  },
 
   // ── Pagamentos ───────────────────────────────────────────────────────────────
   "POST /api/stripe/connect": {
