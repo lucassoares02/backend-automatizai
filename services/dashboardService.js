@@ -220,6 +220,7 @@ const getDashboard = async (companyId) => {
       `SELECT mi.id, mi.name, mi.image_url
        FROM menu_items mi
        WHERE mi.company_id = $1
+         AND mi.deleted_at IS NULL
          AND NOT EXISTS (
            SELECT 1 FROM order_items oi
            JOIN orders o ON o.id = oi.order_id
