@@ -7,6 +7,18 @@ const STATUS_IN_PROGRESS = [1, 2, 3, 4, 8];
 const STATUS_COMPLETED = [5, 9];
 const STATUS_CANCELLED = [6, 7];
 
+// Fuso do negócio (BRT, UTC-3, sem horário de verão desde 2019). O servidor de
+// produção roda em UTC, então comparar `created_at::date` com `CURRENT_DATE`
+// (ambos em UTC) faz os pedidos "de hoje" sumirem depois das 21h BRT — quando já
+// é meia-noite em UTC.
+//
+// `orders.created_at` é `timestamp WITHOUT time zone` guardando o relógio de
+// parede em UTC. Por isso primeiro anexamos UTC (AT TIME ZONE 'UTC' → instante
+// timestamptz) e só então convertemos para São Paulo antes do ::date. O `now()`
+// já é timestamptz, então uma única conversão basta.
+const BUSINESS_TZ = "America/Sao_Paulo";
+const IS_TODAY_BRT = `((o.created_at AT TIME ZONE 'UTC') AT TIME ZONE '${BUSINESS_TZ}')::date = (now() AT TIME ZONE '${BUSINESS_TZ}')::date`;
+
 const _hasStockReservationSchema = async () => {
   const [unlimited, quantity, reserved, reservationItems] = await Promise.all([
     columnExists("menu_items", "stock_unlimited"),
@@ -103,7 +115,7 @@ const findTodayByCompany = async (companyId) => {
   const result = await pool.query(
     `${ORDER_SELECT}
      WHERE o.company_id = $1
-       AND o.created_at::date = CURRENT_DATE
+       AND ${IS_TODAY_BRT}
      GROUP BY o.id, c.name, c.phone, pm.label, pm.type
      ORDER BY o.created_at DESC`,
     [companyId],
@@ -132,12 +144,12 @@ const summarize = async (companyId) => {
      )
      SELECT
        COUNT(*)                                                                                      AS total,
-       COUNT(*) FILTER (WHERE o.created_at::date = CURRENT_DATE)                                    AS today,
+       COUNT(*) FILTER (WHERE ${IS_TODAY_BRT})                                                       AS today,
        COUNT(*) FILTER (WHERE ls.status_code IS NULL OR ls.status_code = ANY($2::int[]))            AS in_progress,
        COUNT(*) FILTER (WHERE ls.status_code = ANY($3::int[]))                                      AS completed,
        COUNT(*) FILTER (WHERE ls.status_code = ANY($4::int[]))                                      AS cancelled,
        COALESCE(SUM(o.total), 0)                                                                     AS total_value,
-       COALESCE(SUM(o.total) FILTER (WHERE o.created_at::date = CURRENT_DATE), 0)                   AS today_value,
+       COALESCE(SUM(o.total) FILTER (WHERE ${IS_TODAY_BRT}), 0)                                      AS today_value,
        COALESCE(SUM(o.total) FILTER (WHERE ls.status_code IS NULL OR ls.status_code = ANY($2::int[])), 0) AS in_progress_value,
        COALESCE(SUM(o.total) FILTER (WHERE ls.status_code = ANY($3::int[])), 0)                     AS completed_value,
        COALESCE(SUM(o.total) FILTER (WHERE ls.status_code = ANY($4::int[])), 0)                     AS cancelled_value
