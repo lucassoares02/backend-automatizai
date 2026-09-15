@@ -40,6 +40,16 @@ const _sanitize = (data) => {
     min_order_value: toNum(data.min_order_value),
     max_discount_value: type === "percent" ? toNum(data.max_discount_value) : null,
     max_uses: toInt(data.max_uses),
+    // Limite de usos por cliente (mesma pessoa): 1 = padrão, N = N vezes,
+    // null = ilimitado. Chave ausente (undefined) mantém o padrão 1; null
+    // explícito significa "ilimitado por cliente".
+    per_customer_limit: (() => {
+      const v = data.per_customer_limit;
+      if (v === undefined) return 1;
+      if (v === null || v === "") return null;
+      const n = Math.trunc(Number(v));
+      return Number.isInteger(n) && n > 0 ? n : 1;
+    })(),
     category_ids: _toIntArray(data.category_ids),
     menu_item_ids: _toIntArray(data.menu_item_ids),
     client_id: toInt(data.client_id),
@@ -52,6 +62,9 @@ const _sanitize = (data) => {
 // Colunas estendidas existem? (proxy: applies_to). Permite tolerar bancos que
 // só têm o schema básico de cupons.
 const _extendedSchema = () => columnExists("coupons", "applies_to");
+
+// Coluna do limite por cliente existe? (schema mais recente)
+const _hasPerCustomer = () => columnExists("coupons", "per_customer_limit");
 
 const findByCompany = async (companyId) => {
   if (!(await couponsAvailable())) return [];
@@ -113,6 +126,10 @@ const create = async (data) => {
     cols.push("applies_to", "category_ids", "menu_item_ids", "client_id");
     vals.push(s.applies_to, s.category_ids, s.menu_item_ids, s.client_id);
   }
+  if (await _hasPerCustomer()) {
+    cols.push("per_customer_limit");
+    vals.push(s.per_customer_limit);
+  }
   const placeholders = vals.map((_, i) => `$${i + 1}`).join(",");
   try {
     const { rows } = await pool.query(
@@ -152,6 +169,9 @@ const update = async (id, data) => {
       ["menu_item_ids", s.menu_item_ids],
       ["client_id", s.client_id],
     );
+  }
+  if (await _hasPerCustomer()) {
+    sets.push(["per_customer_limit", s.per_customer_limit]);
   }
   const vals = sets.map(([, v]) => v);
   const setSql = sets.map(([c], i) => `${c} = $${i + 1}`).join(", ");
@@ -284,6 +304,41 @@ const _checkRules = (coupon, { subtotal, clientId }) => {
   return { ok: true };
 };
 
+// Quantas vezes um cliente específico já resgatou este cupom (via histórico).
+const _customerUseCount = async (runner, couponId, clientId) => {
+  if (!clientId) return 0;
+  if (!(await tableExists("coupon_redemptions"))) return 0;
+  const { rows } = await runner.query(
+    `SELECT COUNT(*)::int AS n FROM coupon_redemptions
+       WHERE coupon_id = $1 AND client_id = $2`,
+    [couponId, clientId],
+  );
+  return Number(rows[0]?.n ?? 0);
+};
+
+// Regra de limite de usos por cliente (mesma pessoa). `per_customer_limit`:
+//   null/undefined → ilimitado por cliente (coluna ausente também cai aqui);
+//   1 → uma vez por cliente (padrão); N → até N vezes.
+// Sem clientId identificado não há como contar no momento da validação — a
+// checagem definitiva acontece no resgate (redeemForOrder), quando o pedido já
+// tem cliente. Retorna { ok, message }.
+const _checkPerCustomer = async (runner, coupon, clientId) => {
+  const limit = coupon.per_customer_limit;
+  if (limit === null || limit === undefined) return { ok: true };
+  if (!clientId) return { ok: true };
+  const used = await _customerUseCount(runner, coupon.id, clientId);
+  if (used >= Number(limit)) {
+    return {
+      ok: false,
+      message:
+        Number(limit) === 1
+          ? "Você já utilizou este cupom."
+          : `Você já utilizou este cupom o número máximo de vezes (${limit}).`,
+    };
+  }
+  return { ok: true };
+};
+
 const _findByCode = async (companyId, code, runner = pool) => {
   const { rows } = await runner.query(
     `SELECT * FROM coupons WHERE company_id = $1 AND upper(code) = upper($2) LIMIT 1`,
@@ -313,6 +368,8 @@ const validate = async ({ companyId, code, clientId, subtotal, deliveryFee, item
   const coupon = await _findByCode(companyId, normalized);
   const rules = _checkRules(coupon, { subtotal, clientId });
   if (!rules.ok) return { valid: false, message: rules.message };
+  const perCustomer = await _checkPerCustomer(pool, coupon, clientId);
+  if (!perCustomer.ok) return { valid: false, message: perCustomer.message };
   const base = await _resolveBase(pool, coupon, { subtotal, deliveryFee, items });
   if (_hasRestriction(coupon) && base <= 0) {
     return {
@@ -348,6 +405,12 @@ const redeemForOrder = async (
   const rules = _checkRules(coupon, { subtotal, clientId });
   if (!rules.ok) {
     const e = new Error(rules.message);
+    e.status = 400;
+    throw e;
+  }
+  const perCustomer = await _checkPerCustomer(client, coupon, clientId);
+  if (!perCustomer.ok) {
+    const e = new Error(perCustomer.message);
     e.status = 400;
     throw e;
   }
