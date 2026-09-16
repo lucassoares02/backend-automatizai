@@ -44,6 +44,7 @@ const pagarme = require("../controllers/pagarmeController");
 const n8n = require("../controllers/n8nController");
 const identity = require("../controllers/identityController");
 const customerAccount = require("../controllers/customerAccountController");
+const reviews = require("../controllers/reviewsController");
 const { customerAuth, optionalCustomerAuth } = require("./middlewares/customerAuth");
 
 // ─── Rate limiters ───────────────────────────────────────────────────────────
@@ -64,6 +65,7 @@ const authorizeCampaign = authorizeByLookup("SELECT company_id FROM campaigns WH
 const authorizeUpsell = authorizeByLookup("SELECT company_id FROM upsell_rules WHERE id = $1", "id");
 const authorizeCoupon = authorizeByLookup("SELECT company_id FROM coupons WHERE id = $1", "id");
 const authorizeGoal = authorizeByLookup("SELECT company_id FROM purchase_goals WHERE id = $1", "id");
+const authorizeReview = authorizeByLookup("SELECT company_id FROM order_reviews WHERE id = $1", "id");
 const authorizeDriver = authorizeByLookup("SELECT company_id FROM delivery_drivers WHERE id = $1", "id");
 const authorizeConnection = authorizeByLookup("SELECT company_id FROM connections WHERE id = $1", "id");
 const authorizeAiIgnoredPhoneNumber = authorizeByLookup(
@@ -302,6 +304,11 @@ router.patch("/campaigns/:id", authMiddleware, authorizeCampaign, campaigns.upda
 router.post("/campaigns/:id/dispatch", authMiddleware, authorizeCampaign, campaigns.dispatch);
 router.delete("/campaigns/:id", authMiddleware, authorizeCampaign, campaigns.remove);
 
+// reviews (avaliações do pedido) — painel (Marketing → Avaliações)
+router.get("/reviews/company/:companyId/summary", authMiddleware, authorizeCompanyParam("companyId"), reviews.summary);
+router.get("/reviews/company/:companyId", authMiddleware, authorizeCompanyParam("companyId"), reviews.findByCompany);
+router.post("/reviews/:id/respond", authMiddleware, authorizeReview, reviews.respond);
+
 // upsell rules (authenticated)
 router.get("/upsell/company/:companyId", authMiddleware, authorizeCompanyParam("companyId"), upsell.findByCompany);
 router.post("/upsell", authMiddleware, authorizeCompanyBody(), upsell.create);
@@ -401,6 +408,8 @@ router.get("/public/orders", publicLimiter, publicCtrl.listOrdersByPhone);
 router.get("/public/orders/:id/reorder", publicLimiter, publicCtrl.reorder);
 router.get("/public/orders/:id", publicLimiter, publicCtrl.getOrder);
 router.post("/public/orders/:id/cancel", publicLimiter, publicCtrl.cancelOrder);
+// Avaliação do pedido concluído (nota 1-5 + mensagem). UUID dispensa telefone.
+router.post("/public/orders/:id/review", publicLimiter, publicCtrl.submitReview);
 
 // customer tracking — público (fire-and-forget) e admin (com auth)
 router.post("/public/customer-tracking/session", publicLimiter, customerTracking.upsertSession);

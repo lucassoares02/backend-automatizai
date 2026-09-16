@@ -142,13 +142,27 @@ const _normalizeAddress = (addr) => {
 };
 
 // Normaliza register_information antes de enviar: data no formato do Pagar.me e
-// subcampos obrigatórios do endereço preenchidos.
+// subcampos obrigatórios do endereço preenchidos. Para PJ (corporation), o
+// Pagar.me exige `founding_date` e ao menos um `managing_partners` (sócio
+// administrador) — cada sócio é um "individual" com data/endereço próprios, que
+// também precisam ser normalizados.
 const _normalizeRegisterInformation = (ri) => {
   if (!ri || typeof ri !== "object") return ri;
   const out = { ...ri };
   if (out.birthdate) out.birthdate = _normalizeBirthdate(out.birthdate);
+  if (out.founding_date) out.founding_date = _normalizeBirthdate(out.founding_date);
   if (out.address) out.address = _normalizeAddress(out.address);
   if (out.main_address) out.main_address = _normalizeAddress(out.main_address);
+  if (Array.isArray(out.managing_partners)) {
+    out.managing_partners = out.managing_partners.map((partner) => {
+      if (!partner || typeof partner !== "object") return partner;
+      const mp = { ...partner };
+      if (mp.birthdate) mp.birthdate = _normalizeBirthdate(mp.birthdate);
+      if (mp.address) mp.address = _normalizeAddress(mp.address);
+      if (mp.main_address) mp.main_address = _normalizeAddress(mp.main_address);
+      return mp;
+    });
+  }
   return out;
 };
 

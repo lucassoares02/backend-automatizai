@@ -9,6 +9,7 @@ const orderWebhookService = require("./orderWebhookService");
 const campaignsService = require("./campaignsService");
 const couponsService = require("./couponsService");
 const identityService = require("./identityService");
+const reviewsService = require("./reviewsService");
 const { normalizePhone } = require("../helpers/phone");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 const { columnExists, tableExists } = require("../helpers/schema");
@@ -1624,6 +1625,9 @@ const getPublicOrder = async ({ id, phone }) => {
     if (rowPhone !== reqPhone) return null;
   }
   row.payment_expires_at = await _getLatestPixExpiration(row.id);
+  // Avaliação já feita (se houver) — para a UI mostrar o estado enviado em vez do
+  // formulário. Tolerante à ausência da tabela (retorna null até a migração rodar).
+  row.review = await reviewsService.getForOrder(row.id);
   return row;
 };
 

@@ -1,6 +1,7 @@
 const service = require("../services/publicService");
 const reorderService = require("../services/reorderService");
 const pagarmeService = require("../services/pagarmeService");
+const reviewsService = require("../services/reviewsService");
 const { verifyPaymentSession, tokenFromRequest } = require("../helpers/publicPaymentSession");
 
 const listRestaurants = async (_req, res) => {
@@ -275,6 +276,29 @@ const cancelOrder = async (req, res) => {
   }
 };
 
+const submitReview = async (req, res) => {
+  const { id } = req.params;
+  const { phone, rating, comment } = req.body || {};
+  if (!id || !String(id).trim()) {
+    return res.status(400).json({ error: "Invalid order id" });
+  }
+  try {
+    const result = await reviewsService.submitPublicReview({
+      orderRef: String(id).trim(),
+      phone: phone ? String(phone) : null,
+      rating,
+      comment,
+    });
+    if (!result.ok) {
+      return res.status(result.code || 400).json({ error: result.message });
+    }
+    return res.status(200).json(result.review);
+  } catch (error) {
+    console.error("Error submitting public order review:", error);
+    return res.status(500).json({ error: "Failed to submit review" });
+  }
+};
+
 module.exports = {
   listRestaurants,
   getCompanyMenu,
@@ -289,4 +313,5 @@ module.exports = {
   listOrdersByPhone,
   reorder,
   cancelOrder,
+  submitReview,
 };

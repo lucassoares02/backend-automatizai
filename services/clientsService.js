@@ -1,5 +1,6 @@
 const pool = require("../db");
 const identityService = require("./identityService");
+const reviewsService = require("./reviewsService");
 const { n8nUrlWebhook } = require("./evolutionService");
 
 const findAllWithStats = async (companyId, search = "", filter = "all") => {
@@ -127,7 +128,11 @@ const getDetails = async (clientId) => {
     GROUP BY c.id, cs.total_orders, cs.total_spent, cs.avg_ticket, cs.max_order,
              cs.last_order_at, cs.first_order_at, cs.cancelled_orders
   `, [clientId]);
-  return result.rows[0] || null;
+  const row = result.rows[0] || null;
+  if (!row) return null;
+  // Avaliações feitas por este cliente (tolerante à ausência da tabela).
+  row.reviews = await reviewsService.findByClient(clientId);
+  return row;
 };
 
 const find = async (id) => {
