@@ -67,6 +67,10 @@ const respond = async (req, res) => {
     return res.status(200).json(review);
   } catch (error) {
     console.error("Error responding to review:", error);
+    // Honra erros com status/mensagem próprios (ex.: 503 de migração pendente).
+    if (error?.status && error.status >= 400 && error.status < 600) {
+      return res.status(error.status).json({ error: error.message });
+    }
     return res.status(500).json({ error: "Failed to respond to review" });
   }
 };

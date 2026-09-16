@@ -213,17 +213,30 @@ const respond = async (reviewId, response) => {
     response != null && String(response).trim() !== ""
       ? String(response).trim().slice(0, 1000)
       : null;
-  const { rows } = await pool.query(
-    `UPDATE order_reviews
-        SET response = $2,
-            responded_at = CASE WHEN $2 IS NULL THEN NULL ELSE NOW() END,
-            updated_at = NOW()
-      WHERE id = $1
-      RETURNING id, order_id, client_id, rating, comment, response,
-                responded_at, created_at, updated_at`,
-    [reviewId, clean],
-  );
-  return rows[0] ? _mapReview(rows[0]) : null;
+  try {
+    const { rows } = await pool.query(
+      `UPDATE order_reviews
+          SET response = $2,
+              responded_at = CASE WHEN $2 IS NULL THEN NULL ELSE NOW() END,
+              updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, order_id, client_id, rating, comment, response,
+                  responded_at, created_at, updated_at`,
+      [reviewId, clean],
+    );
+    return rows[0] ? _mapReview(rows[0]) : null;
+  } catch (err) {
+    // Migração ainda não rodou: escrita responde 503 amigável (em vez de 500 cru).
+    if (_isMissingTable(err)) {
+      throw Object.assign(
+        new Error(
+          "As avaliações ainda não foram habilitadas neste ambiente. Rode a migração de order_reviews (ver DB_CHANGES_NEEDED.md).",
+        ),
+        { status: 503 },
+      );
+    }
+    throw err;
+  }
 };
 
 /**
