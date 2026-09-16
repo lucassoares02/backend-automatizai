@@ -216,8 +216,8 @@ const respond = async (reviewId, response) => {
   try {
     const { rows } = await pool.query(
       `UPDATE order_reviews
-          SET response = $2,
-              responded_at = CASE WHEN $2 IS NULL THEN NULL ELSE NOW() END,
+          SET response = $2::text,
+              responded_at = CASE WHEN $2::text IS NULL THEN NULL ELSE NOW() END,
               updated_at = NOW()
         WHERE id = $1
         RETURNING id, order_id, client_id, rating, comment, response,
