@@ -24,6 +24,7 @@ const uberDirect = require("../controllers/uberDirectController");
 const clients = require("../controllers/clientsController");
 const publicCtrl = require("../controllers/publicController");
 const dashboard = require("../controllers/dashboardController");
+const reports = require("../controllers/reportsController");
 const address = require("../controllers/addressController");
 const promotions = require("../controllers/promotionsController");
 const campaigns = require("../controllers/campaignsController");
@@ -286,6 +287,9 @@ router.delete("/delivery-drivers/:id", authMiddleware, authorizeDriver, delivery
 
 //dashboard (aggregated executive view)
 router.get("/dashboard/:companyId", authMiddleware, authorizeCompanyParam("companyId"), dashboard.getDashboard);
+
+//reports (relatório operacional por período)
+router.get("/reports/:companyId", authMiddleware, authorizeCompanyParam("companyId"), reports.getReport);
 
 // promotions / combos
 router.get("/promotions/company/:companyId", authMiddleware, authorizeCompanyParam("companyId"), promotions.findByCompany);
