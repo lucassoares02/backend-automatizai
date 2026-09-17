@@ -1,6 +1,7 @@
 const pool = require("../db");
 const orderWebhookService = require("./orderWebhookService");
 const campaignsService = require("./campaignsService");
+const couponsService = require("./couponsService");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 const { columnExists, tableExists } = require("../helpers/schema");
 const STATUS_IN_PROGRESS = [1, 2, 3, 4, 8];
@@ -184,9 +185,9 @@ const create = async (data) => {
   }
 
   const delivery_fee = Number(data.delivery_fee ?? 0);
-  const discount = Number(data.discount ?? 0);
+  const manualDiscount = Number(data.discount ?? 0);
+  const couponCode = data.coupon_code ? String(data.coupon_code).trim() : null;
   const subtotal = items.reduce((sum, i) => sum + Number(i.subtotal), 0);
-  const total = subtotal + delivery_fee - discount;
   let scheduledFor = null;
   if (scheduled_for != null) {
     const parsed = new Date(scheduled_for);
@@ -204,28 +205,63 @@ const create = async (data) => {
     await client.query("BEGIN");
 
     const tag = await generateUniqueOrderTag(client);
-    const orderRes = await client.query(
-      `INSERT INTO orders
-         (company_id, client_id, status, notes, subtotal, delivery_fee, discount, total,
-          payment_method_id, delivery_address, delivery_type, scheduled_for, tag)
-       VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-       RETURNING *`,
-      [
-        company_id,
-        client_id,
-        notes ?? null,
+
+    // Cupom: revalida e resgata dentro da transação (servidor é a fonte da
+    // verdade do desconto, como no fluxo público). Incrementa o uso de forma
+    // atômica e lança 400 se o cupom não for mais válido.
+    let couponId = null;
+    let couponDiscount = 0;
+    if (couponCode && client_id) {
+      const redeemed = await couponsService.redeemForOrder(client, {
+        companyId: company_id,
+        code: couponCode,
+        clientId: client_id,
         subtotal,
-        delivery_fee,
-        discount,
-        total,
-        payment_method_id ?? null,
-        delivery_address ?? null,
-        delivery_type ?? null,
-        scheduledFor,
-        tag,
-      ],
+        deliveryFee: delivery_fee,
+        items,
+      });
+      couponId = redeemed.coupon_id;
+      couponDiscount = redeemed.discount;
+    }
+
+    const total = subtotal + delivery_fee - manualDiscount - couponDiscount;
+
+    // Colunas de cupom são opcionais no schema (mesmo critério do fluxo público).
+    const hasCouponCols =
+      (await columnExists("orders", "coupon_id")) &&
+      (await columnExists("orders", "coupon_discount"));
+
+    const columns = [
+      "company_id", "client_id", "status", "notes", "subtotal", "delivery_fee",
+      "discount", "total", "payment_method_id", "delivery_address",
+      "delivery_type", "scheduled_for", "tag",
+    ];
+    const values = [
+      company_id, client_id, 1, notes ?? null, subtotal, delivery_fee,
+      manualDiscount, total, payment_method_id ?? null, delivery_address ?? null,
+      delivery_type ?? null, scheduledFor, tag,
+    ];
+    if (hasCouponCols) {
+      columns.push("coupon_id", "coupon_discount");
+      values.push(couponId, couponDiscount);
+    }
+    const placeholders = values.map((_, i) => `$${i + 1}`).join(", ");
+    const orderRes = await client.query(
+      `INSERT INTO orders (${columns.join(", ")})
+       VALUES (${placeholders})
+       RETURNING *`,
+      values,
     );
     const order = orderRes.rows[0];
+
+    if (couponId) {
+      await couponsService.recordRedemption(client, {
+        couponId,
+        orderId: order.id,
+        clientId: client_id,
+        discount: couponDiscount,
+      });
+    }
 
     for (const item of items) {
       await client.query(
