@@ -450,6 +450,7 @@ const consult = async (companyId, requestedMerchantId = null) => {
 
 module.exports = {
   getAccessToken,
+  authGet: _authGet,
   getSavedMerchant,
   saveMerchant,
   fetchMerchantDetails,

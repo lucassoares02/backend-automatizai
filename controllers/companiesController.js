@@ -102,4 +102,16 @@ const setOpenStatus = async (req, res) => {
   }
 };
 
-module.exports = { find, findId, findAll, findProvidersCity, update, setOpenStatus };
+const markOnboardingCompleted = async (req, res) => {
+  const companyId = Number(req.params.companyId);
+  try {
+    const updated = await service.markOnboardingCompleted(companyId);
+    if (!updated) return res.status(404).json({ error: "Empresa não encontrada" });
+    return res.status(200).json(updated);
+  } catch (error) {
+    console.error("Error marking onboarding as completed:", error);
+    return res.status(500).json({ error: "Failed to mark onboarding as completed" });
+  }
+};
+
+module.exports = { find, findId, findAll, findProvidersCity, update, setOpenStatus, markOnboardingCompleted };

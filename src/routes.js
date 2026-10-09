@@ -110,6 +110,7 @@ router.get("/companies", authMiddleware, companies.find);
 router.get("/companies/all", authMiddleware, requireSystemAdmin, companies.findAll);
 router.patch("/companies", authMiddleware, authorizeCompanyBody("id"), companies.update);
 router.patch("/companies/:companyId/open-status", authMiddleware, authorizeCompanyParam("companyId"), companies.setOpenStatus);
+router.patch("/companies/:companyId/onboarding-completed", authMiddleware, authorizeCompanyParam("companyId"), companies.markOnboardingCompleted);
 router.get("/companies/:company", authMiddleware, authorizeCompanyParam("company"), companies.findId);
 router.get("/providers/city/:company", authMiddleware, authorizeCompanyParam("company"), companies.findProvidersCity);
 
@@ -249,6 +250,14 @@ router.post(
   requireAdminUser,
   authorizeOrder,
   uberDirect.quoteOrderDelivery,
+);
+// Cotação pelo iFood Entrega (Shipping) — também só cota, sem chamar entregador.
+router.post(
+  "/orders/:id/ifood-delivery-quote",
+  authMiddleware,
+  requireAdminUser,
+  authorizeOrder,
+  ifood.quoteOrderDelivery,
 );
 router.patch("/orders/:id/status", authMiddleware, authorizeOrder, orders.updateStatus);
 router.patch(

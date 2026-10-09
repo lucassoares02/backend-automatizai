@@ -110,4 +110,18 @@ const setOpenStatus = async (companyId, manualOpen) => {
   return result.rows[0] || null;
 };
 
-module.exports = { find, findId, findAllCompanies, findProvidersCity, update, setOpenStatus };
+// Marca o onboarding como concluído (uma única vez). Idempotente: preserva a
+// data original se já estiver marcado. Depois disso o portal não exibe mais o
+// wizard no dashboard, mesmo que alguma etapa fique incompleta depois.
+const markOnboardingCompleted = async (companyId) => {
+  const result = await pool.query(
+    `UPDATE companies
+        SET onboarding_completed_at = COALESCE(onboarding_completed_at, now())
+      WHERE id = $1
+      RETURNING id, onboarding_completed_at`,
+    [companyId],
+  );
+  return result.rows[0] || null;
+};
+
+module.exports = { find, findId, findAllCompanies, findProvidersCity, update, setOpenStatus, markOnboardingCompleted };
