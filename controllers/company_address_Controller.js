@@ -70,16 +70,15 @@ const create = async (req, res) => {
  */
 const update = async (req, res) => {
   const company = req.body;
-  const id = company["id"];
-
-  if (!id || isNaN(id)) {
-    const newItem = await service.create(company);
-    return res.status(201).json(newItem);
+  if (!company || !company.company_id || isNaN(company.company_id)) {
+    return res.status(400).json({ error: "Invalid company_id" });
   }
   try {
-    const updated = await service.update({ ...company, id: parseInt(id) });
-    if (!updated) return res.status(404).json({ error: "Company not found" });
-    return res.status(200).json(updated);
+    const saved = await service.saveForCompany({
+      ...company,
+      company_id: parseInt(company.company_id),
+    });
+    return res.status(200).json(saved);
   } catch (error) {
     console.error("Error updating Company:", error);
     return res.status(500).json({ error: "Failed to update Company" });

@@ -158,7 +158,7 @@ router.patch("/menu_items", authMiddleware, menu_items.update);
 router.delete("/menu_items/:id", authMiddleware, menu_items.remove);
 
 router.get("/company/address/:id", company.find);
-router.patch("/company/address", authMiddleware, company.update);
+router.patch("/company/address", authMiddleware, authorizeCompanyBody("company_id"), company.update);
 
 //companiessss
 router.get("/companiessss", companiessss.findAll);

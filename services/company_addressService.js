@@ -9,7 +9,12 @@ const findAll = async () => {
 };
 
 const find = async (id) => {
-  const result = await pool.query("SELECT * FROM company_addresses WHERE company_id = $1", [id]);
+  // Pode haver linhas duplicadas legadas por empresa; o endereço vigente é
+  // sempre o mais recente (mesmo critério usado no restante da API).
+  const result = await pool.query(
+    "SELECT * FROM company_addresses WHERE company_id = $1 ORDER BY id DESC LIMIT 1",
+    [id],
+  );
   return result.rows[0] || null;
 };
 
@@ -38,9 +43,20 @@ const update = async (data) => {
   return result.rows[0];
 };
 
+/**
+ * Salva o endereço da empresa: atualiza o registro vigente (mais recente) ou
+ * cria um novo quando ainda não existe. Ignora o `id` enviado pelo cliente para
+ * não gerar duplicatas nem atualizar uma linha antiga.
+ */
+const saveForCompany = async (data) => {
+  const current = await find(data.company_id);
+  if (!current) return create(data);
+  return update({ ...data, zip_code: data.zip_code ?? data.zipCode, id: current.id });
+};
+
 const remove = async (id) => {
   const result = await pool.query("DELETE FROM company_addresses WHERE id = $1 RETURNING *", [id]);
   return result.rows[0];
 };
 
-module.exports = { findAll, find, create, update, remove };
+module.exports = { findAll, find, create, update, saveForCompany, remove };
