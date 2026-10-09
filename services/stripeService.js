@@ -1,5 +1,6 @@
 const pool = require("../db");
 const orderWebhookService = require("./orderWebhookService");
+const orderAutoAcceptService = require("./orderAutoAcceptService");
 
 // ─── Cliente Stripe (lazy) ─────────────────────────────────────────────────────
 // Inicializa sob demanda para não derrubar o boot quando a chave não está setada
@@ -324,6 +325,8 @@ const _markOrderPaid = async (orderId, paymentIntentId) => {
       [orderId],
     );
     orderWebhookService.notifyAwaitingOrder(orderId);
+    // Pedido pago pode ser aceito automaticamente, conforme a loja.
+    orderAutoAcceptService.applyToOrder(orderId);
   }
 };
 

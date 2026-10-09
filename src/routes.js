@@ -33,6 +33,7 @@ const coupons = require("../controllers/couponsController");
 const searchAnalytics = require("../controllers/searchAnalyticsController");
 const orderMessages = require("../controllers/orderMessagesController");
 const orderStatusNotifications = require("../controllers/orderStatusNotificationController");
+const orderAutoAccept = require("../controllers/orderAutoAcceptController");
 const productOptions = require("../controllers/productOptionsController");
 const purchaseGoals = require("../controllers/purchaseGoalsController");
 const customerTracking = require("../controllers/customerTrackingController");
@@ -280,6 +281,20 @@ router.put(
   authMiddleware,
   authorizeCompanyBody(),
   orderStatusNotifications.upsert,
+);
+
+// order auto-accept — aceite automático (pedido pago online / dinheiro)
+router.get(
+  "/order-auto-accept/company/:companyId",
+  authMiddleware,
+  authorizeCompanyParam("companyId"),
+  orderAutoAccept.getSettings,
+);
+router.put(
+  "/order-auto-accept",
+  authMiddleware,
+  authorizeCompanyBody(),
+  orderAutoAccept.updateSettings,
 );
 
 // deliveries — gestão inteligente de entregas (pedidos em rota + rotas otimizadas)

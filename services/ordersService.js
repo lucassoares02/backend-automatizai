@@ -494,7 +494,9 @@ const upsertCart = async ({ order: orderId, company_id, client_id, items }) => {
   }
 };
 
-const updateStatus = async (id, status, cancelReason) => {
+// `options.onlyFrom`: só aplica a mudança se o pedido ainda estiver nesse status
+// (usado pelo aceite automático para não sobrescrever uma ação manual da loja).
+const updateStatus = async (id, status, cancelReason, options = {}) => {
   const hasStockReservation = await _hasStockReservationSchema();
   const client = await pool.connect();
   try {
@@ -525,6 +527,13 @@ const updateStatus = async (id, status, cancelReason) => {
     );
     const current = currentResult.rows[0];
     if (!current) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+    if (
+      options.onlyFrom != null &&
+      Number(current.status) !== Number(options.onlyFrom)
+    ) {
       await client.query("ROLLBACK");
       return null;
     }

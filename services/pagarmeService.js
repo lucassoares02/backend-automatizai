@@ -4,6 +4,7 @@ const net = require("net");
 const pool = require("../db");
 const identityService = require("./identityService");
 const orderWebhookService = require("./orderWebhookService");
+const orderAutoAcceptService = require("./orderAutoAcceptService");
 const { columnExists, tableExists } = require("../helpers/schema");
 const { createPaymentSession } = require("../helpers/publicPaymentSession");
 
@@ -2317,6 +2318,8 @@ const _markOrderPaid = async (orderId, chargeId, pagarmeOrderId) => {
       [orderId],
     );
     orderWebhookService.notifyAwaitingOrder(orderId);
+    // Pedido pago pode ser aceito automaticamente, conforme a loja.
+    orderAutoAcceptService.applyToOrder(orderId);
   }
 };
 
