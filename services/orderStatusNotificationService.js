@@ -31,11 +31,46 @@ const DEFAULT_MESSAGES = {
   9: "Pedido {pedido} retirado. Obrigado pela preferência, {cliente}! 💚",
 };
 
+// ─── Pedidos de serviço (agendamento) ────────────────────────────────────────
+// Eventos próprios, guardados na mesma tabela com ids fora da faixa de status
+// de pedido (100+ espelham o status; 201/202 são os lembretes do cron).
+// Placeholders extras: {servico}, {profissional}, {data}, {hora}, {link},
+// {link_avaliacao}.
+const SERVICE_EVENTS = Object.freeze({
+  102: "Agendamento confirmado",
+  103: "Atendimento iniciado",
+  104: "Agendamento remarcado",
+  201: "Lembrete 24h antes",
+  202: "Lembrete 2h antes",
+  109: "Atendimento concluído (pedir avaliação)",
+  106: "Agendamento cancelado",
+  111: "Não compareceu",
+});
+const SERVICE_NOTIFIABLE = [102, 103, 104, 201, 202, 109, 106, 111];
+const SERVICE_DEFAULT_ENABLED = new Set([102, 104, 201, 202, 109, 106]);
+const SERVICE_DEFAULT_MESSAGES = {
+  102: "Olá {cliente}! Seu horário de {servico} com {profissional} está confirmado para {data} às {hora}. Te esperamos na {loja}! 📅",
+  103: "{cliente}, seu atendimento de {servico} começou. Aproveite! ✨",
+  104: "{cliente}, seu horário de {servico} foi remarcado para {data} às {hora} com {profissional}. Detalhes: {link}",
+  201: "Lembrete 📅 {cliente}, seu horário de {servico} com {profissional} é {data} às {hora} na {loja}. Precisa remarcar? {link}",
+  202: "{cliente}, falta pouco! Seu horário de {servico} é hoje às {hora} com {profissional}. Até já! 😉",
+  109: "Obrigado pela visita, {cliente}! 💜 Conta pra gente como foi o seu {servico}: {link_avaliacao}",
+  106: "Olá {cliente}, seu agendamento de {servico} em {data} às {hora} foi cancelado. Para marcar outro horário, fale com a {loja}.",
+  111: "Olá {cliente}, sentimos sua falta no horário de {servico} ({data} às {hora}). Quer remarcar? É só responder esta mensagem.",
+};
+
+const ALL_NOTIFIABLE = [...NOTIFIABLE_STATUSES, ...SERVICE_NOTIFIABLE];
+const _isService = (id) => SERVICE_NOTIFIABLE.includes(id);
+const _nameFor = (id) => (_isService(id) ? SERVICE_EVENTS[id] : STATUS_NAMES[id]) ?? String(id);
+const _messageFor = (id) => (_isService(id) ? SERVICE_DEFAULT_MESSAGES[id] : DEFAULT_MESSAGES[id]) ?? "";
+const _enabledByDefault = (id) => (_isService(id) ? SERVICE_DEFAULT_ENABLED.has(id) : DEFAULT_ENABLED.has(id));
+
 const _defaultFor = (statusId) => ({
   status_id: statusId,
-  status_name: STATUS_NAMES[statusId] ?? String(statusId),
-  enabled: DEFAULT_ENABLED.has(statusId),
-  message: DEFAULT_MESSAGES[statusId] ?? "",
+  status_name: _nameFor(statusId),
+  group: _isService(statusId) ? "service" : "order",
+  enabled: _enabledByDefault(statusId),
+  message: _messageFor(statusId),
   is_default: true,
 });
 
@@ -57,22 +92,23 @@ const findByCompany = async (companyId) => {
   } catch (err) {
     // Enquanto a migração (DB_CHANGES_NEEDED.md) não roda, a tabela não existe:
     // devolvemos apenas os defaults para não quebrar o portal.
-    if (err.code === "42P01") return NOTIFIABLE_STATUSES.map(_defaultFor);
+    if (err.code === "42P01") return ALL_NOTIFIABLE.map(_defaultFor);
     throw err;
   }
   const byStatus = new Map(rows.map((r) => [Number(r.status_id), r]));
 
-  return NOTIFIABLE_STATUSES.map((statusId) => {
+  return ALL_NOTIFIABLE.map((statusId) => {
     const row = byStatus.get(statusId);
     if (!row) return _defaultFor(statusId);
     return {
       status_id: statusId,
-      status_name: STATUS_NAMES[statusId] ?? String(statusId),
+      status_name: _nameFor(statusId),
+      group: _isService(statusId) ? "service" : "order",
       enabled: row.enabled,
       message:
         row.message != null && String(row.message).trim() !== ""
           ? row.message
-          : DEFAULT_MESSAGES[statusId] ?? "",
+          : _messageFor(statusId),
       is_default: false,
     };
   });
@@ -92,7 +128,7 @@ const upsertMany = async (companyId, items) => {
     await client.query("BEGIN");
     for (const item of items) {
       const statusId = Number(item.status_id);
-      if (!NOTIFIABLE_STATUSES.includes(statusId)) continue;
+      if (!ALL_NOTIFIABLE.includes(statusId)) continue;
       const enabled = item.enabled === true;
       const message =
         item.message != null && String(item.message).trim() !== ""
@@ -152,12 +188,15 @@ const resolveForStatus = async (companyId, statusId) => {
     message:
       row.message != null && String(row.message).trim() !== ""
         ? row.message
-        : DEFAULT_MESSAGES[id] ?? "",
+        : _messageFor(id),
   };
 };
 
 module.exports = {
   NOTIFIABLE_STATUSES,
+  SERVICE_NOTIFIABLE,
+  SERVICE_EVENTS,
+  SERVICE_DEFAULT_MESSAGES,
   STATUS_NAMES,
   DEFAULT_MESSAGES,
   findByCompany,

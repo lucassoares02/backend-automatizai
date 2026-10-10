@@ -11,6 +11,7 @@ const campaignsService = require("./campaignsService");
 const couponsService = require("./couponsService");
 const identityService = require("./identityService");
 const reviewsService = require("./reviewsService");
+const bookingService = require("./bookingService");
 const { normalizePhone } = require("../helpers/phone");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 const { columnExists, tableExists } = require("../helpers/schema");
@@ -45,6 +46,18 @@ const _hasPreorderSchema = async () => {
     columnExists("menu_items", "preorder_lead_days"),
   ]);
   return preorderOnly && leadDays;
+};
+
+const _hasServiceSchema = async () => {
+  const cols = await Promise.all(
+    ["item_type", "duration_minutes", "buffer_minutes", "price_type"].map((c) => columnExists("menu_items", c)),
+  );
+  return cols.every(Boolean);
+};
+
+const _hasProfessionalsSchema = async () => {
+  const [professionals, links] = await Promise.all([tableExists("professionals"), tableExists("professional_services")]);
+  return professionals && links;
 };
 
 const _getPreorderRequirement = async (companyId, menuItemIds, promotionIds) => {
@@ -278,10 +291,13 @@ const getCompanyPublicMenu = async (companyRef) => {
 
   // Selos do produto: só seleciona a coluna se ela já existir (a migration em
   // DB_CHANGES_NEEDED.md pode não ter sido aplicada). Sem ela, devolve array vazio.
-  const [hasItemSelos, hasStockControl, hasPreorder] = await Promise.all([
+  const [hasItemSelos, hasStockControl, hasPreorder, hasServices, hasImages, hasProfessionals] = await Promise.all([
     columnExists("menu_items", "dietary_restrictions"),
     _hasStockControlSchema(),
     _hasPreorderSchema(),
+    _hasServiceSchema(),
+    tableExists("menu_item_images"),
+    _hasProfessionalsSchema(),
   ]);
   const selosSelect = hasItemSelos
     ? "mi.dietary_restrictions,"
@@ -299,9 +315,19 @@ const getCompanyPublicMenu = async (companyRef) => {
     : `false AS preorder_only,
        NULL::integer AS preorder_lead_days,`;
 
+  // Galeria (capa continua em image_url) e campos de serviço.
+  const imagesSelect = hasImages
+    ? `COALESCE((SELECT json_agg(img.url ORDER BY img.position, img.id)
+                 FROM menu_item_images img WHERE img.menu_item_id = mi.id), '[]'::json) AS images,`
+    : `'[]'::json AS images,`;
+  const serviceSelect = hasServices
+    ? "mi.item_type, mi.duration_minutes, mi.buffer_minutes, mi.price_type,"
+    : "'product'::text AS item_type, NULL::integer AS duration_minutes, 0 AS buffer_minutes, 'fixed'::text AS price_type,";
+
   const menuRes = await pool.query(
     `SELECT mi.id, mi.name, mi.description, mi.price, mi.image_url, mi.category_id,
             mi.prep_time_minutes, mi.featured, ${stockSelect} ${selosSelect} ${preorderSelect}
+            ${imagesSelect} ${serviceSelect}
             mc.name AS category_name, mc.sort_order AS cat_sort,
             EXISTS(
               SELECT 1 FROM product_option_groups pog
@@ -335,10 +361,35 @@ const getCompanyPublicMenu = async (companyRef) => {
     }
   }
 
+  // Serviços não vão para o carrinho: saem das categorias e voltam em
+  // `services`, com os profissionais. São agendados por POST /public/bookings.
+  const productRows = menuRes.rows.filter((item) => item.item_type !== "service");
+  const services = menuRes.rows.filter((item) => item.item_type === "service");
+  if (services.length && hasProfessionals) {
+    const profRes = await pool.query(
+      `SELECT ps.menu_item_id, p.id, p.name, p.photo_url, p.bio,
+              ps.price_override, ps.duration_override
+       FROM professional_services ps
+       JOIN professionals p ON p.id = ps.professional_id AND p.active = TRUE
+       WHERE p.company_id = $1 AND ps.menu_item_id = ANY($2::int[])
+       ORDER BY p.name`,
+      [companyId, services.map((item) => item.id)],
+    );
+    const byItem = new Map();
+    for (const row of profRes.rows) {
+      const { menu_item_id: itemId, ...professional } = row;
+      if (!byItem.has(itemId)) byItem.set(itemId, []);
+      byItem.get(itemId).push(professional);
+    }
+    for (const item of services) item.professionals = byItem.get(item.id) || [];
+  } else {
+    for (const item of services) item.professionals = [];
+  }
+
   const categoriesMap = new Map();
   const uncategorized = [];
 
-  for (const item of menuRes.rows) {
+  for (const item of productRows) {
     if (item.category_id) {
       if (!categoriesMap.has(item.category_id)) {
         categoriesMap.set(item.category_id, { id: item.category_id, name: item.category_name, items: [] });
@@ -427,12 +478,19 @@ const getCompanyPublicMenu = async (companyRef) => {
   const companyLat = toNumber(companyAddress?.latitude);
   const companyLng = toNumber(companyAddress?.longitude);
 
+  // Regras de agenda (fuso, janela, cancelamento) para o fluxo de serviços.
+  const booking = services.length
+    ? await bookingService.publicBookingInfo(companyId)
+    : { enabled: false };
+
   return {
     company,
     is_open: isOpen,
     opening_hours: hoursRes.rows,
     categories: Array.from(categoriesMap.values()),
     uncategorized,
+    services,
+    booking,
     promotions: promotionsRes.rows,
     payment_methods: paymentMethodsRes.rows,
     // Pagamento online via Stripe (contas conectadas). Mantido por compat.; o
@@ -922,13 +980,16 @@ const createPublicOrder = async (data) => {
     // Preço autoritativo com desconto de campanha aplicado quando ativo — é isso
     // que faz o desconto "valer de verdade" no valor cobrado do cliente.
     const activeCampaignPrices = await campaignsService.getActivePricesMap(company_id);
+    // Serviços não entram no carrinho (agendamento é outro fluxo).
+    const serviceFilter = (await _hasServiceSchema()) ? "AND item_type <> 'service'" : "";
     const r = await pool.query(
       `SELECT id, price
        FROM menu_items
        WHERE company_id = $1
          AND id = ANY($2::int[])
          AND available = true
-         AND deleted_at IS NULL`,
+         AND deleted_at IS NULL
+         ${serviceFilter}`,
       [company_id, menuItemIds],
     );
     for (const row of r.rows) {
@@ -1632,6 +1693,8 @@ const getPublicOrder = async ({ id, phone }) => {
   // Avaliação já feita (se houver) — para a UI mostrar o estado enviado em vez do
   // formulário. Tolerante à ausência da tabela (retorna null até a migração rodar).
   row.review = await reviewsService.getForOrder(row.id);
+  // Pedido de serviço: horário, profissional e regras de cancelar/remarcar.
+  row.appointment = await bookingService.getForOrder(row.id, row.status);
   return row;
 };
 
@@ -1669,6 +1732,9 @@ const cancelPublicOrder = async ({ id, phone, reason }) => {
   if (status === 6 || status === 7) {
     return { ok: false, code: 409, message: "Este pedido já foi cancelado." };
   }
+  // Serviço agendado: o cliente só cancela até cancel_window_hours antes.
+  const bookingBlock = await bookingService.customerCancelBlock(order.id, status);
+  if (bookingBlock) return { ok: false, code: 409, message: bookingBlock };
   if (!_CLIENT_CANCELLABLE_STATUSES.includes(status)) {
     return {
       ok: false,

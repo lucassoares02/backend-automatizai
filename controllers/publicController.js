@@ -2,6 +2,7 @@ const service = require("../services/publicService");
 const reorderService = require("../services/reorderService");
 const pagarmeService = require("../services/pagarmeService");
 const reviewsService = require("../services/reviewsService");
+const bookingService = require("../services/bookingService");
 const { verifyPaymentSession, tokenFromRequest } = require("../helpers/publicPaymentSession");
 
 const listRestaurants = async (_req, res) => {
@@ -299,7 +300,80 @@ const submitReview = async (req, res) => {
   }
 };
 
+// ─── Serviços com agendamento ───────────────────────────────────────────────
+
+const _bookingFail = (res, error, fallback) => {
+  if (!error.status || error.status >= 500) console.error(`${fallback}:`, error);
+  return res
+    .status(error.status || 500)
+    .json({ error: error.status ? error.message : fallback, ...(error.code ? { code: error.code } : {}) });
+};
+
+const serviceAvailability = async (req, res) => {
+  const { companyId, serviceId } = req.params;
+  if (!companyId || !/^\d+$/.test(String(serviceId || ""))) {
+    return res.status(400).json({ error: "Serviço inválido." });
+  }
+  try {
+    const data = await bookingService.getAvailability({
+      companyRef: companyId,
+      serviceId: Number(serviceId),
+      professionalId: req.query.professional_id ? String(req.query.professional_id) : null,
+      date: req.query.date ? String(req.query.date) : null,
+      days: req.query.days,
+    });
+    return res.status(200).json(data);
+  } catch (error) {
+    return _bookingFail(res, error, "Failed to fetch availability");
+  }
+};
+
+// Cria o pedido do serviço + reserva do horário. Mesma resposta do POST
+// /public/orders (pedido + sessão de pagamento Pagar.me quando online).
+const createBooking = async (req, res) => {
+  const { company_id, client_id, booking } = req.body || {};
+  if (!company_id || !client_id || !booking || !booking.menu_item_id || !booking.starts_at) {
+    return res.status(400).json({ error: "company_id, client_id e booking (serviço e horário) são obrigatórios." });
+  }
+  if (req.body.payment_provider === "pagarme" && !(await pagarmeService.isPaymentInfrastructureReady())) {
+    return res.status(503).json({ error: "Pagamento online indisponível no momento." });
+  }
+  try {
+    const order = await bookingService.createBookingOrder({
+      ...req.body,
+      authenticated_user_id: req.customer?.id || null,
+    });
+    const paymentSession = order.payment_provider === "pagarme"
+      ? pagarmeService.createPublicPaymentSession(order, { customerVerified: Boolean(req.customer?.id) })
+      : {};
+    return res.status(201).json({ ...order, ...paymentSession });
+  } catch (error) {
+    return _bookingFail(res, error, "Failed to create booking");
+  }
+};
+
+// Remarcação pelo cliente: posse pelo link do pedido (UUID) ou id + telefone.
+const rescheduleAppointment = async (req, res) => {
+  const id = String(req.params?.id || "").trim();
+  const { starts_at, professional_id, phone } = req.body || {};
+  if (!id || !starts_at) return res.status(400).json({ error: "Informe o novo horário." });
+  try {
+    const appointment = await bookingService.rescheduleByCustomer({
+      orderRef: id,
+      phone: phone ? String(phone) : null,
+      startsAt: starts_at,
+      professionalId: professional_id ?? null,
+    });
+    return res.status(200).json(appointment);
+  } catch (error) {
+    return _bookingFail(res, error, "Failed to reschedule appointment");
+  }
+};
+
 module.exports = {
+  serviceAvailability,
+  createBooking,
+  rescheduleAppointment,
   listRestaurants,
   getCompanyMenu,
   findClientByPhone,

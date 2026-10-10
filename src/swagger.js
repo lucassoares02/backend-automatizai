@@ -119,7 +119,7 @@ const OVERRIDES = {
   },
   "POST /api/companies": {
     summary: "Criar empresa (fluxo de registro)",
-    requestBody: body({ name: T.str, description: T.str, phone: T.str, user: T.int, type: T.str }, { name: "Pizzaria do João", description: "...", phone: "5511999998888", user: 12, type: "owner" }, ["name"]),
+    requestBody: body({ name: T.str, description: T.str, phone: T.str, user: T.int, type: T.str, business_segment: T.str }, { name: "Pizzaria do João", description: "...", phone: "5511999998888", user: 12, type: "owner", business_segment: "alimentacao" }, ["name"]),
   },
   "POST /api/users": {
     summary: "Criar/convidar usuário",

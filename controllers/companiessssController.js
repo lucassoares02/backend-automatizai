@@ -81,6 +81,9 @@ const update = async (req, res) => {
         error: error.message || "Este endereço já está em uso.",
       });
     }
+    if (error?.status === 400) {
+      return res.status(400).json({ error: error.message });
+    }
     return res.status(500).json({ error: "Failed to update Companiessss" });
   }
 };

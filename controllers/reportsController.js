@@ -1,4 +1,5 @@
 const service = require("../services/reportsService");
+const serviceReports = require("../services/serviceReportsService");
 
 // Formata Date -> YYYY-MM-DD (data local do servidor).
 const _fmt = (d) => {
@@ -46,4 +47,31 @@ const getReport = async (req, res) => {
   }
 };
 
-module.exports = { getReport };
+// Relatório de serviços (agenda): mesmo período/validação do relatório geral.
+const getServicesReport = async (req, res) => {
+  const { companyId } = req.params;
+  if (!companyId || isNaN(companyId)) {
+    return res.status(400).json({ error: "Invalid company ID" });
+  }
+  let { from, to } = req.query;
+  if (!from || !to) {
+    const today = new Date();
+    const start = new Date();
+    start.setDate(today.getDate() - 6);
+    from = _fmt(start);
+    to = _fmt(today);
+  }
+  if (!service.isValidDate(from) || !service.isValidDate(to) || from > to) {
+    return res.status(400).json({ error: "Período inválido. Use YYYY-MM-DD com início antes do fim." });
+  }
+  try {
+    const data = await serviceReports.getServicesReport(companyId, from, to);
+    if (!data) return res.status(404).json({ error: "Company not found" });
+    return res.status(200).json(data);
+  } catch (error) {
+    console.error("Error fetching services report:", error);
+    return res.status(500).json({ error: "Failed to fetch services report" });
+  }
+};
+
+module.exports = { getReport, getServicesReport };

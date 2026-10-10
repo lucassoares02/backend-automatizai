@@ -41,6 +41,8 @@ const ifoodImport = require("../controllers/ifoodImportController");
 const ifood = require("../controllers/ifoodController");
 const deliveries = require("../controllers/deliveriesController");
 const deliveryDrivers = require("../controllers/deliveryDriversController");
+const professionals = require("../controllers/professionalsController");
+const appointments = require("../controllers/appointmentsController");
 const stripe = require("../controllers/stripeController");
 const pagarme = require("../controllers/pagarmeController");
 const n8n = require("../controllers/n8nController");
@@ -69,6 +71,8 @@ const authorizeCoupon = authorizeByLookup("SELECT company_id FROM coupons WHERE 
 const authorizeGoal = authorizeByLookup("SELECT company_id FROM purchase_goals WHERE id = $1", "id");
 const authorizeReview = authorizeByLookup("SELECT company_id FROM order_reviews WHERE id = $1", "id");
 const authorizeDriver = authorizeByLookup("SELECT company_id FROM delivery_drivers WHERE id = $1", "id");
+const authorizeProfessional = authorizeByLookup("SELECT company_id FROM professionals WHERE id = $1", "id");
+const authorizeAppointment = authorizeByLookup("SELECT company_id FROM appointments WHERE id = $1", "id");
 const authorizeConnection = authorizeByLookup("SELECT company_id FROM connections WHERE id = $1", "id");
 const authorizeAiIgnoredPhoneNumber = authorizeByLookup(
   "SELECT company_id FROM ai_ignored_phone_numbers WHERE id = $1",
@@ -261,6 +265,9 @@ router.post(
   ifood.quoteOrderDelivery,
 );
 router.patch("/orders/:id/status", authMiddleware, authorizeOrder, orders.updateStatus);
+// pedido de serviço: agendamento do pedido e "não compareceu"
+router.get("/orders/:id/appointment", authMiddleware, authorizeOrder, appointments.findByOrder);
+router.patch("/orders/:id/no-show", authMiddleware, authorizeOrder, appointments.noShow);
 router.patch(
   "/orders/:id/delivery-fee-agreement",
   authMiddleware,
@@ -309,10 +316,28 @@ router.put("/delivery-drivers/:id", authMiddleware, authorizeDriver, deliveryDri
 router.patch("/delivery-drivers/:id", authMiddleware, authorizeDriver, deliveryDrivers.update);
 router.delete("/delivery-drivers/:id", authMiddleware, authorizeDriver, deliveryDrivers.remove);
 
+// professionals — quem executa os serviços do catálogo (cadastro, serviços, jornada, folgas)
+router.get("/professionals/company/:companyId", authMiddleware, authorizeCompanyParam("companyId"), professionals.findByCompany);
+router.post("/professionals", authMiddleware, authorizeCompanyBody(), professionals.create);
+router.get("/professionals/:id", authMiddleware, authorizeProfessional, professionals.find);
+router.patch("/professionals/:id", authMiddleware, authorizeProfessional, professionals.update);
+router.delete("/professionals/:id", authMiddleware, authorizeProfessional, professionals.remove);
+router.patch("/professionals/:id/services/:menuItemId", authMiddleware, authorizeProfessional, professionals.updateServiceOverride);
+router.get("/professionals/:id/time-off", authMiddleware, authorizeProfessional, professionals.listTimeOff);
+router.post("/professionals/:id/time-off", authMiddleware, authorizeProfessional, professionals.addTimeOff);
+router.delete("/professionals/:id/time-off/:timeOffId", authMiddleware, authorizeProfessional, professionals.removeTimeOff);
+
+// appointments — agenda do painel (dia/semana), encaixe e remarcação pela loja
+router.get("/appointments/company/:companyId", authMiddleware, authorizeCompanyParam("companyId"), appointments.listAgenda);
+router.get("/appointments/company/:companyId/availability", authMiddleware, authorizeCompanyParam("companyId"), appointments.availability);
+router.post("/appointments", authMiddleware, authorizeCompanyBody(), appointments.create);
+router.patch("/appointments/:id/reschedule", authMiddleware, authorizeAppointment, appointments.reschedule);
+
 //dashboard (aggregated executive view)
 router.get("/dashboard/:companyId", authMiddleware, authorizeCompanyParam("companyId"), dashboard.getDashboard);
 
 //reports (relatório operacional por período)
+router.get("/reports/:companyId/services", authMiddleware, authorizeCompanyParam("companyId"), reports.getServicesReport);
 router.get("/reports/:companyId", authMiddleware, authorizeCompanyParam("companyId"), reports.getReport);
 
 // promotions / combos
@@ -425,6 +450,10 @@ router.get("/public/client", publicLimiter, publicCtrl.findClientByPhone);
 router.post("/public/clients", publicLimiter, optionalCustomerAuth, publicCtrl.createClient);
 router.patch("/public/clients/:id", publicLimiter, publicCtrl.updateClient);
 router.post("/public/orders", publicLimiter, optionalCustomerAuth, publicCtrl.createOrder);
+// serviços com agendamento — horários livres, reserva (pedido de serviço) e remarcação
+router.get("/public/company/:companyId/services/:serviceId/availability", publicLimiter, publicCtrl.serviceAvailability);
+router.post("/public/bookings", publicLimiter, optionalCustomerAuth, publicCtrl.createBooking);
+router.post("/public/orders/:id/reschedule", publicLimiter, publicCtrl.rescheduleAppointment);
 router.patch("/public/orders/:id/online-payment-method", paymentMethodsLimiter, publicCtrl.changeOnlinePaymentMethod);
 router.post(
   "/public/orders/:id/payment-session",
@@ -486,5 +515,13 @@ router.post("/pagarme/webhook", pagarme.webhook);
 // authMiddleware aceita a service key; authorizeCompanyParam é bypassado para o
 // principal de serviço e restringe usuários JWT à própria empresa.
 router.get("/n8n/company/:companyId/daily-summary", authMiddleware, authorizeCompanyParam("companyId"), n8n.dailySummary);
+// Agendamento de serviços pela IA de atendimento (WhatsApp). A disponibilidade
+// segue as regras do site (antecedência/janela) e a reserva nasce Pendente com
+// pagamento no local. Remarcar/cancelar: POST /public/orders/:id/reschedule e
+// /public/orders/:id/cancel (com o telefone do cliente).
+router.get("/n8n/company/:companyId/services", authMiddleware, authorizeCompanyParam("companyId"), appointments.aiServices);
+router.get("/n8n/company/:companyId/services/:serviceId/availability", authMiddleware, authorizeCompanyParam("companyId"), publicCtrl.serviceAvailability);
+router.get("/n8n/company/:companyId/appointments", authMiddleware, authorizeCompanyParam("companyId"), appointments.aiUpcoming);
+router.post("/n8n/bookings", authMiddleware, authorizeCompanyBody(), appointments.aiCreateBooking);
 
 module.exports = router;

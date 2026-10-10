@@ -55,6 +55,13 @@ const normalizeAiPersonalities = (value) => {
   return result.length ? JSON.stringify(result) : null;
 };
 
+const normalizeBusinessSegment = (value) => {
+  const v = String(value || "").trim().toLowerCase();
+  if (v === "servicos") return "servicos";
+  if (v === "alimentacao") return "alimentacao";
+  return null;
+};
+
 /**
  * Get All companies
  */
@@ -98,6 +105,7 @@ const update = async (data) => {
     id, name, description, status, phone, slug,
     logo_url, brand_color, banner_url,
     ai_name, ai_gender, ai_personality, cuisine_type, dietary_restrictions,
+    business_segment,
     custom_dietary_restrictions,
     custom_ai_personalities,
     accepts_delivery,
@@ -106,6 +114,10 @@ const update = async (data) => {
     scheduling_min_days,
     scheduling_max_days,
     scheduling_open_days_only,
+    booking_slot_step_minutes,
+    booking_min_notice_minutes,
+    booking_max_days_ahead,
+    cancel_window_hours,
     max_distance_meters_delivery,
     kilometer_price,
     max_distance_meters_free_delivery,
@@ -136,6 +148,12 @@ const update = async (data) => {
       schedulingSet = `, accepts_scheduling = COALESCE($${params.length}, accepts_scheduling)`;
     }
 
+    let businessSegmentSet = "";
+    if (await columnExists("companies", "business_segment")) {
+      params.push(normalizeBusinessSegment(business_segment));
+      businessSegmentSet = `, business_segment = COALESCE($${params.length}, business_segment)`;
+    }
+
     // Janela de agendamento (min/max dias) — só quando a coluna existe. Sanitiza:
     // inteiros >= 0 e garante max >= min (troca se vier invertido).
     let schedWindowSet = "";
@@ -160,6 +178,26 @@ const update = async (data) => {
     if (await columnExists("companies", "scheduling_open_days_only")) {
       params.push(typeof scheduling_open_days_only === "boolean" ? scheduling_open_days_only : null);
       openDaysOnlySet = `, scheduling_open_days_only = COALESCE($${params.length}, scheduling_open_days_only)`;
+    }
+
+    // Regras da agenda de serviços (Fase 2) — cada coluna só entra quando existe
+    // e veio no payload; valores fora da faixa da CHECK constraint são recusados.
+    let bookingSet = "";
+    const bookingFields = [
+      ["booking_slot_step_minutes", booking_slot_step_minutes, 5, 240, "O intervalo entre horários deve ficar entre 5 e 240 minutos."],
+      ["booking_min_notice_minutes", booking_min_notice_minutes, 0, 43200, "A antecedência mínima deve ficar entre 0 e 43200 minutos."],
+      ["booking_max_days_ahead", booking_max_days_ahead, 1, 365, "A agenda deve abrir entre 1 e 365 dias à frente."],
+      ["cancel_window_hours", cancel_window_hours, 0, 720, "O prazo de cancelamento deve ficar entre 0 e 720 horas."],
+    ];
+    for (const [column, value, min, max, message] of bookingFields) {
+      if (value === undefined || value === null || value === "") continue;
+      if (!(await columnExists("companies", column))) continue;
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < min || n > max) {
+        throw Object.assign(new Error(message), { status: 400 });
+      }
+      params.push(n);
+      bookingSet += `, ${column} = $${params.length}`;
     }
 
     // Slug público (endereço do subdomínio/cardápio). Só é tocado quando muda:
@@ -210,7 +248,7 @@ const update = async (data) => {
          custom_dietary_restrictions = $14,
          custom_ai_personalities = $15,
          accepts_delivery = COALESCE($16, accepts_delivery),
-         accepts_pickup = COALESCE($17, accepts_pickup)${schedulingSet}${schedWindowSet}${openDaysOnlySet}${slugSet}
+         accepts_pickup = COALESCE($17, accepts_pickup)${schedulingSet}${businessSegmentSet}${schedWindowSet}${openDaysOnlySet}${bookingSet}${slugSet}
        WHERE id = $1 RETURNING *`,
       params,
     );

@@ -5,6 +5,7 @@ const pool = require("../db");
 const identityService = require("./identityService");
 const orderWebhookService = require("./orderWebhookService");
 const orderAutoAcceptService = require("./orderAutoAcceptService");
+const bookingService = require("./bookingService");
 const { columnExists, tableExists } = require("../helpers/schema");
 const { createPaymentSession } = require("../helpers/publicPaymentSession");
 
@@ -2303,6 +2304,8 @@ const _markOrderPaid = async (orderId, chargeId, pagarmeOrderId) => {
      RETURNING o.status, target.previous_status`,
     [orderId, chargeId || null, pagarmeOrderId || null],
   );
+  // Pedido de serviço: o pagamento confirma a reserva do horário (idempotente).
+  if (r.rows[0]) await bookingService.confirmForOrder(orderId);
   const enteredAwaiting =
     Number(r.rows[0]?.previous_status) === 10 &&
     Number(r.rows[0]?.status) === 1;

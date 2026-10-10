@@ -19,6 +19,8 @@ const cartAbandonmentService = require("./services/cartAbandonmentService");
 const campaignSchedulerService = require("./services/campaignSchedulerService");
 const messageQueueService = require("./services/messageQueueService");
 const pagarmeReconciliationService = require("./services/pagarmeReconciliationService");
+const bookingHoldService = require("./services/bookingHoldService");
+const appointmentReminderService = require("./services/appointmentReminderService");
 
 // Só confie em cabeçalhos de proxy quando a infraestrutura foi declarada.
 // Exemplos: TRUST_PROXY=1 ou TRUST_PROXY=loopback.
@@ -111,6 +113,8 @@ app
     campaignSchedulerService.start();
     messageQueueService.start();
     pagarmeReconciliationService.start();
+    bookingHoldService.start();
+    appointmentReminderService.start();
   })
   .on("error", (err) => {
     console.error("❌ Server startup error:");

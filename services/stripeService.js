@@ -1,6 +1,7 @@
 const pool = require("../db");
 const orderWebhookService = require("./orderWebhookService");
 const orderAutoAcceptService = require("./orderAutoAcceptService");
+const bookingService = require("./bookingService");
 
 // ─── Cliente Stripe (lazy) ─────────────────────────────────────────────────────
 // Inicializa sob demanda para não derrubar o boot quando a chave não está setada
@@ -312,6 +313,7 @@ const _markOrderPaid = async (orderId, paymentIntentId) => {
      RETURNING o.status, target.previous_status`,
     [orderId, paymentIntentId || null],
   );
+  if (result.rows[0]) await bookingService.confirmForOrder(orderId);
   const enteredAwaiting =
     Number(result.rows[0]?.previous_status) === 10 &&
     Number(result.rows[0]?.status) === 1;

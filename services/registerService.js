@@ -18,6 +18,11 @@ const find = async (cnpj) => {
   return result.data || null;
 };
 
+const normalizeBusinessSegment = (value) => {
+  const v = String(value || "").trim().toLowerCase();
+  return v === "servicos" ? "servicos" : "alimentacao";
+};
+
 const create = async (data) => {
   const { name, email, password } = data;
   const hashedPassword = await hashPassword(password);
@@ -27,27 +32,43 @@ const create = async (data) => {
 
 const createCompanies = async (data) => {
   const { name, description, phone, user, type } = data;
+  const businessSegment = normalizeBusinessSegment(data.business_segment);
 
   // 1. Cria a empresa no PostgreSQL
   const hasSlug = await columnExists("companies", "slug");
+  const hasBusinessSegment = await columnExists("companies", "business_segment");
   const result = hasSlug
     ? await insertWithUniqueCompanySlug({
         db: pool,
         name,
         insert: (slug) =>
-          pool.query(
-            `INSERT INTO companies (name, description, phone, slug)
-             VALUES ($1, $2, $3, $4)
-             RETURNING *`,
-            [name, description, phone, slug],
-          ),
+          hasBusinessSegment
+            ? pool.query(
+                `INSERT INTO companies (name, description, phone, slug, business_segment)
+                 VALUES ($1, $2, $3, $4, $5)
+                 RETURNING *`,
+                [name, description, phone, slug, businessSegment],
+              )
+            : pool.query(
+                `INSERT INTO companies (name, description, phone, slug)
+                 VALUES ($1, $2, $3, $4)
+                 RETURNING *`,
+                [name, description, phone, slug],
+              ),
       })
-    : await pool.query(
-        `INSERT INTO companies (name, description, phone)
-         VALUES ($1, $2, $3)
-         RETURNING *`,
-        [name, description, phone],
-      );
+    : hasBusinessSegment
+      ? await pool.query(
+          `INSERT INTO companies (name, description, phone, business_segment)
+           VALUES ($1, $2, $3, $4)
+           RETURNING *`,
+          [name, description, phone, businessSegment],
+        )
+      : await pool.query(
+          `INSERT INTO companies (name, description, phone)
+           VALUES ($1, $2, $3)
+           RETURNING *`,
+          [name, description, phone],
+        );
 
   const company = result.rows[0];
 

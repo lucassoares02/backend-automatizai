@@ -2,6 +2,7 @@ const pool = require("../db");
 const orderWebhookService = require("./orderWebhookService");
 const campaignsService = require("./campaignsService");
 const couponsService = require("./couponsService");
+const bookingService = require("./bookingService");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 const { columnExists, tableExists } = require("../helpers/schema");
 const STATUS_IN_PROGRESS = [1, 2, 3, 4, 8];
@@ -96,14 +97,43 @@ const ORDER_SELECT = `
          ) AS items,
          (SELECT COUNT(*) FROM order_messages m
           WHERE m.order_id = o.id AND m.sender_type = 'customer' AND m.is_read = false) AS unread_messages_count
+         /*APPOINTMENT*/
   FROM orders o
   JOIN clients c ON c.id = o.client_id
   LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id
 `;
 
+// Pedido de serviço: o agendamento vem junto para os cards/detalhes mostrarem
+// serviço, profissional e horário sem outra chamada.
+const APPOINTMENT_JSON = `,
+         (SELECT json_build_object(
+            'id', a.id,
+            'status', a.status,
+            'starts_at', a.starts_at,
+            'ends_at', a.ends_at,
+            'hold_expires_at', a.hold_expires_at,
+            'menu_item_id', a.menu_item_id,
+            'service_name', mi.name,
+            'service_image_url', mi.image_url,
+            'professional_id', a.professional_id,
+            'professional_name', p.name,
+            'professional_photo_url', p.photo_url,
+            'rescheduled_count', a.rescheduled_count,
+            'cancel_reason', a.cancel_reason
+          )
+          FROM appointments a
+          LEFT JOIN menu_items mi ON mi.id = a.menu_item_id
+          LEFT JOIN professionals p ON p.id = a.professional_id
+          WHERE a.order_id = o.id
+          ORDER BY a.id DESC
+          LIMIT 1) AS appointment`;
+
+const _orderSelect = async () =>
+  ORDER_SELECT.replace("/*APPOINTMENT*/", (await tableExists("appointments")) ? APPOINTMENT_JSON : "");
+
 const findByCompany = async (companyId) => {
   const result = await pool.query(
-    `${ORDER_SELECT}
+    `${await _orderSelect()}
      WHERE o.company_id = $1
      GROUP BY o.id, c.name, c.phone, pm.label, pm.type
      ORDER BY o.created_at DESC`,
@@ -114,7 +144,7 @@ const findByCompany = async (companyId) => {
 
 const findTodayByCompany = async (companyId) => {
   const result = await pool.query(
-    `${ORDER_SELECT}
+    `${await _orderSelect()}
      WHERE o.company_id = $1
        AND ${IS_TODAY_BRT}
      GROUP BY o.id, c.name, c.phone, pm.label, pm.type
@@ -126,7 +156,7 @@ const findTodayByCompany = async (companyId) => {
 
 const find = async (id) => {
   const result = await pool.query(
-    `${ORDER_SELECT}
+    `${await _orderSelect()}
      WHERE o.id = $1
      GROUP BY o.id, c.name, c.phone, pm.label, pm.type`,
     [id],
@@ -496,6 +526,8 @@ const upsertCart = async ({ order: orderId, company_id, client_id, items }) => {
 
 // `options.onlyFrom`: só aplica a mudança se o pedido ainda estiver nesse status
 // (usado pelo aceite automático para não sobrescrever uma ação manual da loja).
+// `options.appointmentStatus`: 'no_show' marca o agendamento como "não
+// compareceu" ao cancelar o pedido de serviço.
 const updateStatus = async (id, status, cancelReason, options = {}) => {
   const hasStockReservation = await _hasStockReservationSchema();
   const client = await pool.connect();
@@ -593,11 +625,18 @@ const updateStatus = async (id, status, cancelReason, options = {}) => {
       [id, String(status), cancelReason ?? null],
     );
 
+    // Pedido de serviço: o agendamento acompanha a etapa (cancelar libera o horário).
+    await bookingService.syncOrderStatus(client, id, status, {
+      appointmentStatus: options.appointmentStatus ?? null,
+    });
+
     await client.query("COMMIT");
 
     // Fire-and-forget: o service decide se o status dispara e nunca lança —
     // falha do n8n não pode impactar a atualização do pedido.
-    orderWebhookService.notifyStatusChange(order, Number(status));
+    orderWebhookService.notifyStatusChange(order, Number(status), {
+      noShow: options.appointmentStatus === "no_show",
+    });
     if (Number(status) === 1 && Number(current.status) !== 1) {
       orderWebhookService.notifyAwaitingOrder(order.id);
     }
