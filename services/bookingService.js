@@ -9,15 +9,22 @@
 const pool = require("../db");
 const campaignsService = require("./campaignsService");
 const couponsService = require("./couponsService");
+const productOptionsService = require("./productOptionsService");
 const orderWebhookService = require("./orderWebhookService");
 const orderAutoAcceptService = require("./orderAutoAcceptService");
 const { columnExists, tableExists } = require("../helpers/schema");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 const { UUID_RE } = require("../helpers/companySlug");
 const slots = require("../helpers/bookingSlots");
+const { hasStockControlSchema, reserveStock } = require("../helpers/stockReservation");
+const { meetsInclusiveLeadDays } = require("../helpers/preorder");
 
 const DEFAULTS = { step: 15, notice: 60, maxDays: 30, cancelWindow: 24 };
 const MAX_DAYS_PER_REQUEST = 14;
+// Produtos levados junto com o serviço (retirados no atendimento).
+const MAX_ADDON_LINES = 30;
+const MAX_ADDON_QUANTITY = 99;
+const ADDON_PICKUP_NOTE = "Retirar junto com o atendimento";
 const ACTIVE_STATUSES = ["hold", "confirmed", "in_progress"];
 const ONLINE_PROVIDERS = ["pagarme", "stripe"];
 // A reserva de um pedido online dura o PIX inteiro + folga. Enquanto houver uma
@@ -442,6 +449,87 @@ const _parseStartsAt = (value) => {
 };
 
 /**
+ * Produtos que o cliente leva junto com o serviço. Preço, opções, disponibilidade
+ * e encomenda (antecedência até o dia do atendimento) resolvidos no servidor —
+ * o payload só informa produto, quantidade, opções e observação.
+ */
+const _resolveAddOnProducts = async ({ companyId, products, startsAt, campaignPrices }) => {
+  if (products == null) return [];
+  if (!Array.isArray(products)) throw _error(400, "Lista de produtos inválida.");
+  if (products.length > MAX_ADDON_LINES) throw _error(400, "Produtos demais para um agendamento.");
+  if (!products.length) return [];
+
+  const lines = products.map((raw) => {
+    const menuItemId = Number(raw?.menu_item_id);
+    const quantity = Number(raw?.quantity ?? 1);
+    if (!Number.isInteger(menuItemId) || menuItemId <= 0) throw _error(400, "Produto inválido.");
+    if (!Number.isInteger(quantity) || quantity <= 0 || quantity > MAX_ADDON_QUANTITY) {
+      throw _error(400, "A quantidade de cada produto deve ser um número inteiro maior que zero.");
+    }
+    const notes = raw?.notes ? String(raw.notes).trim().slice(0, 300) || null : null;
+    return { menuItemId, quantity, notes, options: Array.isArray(raw?.options) ? raw.options : [] };
+  });
+
+  const [hasPreorder, hasItemType] = await Promise.all([
+    Promise.all([columnExists("menu_items", "preorder_only"), columnExists("menu_items", "preorder_lead_days")]).then(
+      (cols) => cols.every(Boolean),
+    ),
+    columnExists("menu_items", "item_type"),
+  ]);
+  const ids = [...new Set(lines.map((l) => l.menuItemId))];
+  const rows = await pool.query(
+    `SELECT id, name, price
+            ${hasPreorder ? ", COALESCE(preorder_only, false) AS preorder_only, preorder_lead_days" : ""}
+     FROM menu_items
+     WHERE company_id = $1 AND id = ANY($2::int[])
+       AND available = true AND deleted_at IS NULL
+       ${hasItemType ? "AND item_type <> 'service'" : ""}`,
+    [companyId, ids],
+  );
+  const byId = new Map(rows.rows.map((r) => [Number(r.id), r]));
+
+  const resolved = [];
+  for (const line of lines) {
+    const product = byId.get(line.menuItemId);
+    if (!product) throw _error(409, "Um dos produtos escolhidos não está mais disponível.");
+    if (
+      product.preorder_only === true &&
+      !meetsInclusiveLeadDays({
+        orderedAt: new Date(),
+        scheduledAt: startsAt,
+        leadDays: Number(product.preorder_lead_days || 1),
+      })
+    ) {
+      throw _error(
+        400,
+        `"${product.name}" é sob encomenda e não fica pronto até a data do atendimento.`,
+        "PREORDER_LEAD_TIME_NOT_MET",
+      );
+    }
+    let selection;
+    try {
+      selection = await productOptionsService.validateSelections(line.menuItemId, line.options);
+    } catch (err) {
+      throw _error(400, `${product.name}: ${err.message}`);
+    }
+    const base = Number(product.price ?? 0);
+    const campaign = campaignPrices.get(line.menuItemId);
+    const baseUnit = campaign ? Math.min(base, campaign.final_price) : base;
+    const unitPrice = Number((baseUnit + selection.extraTotalPerUnit).toFixed(2));
+    resolved.push({
+      menu_item_id: line.menuItemId,
+      name: product.name,
+      quantity: line.quantity,
+      unit_price: unitPrice,
+      subtotal: Number((unitPrice * line.quantity).toFixed(2)),
+      notes: [ADDON_PICKUP_NOTE, line.notes].filter(Boolean).join(" · "),
+      options: selection.snapshot,
+    });
+  }
+  return resolved;
+};
+
+/**
  * POST /public/bookings — cria o pedido do serviço e reserva o horário.
  * Pagamento online: pedido em Pagamento Pendente (10) + agendamento 'hold' com
  * expiração. Pagamento no local: pedido em Aguardando (1) + 'confirmed'.
@@ -496,6 +584,19 @@ const createBookingOrder = async (data) => {
   const notes = data.notes ? String(data.notes).trim().slice(0, 500) || null : null;
   const couponCode = data.coupon_code ? String(data.coupon_code).trim() : null;
   const activeCampaignPrices = await campaignsService.getActivePricesMap(companyId);
+  const addOns = await _resolveAddOnProducts({
+    companyId,
+    products: data.products,
+    startsAt,
+    campaignPrices: activeCampaignPrices,
+  });
+  const addOnsSubtotal = Number(addOns.reduce((sum, item) => sum + item.subtotal, 0).toFixed(2));
+  const stockRequirements = new Map();
+  if (addOns.length && (await hasStockControlSchema())) {
+    for (const item of addOns) {
+      stockRequirements.set(item.menu_item_id, (stockRequirements.get(item.menu_item_id) || 0) + item.quantity);
+    }
+  }
 
   const client = await pool.connect();
   let releasedOrders = [];
@@ -523,6 +624,9 @@ const createBookingOrder = async (data) => {
     const serviceFeeAmount = Number(process.env.PUBLIC_SERVICE_FEE_AMOUNT ?? 1.49);
     const serviceFee = paymentProvider ? Number(serviceFeeAmount.toFixed(2)) : 0;
 
+    if (stockRequirements.size) await reserveStock(client, companyId, stockRequirements);
+    const subtotal = Number((unitPrice + addOnsSubtotal).toFixed(2));
+
     let couponId = null;
     let couponDiscount = 0;
     if (couponCode) {
@@ -530,14 +634,17 @@ const createBookingOrder = async (data) => {
         companyId,
         code: couponCode,
         clientId,
-        subtotal: unitPrice,
+        subtotal,
         deliveryFee: 0,
-        items: [{ menu_item_id: Number(service.id), subtotal: unitPrice }],
+        items: [
+          { menu_item_id: Number(service.id), subtotal: unitPrice },
+          ...addOns.map((item) => ({ menu_item_id: item.menu_item_id, subtotal: item.subtotal })),
+        ],
       });
       couponId = redeemed.coupon_id;
       couponDiscount = Number(redeemed.discount || 0);
     }
-    const total = Number(Math.max(0, unitPrice + serviceFee - couponDiscount).toFixed(2));
+    const total = Number(Math.max(0, subtotal + serviceFee - couponDiscount).toFixed(2));
     const initialStatus = paymentProvider ? 10 : 1;
     const tag = await generateUniqueOrderTag(client);
 
@@ -545,7 +652,7 @@ const createBookingOrder = async (data) => {
       companyId,
       clientId,
       notes,
-      unitPrice,
+      subtotal,
       total,
       paymentMethodId,
       startsAt,
@@ -560,6 +667,12 @@ const createBookingOrder = async (data) => {
       params.push(couponId, couponDiscount);
       extraCols = ", coupon_id, coupon_discount";
       extraValues = `, $${params.length - 1}, $${params.length}`;
+    }
+    if (stockRequirements.size) {
+      const reservation = Array.from(stockRequirements, ([menu_item_id, quantity]) => ({ menu_item_id, quantity }));
+      params.push(true, JSON.stringify(reservation));
+      extraCols += ", stock_reserved, stock_reservation_items";
+      extraValues += `, $${params.length - 1}, $${params.length}`;
     }
     // delivery_type FALSE = atendimento no estabelecimento (sem entrega).
     const orderRes = await client.query(
@@ -582,6 +695,31 @@ const createBookingOrder = async (data) => {
        VALUES ($1, $2, $3, 1, $4, $4, $5) RETURNING id`,
       [order.id, service.id, service.name, unitPrice, `Profissional: ${professional.name}`],
     );
+
+    for (const item of addOns) {
+      const addOnRes = await client.query(
+        `INSERT INTO order_items (order_id, menu_item_id, item_name, quantity, item_price, subtotal, notes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+        [order.id, item.menu_item_id, item.name, item.quantity, item.unit_price, item.subtotal, item.notes],
+      );
+      for (const opt of item.options) {
+        await client.query(
+          `INSERT INTO order_item_options
+             (order_item_id, menu_item_id, group_id, group_name, option_id, option_name, additional_price, quantity)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [
+            addOnRes.rows[0].id,
+            item.menu_item_id,
+            opt.group_id ?? null,
+            opt.group_name,
+            opt.option_id ?? null,
+            opt.option_name,
+            Number(opt.additional_price ?? 0),
+            Math.max(1, Number(opt.quantity ?? 1)),
+          ],
+        );
+      }
+    }
 
     const slot = chosen.slot;
     const appointmentRes = await client.query(

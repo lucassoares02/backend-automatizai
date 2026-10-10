@@ -17,6 +17,10 @@ const { generateUniqueOrderTag } = require("../helpers/orderTag");
 const { columnExists, tableExists } = require("../helpers/schema");
 const { UUID_RE: _UUID_RE } = require("../helpers/companySlug");
 const {
+  hasStockControlSchema: _hasStockControlSchema,
+  reserveStock: _reserveStock,
+} = require("../helpers/stockReservation");
+const {
   inclusiveLeadDayOffset,
   meetsInclusiveLeadDays,
 } = require("../helpers/preorder");
@@ -29,16 +33,6 @@ const toNumber = (value) => {
   return Number.isFinite(n) ? n : null;
 };
 
-const _hasStockControlSchema = async () => {
-  const [unlimited, quantity, threshold, reserved, reservationItems] = await Promise.all([
-    columnExists("menu_items", "stock_unlimited"),
-    columnExists("menu_items", "stock_quantity"),
-    columnExists("menu_items", "low_stock_threshold"),
-    columnExists("orders", "stock_reserved"),
-    columnExists("orders", "stock_reservation_items"),
-  ]);
-  return unlimited && quantity && threshold && reserved && reservationItems;
-};
 
 const _hasPreorderSchema = async () => {
   const [preorderOnly, leadDays] = await Promise.all([
@@ -132,45 +126,6 @@ const _collectStockRequirements = (items) => {
   return requiredByItem;
 };
 
-const _reserveStock = async (client, companyId, requirements) => {
-  for (const [menuItemId, quantity] of requirements) {
-    const reserved = await client.query(
-      `UPDATE menu_items
-       SET stock_quantity = CASE
-         WHEN COALESCE(stock_unlimited, true) THEN stock_quantity
-         ELSE stock_quantity - $3
-       END
-       WHERE id = $1
-         AND company_id = $2
-         AND available = true
-         AND deleted_at IS NULL
-         AND (
-           COALESCE(stock_unlimited, true)
-           OR COALESCE(stock_quantity, 0) >= $3
-         )
-       RETURNING id, name, stock_unlimited, stock_quantity, low_stock_threshold`,
-      [menuItemId, companyId, quantity],
-    );
-    if (reserved.rows[0]) continue;
-
-    const product = await client.query(
-      `SELECT name
-       FROM menu_items
-       WHERE id = $1 AND company_id = $2
-       LIMIT 1`,
-      [menuItemId, companyId],
-    );
-    const name = product.rows[0]?.name;
-    throw Object.assign(
-      new Error(
-        name
-          ? `"${name}" não possui unidades suficientes para este pedido.`
-          : "Um produto do carrinho não está mais disponível.",
-      ),
-      { status: 409, code: "STOCK_UNAVAILABLE" },
-    );
-  }
-};
 
 // company_opening_hours.weekday segue a convenção do portal: 1=segunda … 7=domingo.
 // JS Date.getDay() usa 0=domingo … 6=sábado. Segunda–sábado coincidem (1–6); só o
