@@ -5,7 +5,7 @@ const pool = require("../db");
 // `nome_fantasia`/`razao_social`/`cnpj`). O CompaniesModel do Portal lê `name`.
 const findAllCompanies = async () => {
   const result = await pool.query(
-    `SELECT id, name
+    `SELECT id, name, business_segment
        FROM companies
       ORDER BY name ASC NULLS LAST`,
   );
