@@ -48,11 +48,16 @@ const _hasPreorderSchema = async () => {
   return preorderOnly && leadDays;
 };
 
-const _hasServiceSchema = async () => {
-  const cols = await Promise.all(
+const _serviceSchemaColumns = async () => {
+  const [itemType, durationMinutes, bufferMinutes, priceType] = await Promise.all(
     ["item_type", "duration_minutes", "buffer_minutes", "price_type"].map((c) => columnExists("menu_items", c)),
   );
-  return cols.every(Boolean);
+  return { itemType, durationMinutes, bufferMinutes, priceType };
+};
+
+const _hasServiceSchema = async () => {
+  const cols = await _serviceSchemaColumns();
+  return Object.values(cols).every(Boolean);
 };
 
 const _hasProfessionalsSchema = async () => {
@@ -295,7 +300,7 @@ const getCompanyPublicMenu = async (companyRef) => {
     columnExists("menu_items", "dietary_restrictions"),
     _hasStockControlSchema(),
     _hasPreorderSchema(),
-    _hasServiceSchema(),
+    _serviceSchemaColumns(),
     tableExists("menu_item_images"),
     _hasProfessionalsSchema(),
   ]);
@@ -320,9 +325,12 @@ const getCompanyPublicMenu = async (companyRef) => {
     ? `COALESCE((SELECT json_agg(img.url ORDER BY img.position, img.id)
                  FROM menu_item_images img WHERE img.menu_item_id = mi.id), '[]'::json) AS images,`
     : `'[]'::json AS images,`;
-  const serviceSelect = hasServices
-    ? "mi.item_type, mi.duration_minutes, mi.buffer_minutes, mi.price_type,"
-    : "'product'::text AS item_type, NULL::integer AS duration_minutes, 0 AS buffer_minutes, 'fixed'::text AS price_type,";
+  const serviceSelect = [
+    hasServices.itemType ? "mi.item_type" : "'product'::text AS item_type",
+    hasServices.durationMinutes ? "mi.duration_minutes" : "NULL::integer AS duration_minutes",
+    hasServices.bufferMinutes ? "mi.buffer_minutes" : "0 AS buffer_minutes",
+    hasServices.priceType ? "mi.price_type" : "'fixed'::text AS price_type",
+  ].join(", ") + ",";
 
   const menuRes = await pool.query(
     `SELECT mi.id, mi.name, mi.description, mi.price, mi.image_url, mi.category_id,
@@ -981,7 +989,7 @@ const createPublicOrder = async (data) => {
     // que faz o desconto "valer de verdade" no valor cobrado do cliente.
     const activeCampaignPrices = await campaignsService.getActivePricesMap(company_id);
     // Serviços não entram no carrinho (agendamento é outro fluxo).
-    const serviceFilter = (await _hasServiceSchema()) ? "AND item_type <> 'service'" : "";
+    const serviceFilter = (await columnExists("menu_items", "item_type")) ? "AND item_type <> 'service'" : "";
     const r = await pool.query(
       `SELECT id, price
        FROM menu_items
