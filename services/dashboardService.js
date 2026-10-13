@@ -1,14 +1,5 @@
 const pool = require("../db");
-
-// company_opening_hours.weekday usa a convenção do portal (1=segunda … 7=domingo),
-// enquanto Date.getDay() usa 0=domingo … 6=sábado. Segunda–sábado coincidem (1–6);
-// só o domingo diverge (getDay()=0 vs weekday=7). Casa o dia atual de forma robusta
-// às duas convenções — antes o painel mostrava a loja FECHADA aos domingos.
-const _isTodayWeekday = (rowWeekday, jsDay) => {
-  const wd = Number(rowWeekday);
-  if (jsDay === 0) return wd === 0 || wd === 7; // domingo
-  return wd === jsDay; // segunda(1) … sábado(6)
-};
+const { resolveOpenStatus } = require("../helpers/openStatus");
 
 // Lateral join that resolves the latest status from order_status_history.
 // Orders without history are treated as status 1 (AGUARDANDO).
@@ -345,21 +336,9 @@ const getDashboard = async (companyId) => {
   const company = companyResult.rows[0];
   if (!company) return null;
 
-  // ── Compute is_open from opening hours ─────────────────────────────────────
-  const now = new Date();
-  const weekday = now.getDay(); // 0=Sun..6=Sat
-  const hh = String(now.getHours()).padStart(2, "0");
-  const mm = String(now.getMinutes()).padStart(2, "0");
-  const ss = String(now.getSeconds()).padStart(2, "0");
-  const currentTime = `${hh}:${mm}:${ss}`;
-  const todayHours = openingHoursResult.rows.find((h) => _isTodayWeekday(h.weekday, weekday));
-  let scheduleOpen = false;
-  if (todayHours && !todayHours.is_closed && todayHours.opens_at && todayHours.closes_at) {
-    scheduleOpen = currentTime >= todayHours.opens_at && currentTime <= todayHours.closes_at;
-  }
-  // Override manual (companies.manual_open): TRUE/FALSE forçam; NULL segue horário.
-  const manualOpen = company.manual_open;
-  const isOpen = manualOpen === true || manualOpen === false ? manualOpen : scheduleOpen;
+  // ── Status aberto/fechado (horários + override manual) ─────────────────────
+  const { is_open: isOpen, schedule_open: scheduleOpen, manual_open: manualOpen } =
+    resolveOpenStatus(openingHoursResult.rows, company.manual_open);
 
   const today = todayStatsResult.rows[0];
   const month = monthStatsResult.rows[0];

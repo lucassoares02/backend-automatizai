@@ -25,6 +25,7 @@ const clients = require("../controllers/clientsController");
 const publicCtrl = require("../controllers/publicController");
 const dashboard = require("../controllers/dashboardController");
 const reports = require("../controllers/reportsController");
+const atendimentoUso = require("../controllers/atendimentoUsoController");
 const address = require("../controllers/addressController");
 const promotions = require("../controllers/promotionsController");
 const campaigns = require("../controllers/campaignsController");
@@ -114,6 +115,7 @@ router.get("/companies", authMiddleware, companies.find);
 // Declarado antes de "/companies/:company" para não ser capturado pelo param.
 router.get("/companies/all", authMiddleware, requireSystemAdmin, companies.findAll);
 router.patch("/companies", authMiddleware, authorizeCompanyBody("id"), companies.update);
+router.get("/companies/:companyId/open-status", authMiddleware, authorizeCompanyParam("companyId"), companies.getOpenStatus);
 router.patch("/companies/:companyId/open-status", authMiddleware, authorizeCompanyParam("companyId"), companies.setOpenStatus);
 router.patch("/companies/:companyId/onboarding-completed", authMiddleware, authorizeCompanyParam("companyId"), companies.markOnboardingCompleted);
 router.get("/companies/:company", authMiddleware, authorizeCompanyParam("company"), companies.findId);
@@ -339,6 +341,9 @@ router.get("/dashboard/:companyId", authMiddleware, authorizeCompanyParam("compa
 //reports (relatório operacional por período)
 router.get("/reports/:companyId/services", authMiddleware, authorizeCompanyParam("companyId"), reports.getServicesReport);
 router.get("/reports/:companyId", authMiddleware, authorizeCompanyParam("companyId"), reports.getReport);
+
+//atendimento (uso e custo do Arbian no WhatsApp; empresa validada no controller via user_companies)
+router.get("/atendimento/uso", authMiddleware, atendimentoUso.getUsage);
 
 // promotions / combos
 router.get("/promotions/company/:companyId", authMiddleware, authorizeCompanyParam("companyId"), promotions.findByCompany);

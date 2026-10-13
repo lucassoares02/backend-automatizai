@@ -1,4 +1,5 @@
 const pool = require("../db");
+const { resolveOpenStatus } = require("../helpers/openStatus");
 
 // Lista TODAS as lojas (uso do admin do sistema no switcher do header).
 // A tabela `companies` usa a coluna `name` como nome da loja (não existe
@@ -110,6 +111,22 @@ const setOpenStatus = async (companyId, manualOpen) => {
   return result.rows[0] || null;
 };
 
+// Status atual (aberto/fechado) da loja: horários + override manual. Consulta
+// leve usada pelo header do portal (sino), sem carregar o dashboard inteiro.
+const getOpenStatus = async (companyId) => {
+  const [companyResult, hoursResult] = await Promise.all([
+    pool.query("SELECT id, manual_open FROM companies WHERE id = $1", [companyId]),
+    pool.query(
+      `SELECT weekday, opens_at, closes_at, is_closed
+         FROM company_opening_hours WHERE company_id = $1`,
+      [companyId],
+    ),
+  ]);
+  const company = companyResult.rows[0];
+  if (!company) return null;
+  return { id: company.id, ...resolveOpenStatus(hoursResult.rows, company.manual_open) };
+};
+
 // Marca o onboarding como concluído (uma única vez). Idempotente: preserva a
 // data original se já estiver marcado. Depois disso o portal não exibe mais o
 // wizard no dashboard, mesmo que alguma etapa fique incompleta depois.
@@ -124,4 +141,4 @@ const markOnboardingCompleted = async (companyId) => {
   return result.rows[0] || null;
 };
 
-module.exports = { find, findId, findAllCompanies, findProvidersCity, update, setOpenStatus, markOnboardingCompleted };
+module.exports = { find, findId, findAllCompanies, findProvidersCity, update, getOpenStatus, setOpenStatus, markOnboardingCompleted };

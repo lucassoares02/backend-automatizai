@@ -84,6 +84,19 @@ const update = async (req, res) => {
   }
 };
 
+// Status atual da loja: { id, is_open, schedule_open, manual_open }.
+const getOpenStatus = async (req, res) => {
+  const companyId = Number(req.params.companyId);
+  try {
+    const status = await service.getOpenStatus(companyId);
+    if (!status) return res.status(404).json({ error: "Empresa não encontrada" });
+    return res.status(200).json(status);
+  } catch (error) {
+    console.error("Error fetching open status:", error);
+    return res.status(500).json({ error: "Failed to fetch open status" });
+  }
+};
+
 // Abrir/fechar a loja manualmente. Body: { manual_open: true | false | null }
 // true/false forçam o status; null volta a seguir os horários cadastrados.
 const setOpenStatus = async (req, res) => {
@@ -114,4 +127,4 @@ const markOnboardingCompleted = async (req, res) => {
   }
 };
 
-module.exports = { find, findId, findAll, findProvidersCity, update, setOpenStatus, markOnboardingCompleted };
+module.exports = { find, findId, findAll, findProvidersCity, update, getOpenStatus, setOpenStatus, markOnboardingCompleted };
