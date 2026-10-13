@@ -10,10 +10,12 @@ if git diff --cached --quiet; then
 else
     echo "💾 Criando commit..."
     git commit -m "add changes"
-
-    echo "🚀 Enviando para o Git..."
-    git push origin main
 fi
+
+# Sempre envia: um commit local de uma execução anterior (push que falhou)
+# ficaria de fora do deploy.
+echo "🚀 Enviando para o Git..."
+git push origin main
 
 echo "🔐 Conectando ao servidor..."
 ssh -x root@147.93.12.83 "cd /opt/arbian && ./deploy.sh"
