@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const service = require("../services/atendimentoUsoService");
 const { _testing: ctrl } = require("../controllers/atendimentoUsoController");
 
-const { buildResponse, variationPct, costPer100, todayInSaoPaulo } = service._testing;
+const { buildResponse, buildRawResponse, variationPct, costPer100, todayInSaoPaulo } = service._testing;
 
 test("valida mês no formato YYYY-MM", () => {
   assert.equal(service.isValidMonth("2026-10"), true);
@@ -69,4 +69,29 @@ test("empresa vem da sessão e não aceita negócio de outra dona", () => {
   assert.equal(ctrl.resolveCompanyId({ query: { company_id: "30" }, userCompanies: [25, 30] }), 30);
   assert.equal(ctrl.resolveCompanyId({ query: { company_id: "25" }, userCompanies: [7] }), null);
   assert.equal(ctrl.resolveCompanyId({ query: { company_id: "abc" }, userCompanies: [25] }), null);
+});
+
+test("dados brutos devolvem todas as colunas e totais numéricos", () => {
+  const res = buildRawResponse({
+    month: "2026-10",
+    rows: [{ id: 1, execution_id: "e1", input_tokens: 120, cost_total_brl: "0.0012" }],
+    totalRows: "1",
+    totals: [{ coluna: "input_tokens", total: "120" }, { coluna: "cost_total_brl", total: "0.0012" }],
+  });
+  assert.equal(res.total_linhas, 1);
+  assert.deepEqual(res.colunas, ["id", "execution_id", "input_tokens", "cost_total_brl"]);
+  assert.deepEqual(res.totais, { input_tokens: 120, cost_total_brl: 0.0012 });
+  assert.equal(res.linhas.length, 1);
+
+  const empty = buildRawResponse({ month: "2026-08", rows: [], totalRows: "0", totals: [] });
+  assert.deepEqual(empty.colunas, []);
+  assert.deepEqual(empty.totais, {});
+});
+
+test("dados brutos são só para admin do sistema", async () => {
+  const { getRawUsage } = require("../controllers/atendimentoUsoController");
+  let status;
+  const res = { status: (s) => { status = s; return { json: () => {} }; } };
+  await getRawUsage({ query: { company_id: "25", mes: "2026-10" }, userCompanies: [25], isSystemAdmin: false }, res);
+  assert.equal(status, 403);
 });

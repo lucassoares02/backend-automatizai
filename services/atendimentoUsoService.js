@@ -133,6 +133,67 @@ const buildResponse = ({ month, today, summaryRow, dailyRows, firstMonth }) => {
   };
 };
 
+// Dados brutos (só admin do sistema): as linhas de ai_usage_turns do mês, com
+// todas as colunas, para conferir tokens e custo por etapa. As colunas não são
+// fixadas aqui de propósito: o que existir na tabela aparece na tela.
+const RAW_LIMIT = 5000;
+
+const RAW_RANGE = `
+  company_id = $1
+  AND created_at >= ($2::date::timestamp AT TIME ZONE '${TZ}')
+  AND created_at <  (($2::date + interval '1 month')::timestamp AT TIME ZONE '${TZ}')`;
+
+const RAW_ROWS_SQL = `
+SELECT * FROM ai_usage_turns
+WHERE ${RAW_RANGE}
+ORDER BY created_at DESC
+LIMIT ${RAW_LIMIT}`;
+
+// Totais do mês inteiro (não só das linhas devolvidas) de toda coluna numérica
+// de tokens ou custo, sem depender do nome exato das colunas.
+const RAW_TOTALS_SQL = `
+SELECT kv.key AS coluna, sum((kv.value #>> '{}')::numeric) AS total
+FROM ai_usage_turns t, jsonb_each(to_jsonb(t)) kv
+WHERE ${RAW_RANGE.replace(/company_id/g, "t.company_id").replace(/created_at/g, "t.created_at")}
+  AND jsonb_typeof(kv.value) = 'number'
+  AND kv.key ~* '(token|cost|custo)'
+GROUP BY kv.key
+ORDER BY kv.key`;
+
+const RAW_COUNT_SQL = `SELECT count(*) AS total FROM ai_usage_turns WHERE ${RAW_RANGE}`;
+
+const buildRawResponse = ({ month, rows, totalRows, totals }) => {
+  const list = rows || [];
+  return {
+    mes: month,
+    total_linhas: Number(totalRows) || 0,
+    limite: RAW_LIMIT,
+    colunas: list.length ? Object.keys(list[0]) : [],
+    totais: Object.fromEntries(
+      (totals || []).map((r) => [r.coluna, Number(r.total) || 0])
+    ),
+    linhas: list,
+  };
+};
+
+const getRawUsage = async (companyId, month) => {
+  const id = parseInt(companyId, 10);
+  const params = [id, `${month}-01`];
+
+  const [rowsResult, countResult, totalsResult] = await Promise.all([
+    pool.query(RAW_ROWS_SQL, params),
+    pool.query(RAW_COUNT_SQL, params),
+    pool.query(RAW_TOTALS_SQL, params),
+  ]);
+
+  return buildRawResponse({
+    month,
+    rows: rowsResult.rows,
+    totalRows: countResult.rows[0]?.total,
+    totals: totalsResult.rows,
+  });
+};
+
 /**
  * Uso do atendimento de um negócio no mês `month` (YYYY-MM).
  */
@@ -157,7 +218,8 @@ const getUsage = async (companyId, month) => {
 
 module.exports = {
   getUsage,
+  getRawUsage,
   isValidMonth,
   currentMonth,
-  _testing: { buildResponse, variationPct, costPer100, todayInSaoPaulo },
+  _testing: { buildResponse, buildRawResponse, variationPct, costPer100, todayInSaoPaulo },
 };

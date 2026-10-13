@@ -1,5 +1,5 @@
 const pool = require("../db");
-const { resolveOpenStatus } = require("../helpers/openStatus");
+const { resolveOpenStatus, scheduleOpenAt } = require("../helpers/openStatus");
 
 // Lista TODAS as lojas (uso do admin do sistema no switcher do header).
 // A tabela `companies` usa a coluna `name` como nome da loja (não existe
@@ -102,29 +102,46 @@ const update = async (company) => {
   return result.rows[0];
 };
 
-// Override manual de aberto/fechado. `manualOpen`: true|false força; null segue horário.
+const findOpeningHours = async (companyId) => {
+  const result = await pool.query(
+    `SELECT weekday, opens_at, closes_at, is_closed
+       FROM company_opening_hours WHERE company_id = $1`,
+    [companyId],
+  );
+  return result.rows;
+};
+
+// Exceção manual de aberto/fechado. `manualOpen`: true|false abre/fecha agora;
+// null segue o horário. Pedir o mesmo que o horário já diz não é exceção: grava
+// null (assim "reabrir" uma loja fechada manualmente volta ao horário).
 const setOpenStatus = async (companyId, manualOpen) => {
+  let value = manualOpen;
+  if (value !== null && value === scheduleOpenAt(await findOpeningHours(companyId))) value = null;
   const result = await pool.query(
     "UPDATE companies SET manual_open = $1 WHERE id = $2 RETURNING id, manual_open",
-    [manualOpen, companyId],
+    [value, companyId],
   );
   return result.rows[0] || null;
 };
 
-// Status atual (aberto/fechado) da loja: horários + override manual. Consulta
+// Status atual (aberto/fechado) da loja: horários + exceção manual. Consulta
 // leve usada pelo header do portal (sino), sem carregar o dashboard inteiro.
 const getOpenStatus = async (companyId) => {
-  const [companyResult, hoursResult] = await Promise.all([
+  const [companyResult, hours] = await Promise.all([
     pool.query("SELECT id, manual_open FROM companies WHERE id = $1", [companyId]),
-    pool.query(
-      `SELECT weekday, opens_at, closes_at, is_closed
-         FROM company_opening_hours WHERE company_id = $1`,
-      [companyId],
-    ),
+    findOpeningHours(companyId),
   ]);
   const company = companyResult.rows[0];
   if (!company) return null;
-  return { id: company.id, ...resolveOpenStatus(hoursResult.rows, company.manual_open) };
+  const { manual_expired: expired, ...status } = resolveOpenStatus(hours, company.manual_open);
+  // A exceção manual já terminou (o horário virou): limpa o campo.
+  if (expired) {
+    await pool.query("UPDATE companies SET manual_open = NULL WHERE id = $1 AND manual_open = $2", [
+      company.id,
+      company.manual_open,
+    ]);
+  }
+  return { id: company.id, ...status };
 };
 
 // Marca o onboarding como concluído (uma única vez). Idempotente: preserva a

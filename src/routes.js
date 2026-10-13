@@ -344,6 +344,8 @@ router.get("/reports/:companyId", authMiddleware, authorizeCompanyParam("company
 
 //atendimento (uso e custo do Arbian no WhatsApp; empresa validada no controller via user_companies)
 router.get("/atendimento/uso", authMiddleware, atendimentoUso.getUsage);
+// dados brutos (ai_usage_turns com tokens); só admin do sistema, conferido no controller
+router.get("/atendimento/uso/brutos", authMiddleware, atendimentoUso.getRawUsage);
 
 // promotions / combos
 router.get("/promotions/company/:companyId", authMiddleware, authorizeCompanyParam("companyId"), promotions.findByCompany);

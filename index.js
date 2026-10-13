@@ -16,6 +16,7 @@ const routes = require("./src/routes");
 const swagger = require("./src/swagger");
 const watchdogService = require("./services/watchdogService");
 const cartAbandonmentService = require("./services/cartAbandonmentService");
+const storeScheduleService = require("./services/storeScheduleService");
 const campaignSchedulerService = require("./services/campaignSchedulerService");
 const messageQueueService = require("./services/messageQueueService");
 const pagarmeReconciliationService = require("./services/pagarmeReconciliationService");
@@ -115,6 +116,7 @@ app
     pagarmeReconciliationService.start();
     bookingHoldService.start();
     appointmentReminderService.start();
+    storeScheduleService.start();
   })
   .on("error", (err) => {
     console.error("❌ Server startup error:");

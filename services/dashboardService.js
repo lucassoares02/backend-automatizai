@@ -337,8 +337,12 @@ const getDashboard = async (companyId) => {
   if (!company) return null;
 
   // ── Status aberto/fechado (horários + override manual) ─────────────────────
-  const { is_open: isOpen, schedule_open: scheduleOpen, manual_open: manualOpen } =
-    resolveOpenStatus(openingHoursResult.rows, company.manual_open);
+  const {
+    is_open: isOpen,
+    schedule_open: scheduleOpen,
+    manual_open: manualOpen,
+    next_change_at: nextChangeAt,
+  } = resolveOpenStatus(openingHoursResult.rows, company.manual_open);
 
   const today = todayStatsResult.rows[0];
   const month = monthStatsResult.rows[0];
@@ -446,7 +450,13 @@ const getDashboard = async (companyId) => {
   }
 
   return {
-    company: { ...company, is_open: isOpen, schedule_open: scheduleOpen, manual_open: manualOpen ?? null },
+    company: {
+      ...company,
+      is_open: isOpen,
+      schedule_open: scheduleOpen,
+      manual_open: manualOpen ?? null,
+      next_change_at: nextChangeAt,
+    },
     today: {
       orders: Number(today.orders) || 0,
       revenue: todayRev,

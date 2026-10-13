@@ -18,6 +18,17 @@ const resolveCompanyId = (req) => {
   return null;
 };
 
+// Mês do ?mes= (padrão: mês atual). Devolve { month } ou { error }.
+const resolveMonth = (req) => {
+  const current = service.currentMonth();
+  const month = req.query.mes || current;
+  if (!service.isValidMonth(month)) {
+    return { error: "Mês inválido. Use o formato YYYY-MM." };
+  }
+  if (month > current) return { error: "O mês não pode ser futuro." };
+  return { month };
+};
+
 // GET /atendimento/uso?mes=YYYY-MM[&company_id=N]
 const getUsage = async (req, res) => {
   const companyId = resolveCompanyId(req);
@@ -25,14 +36,8 @@ const getUsage = async (req, res) => {
     return res.status(403).json({ error: "Acesso negado a esta empresa" });
   }
 
-  const current = service.currentMonth();
-  const month = req.query.mes || current;
-  if (!service.isValidMonth(month)) {
-    return res.status(400).json({ error: "Mês inválido. Use o formato YYYY-MM." });
-  }
-  if (month > current) {
-    return res.status(400).json({ error: "O mês não pode ser futuro." });
-  }
+  const { month, error } = resolveMonth(req);
+  if (error) return res.status(400).json({ error });
 
   try {
     const data = await service.getUsage(companyId, month);
@@ -43,4 +48,28 @@ const getUsage = async (req, res) => {
   }
 };
 
-module.exports = { getUsage, _testing: { resolveCompanyId } };
+// GET /atendimento/uso/brutos?mes=YYYY-MM&company_id=N
+// Linhas de ai_usage_turns (tokens, custo por etapa). Só admin do sistema: a
+// tela da dona do negócio não fala em tokens.
+const getRawUsage = async (req, res) => {
+  if (!req.isSystemAdmin) {
+    return res.status(403).json({ error: "Acesso restrito" });
+  }
+  const companyId = resolveCompanyId(req);
+  if (!companyId) {
+    return res.status(400).json({ error: "Informe o company_id" });
+  }
+
+  const { month, error } = resolveMonth(req);
+  if (error) return res.status(400).json({ error });
+
+  try {
+    const data = await service.getRawUsage(companyId, month);
+    return res.status(200).json(data);
+  } catch (err) {
+    console.error("Error fetching raw atendimento usage:", err);
+    return res.status(500).json({ error: "Failed to fetch raw atendimento usage" });
+  }
+};
+
+module.exports = { getUsage, getRawUsage, _testing: { resolveCompanyId } };
