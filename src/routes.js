@@ -342,8 +342,8 @@ router.get("/dashboard/:companyId", authMiddleware, authorizeCompanyParam("compa
 router.get("/reports/:companyId/services", authMiddleware, authorizeCompanyParam("companyId"), reports.getServicesReport);
 router.get("/reports/:companyId", authMiddleware, authorizeCompanyParam("companyId"), reports.getReport);
 
-//atendimento (uso e custo do Arbian no WhatsApp; empresa validada no controller via user_companies)
-router.get("/atendimento/uso", authMiddleware, atendimentoUso.getUsage);
+//atendimento (Custo de IA: uso e custo do Arbian no WhatsApp; só admin do sistema; empresa validada no controller)
+router.get("/atendimento/uso", authMiddleware, requireSystemAdmin, atendimentoUso.getUsage);
 // dados brutos (ai_usage_turns com tokens); só admin do sistema, conferido no controller
 router.get("/atendimento/uso/brutos", authMiddleware, atendimentoUso.getRawUsage);
 

@@ -509,7 +509,10 @@ const _billingAddressFromInput = (value) => {
 // atual da loja e nunca um endereço salvo posteriormente pelo cliente.
 const _buildBillingAddress = (order, explicitAddress) => {
   if (explicitAddress !== undefined && explicitAddress !== null) {
-    return _billingAddressFromInput(explicitAddress);
+    const explicit = _billingAddressFromInput(explicitAddress);
+    if (explicit) return explicit;
+    // Endereço da tela incompleto: usa o do pedido/cliente em vez de recusar a
+    // cobrança (o cliente não tem como corrigir um campo que não vê).
   }
   const { address } = _deliveryAddressSource(order);
   return _toBillingAddress({
