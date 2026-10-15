@@ -10,7 +10,8 @@ const _fmt = (d) => {
 };
 
 // Relatório do período. Aceita ?from=YYYY-MM-DD&to=YYYY-MM-DD; sem datas,
-// assume os últimos 7 dias (hoje inclusive).
+// assume os últimos 7 dias (hoje inclusive). `top` (opcional, 1..50) define o
+// tamanho do ranking de produtos — usado pela comparação de períodos.
 const getReport = async (req, res) => {
   const { companyId } = req.params;
   if (!companyId || isNaN(companyId)) {
@@ -38,7 +39,9 @@ const getReport = async (req, res) => {
   }
 
   try {
-    const data = await service.getReport(companyId, from, to);
+    const data = await service.getReport(companyId, from, to, {
+      top: req.query.top,
+    });
     if (!data) return res.status(404).json({ error: "Company not found" });
     return res.status(200).json(data);
   } catch (error) {

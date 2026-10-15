@@ -46,12 +46,23 @@ const isValidDate = (s) => typeof s === "string" && _DATE_RE.test(s);
 // sob demanda; períodos longos podem ter muitos pedidos).
 const ORDERS_LIMIT = 500;
 
+// Quantidade de produtos no ranking. O padrão (5) atende a tela; a comparação
+// de períodos pede mais itens para casar a variação de cada produto.
+const TOP_PRODUCTS_DEFAULT = 5;
+const TOP_PRODUCTS_MAX = 50;
+const _topLimit = (n) => {
+  const v = parseInt(n, 10);
+  if (!Number.isFinite(v) || v < 1) return TOP_PRODUCTS_DEFAULT;
+  return Math.min(v, TOP_PRODUCTS_MAX);
+};
+
 /**
  * Relatório operacional de um período [from, to] (datas inclusivas, YYYY-MM-DD).
  * Retorna resumo executivo, séries para gráficos e a lista de pedidos do período.
  */
-const getReport = async (companyId, from, to) => {
+const getReport = async (companyId, from, to, { top } = {}) => {
   const id = parseInt(companyId);
+  const topLimit = _topLimit(top);
 
   const [
     companyResult,
@@ -128,7 +139,7 @@ const getReport = async (companyId, from, to) => {
       [id, from, to],
     ),
 
-    // Top 5 produtos por unidades vendidas no período (pedidos válidos).
+    // Top N produtos por unidades vendidas no período (pedidos válidos).
     pool.query(
       `SELECT mi.id, mi.name,
               SUM(oi.quantity)::int    AS quantity,
@@ -143,8 +154,8 @@ const getReport = async (companyId, from, to) => {
          AND oi.menu_item_id IS NOT NULL
        GROUP BY mi.id
        ORDER BY quantity DESC
-       LIMIT 5`,
-      [id, from, to],
+       LIMIT $4`,
+      [id, from, to, topLimit],
     ),
 
     // Lista de pedidos do período (mais recentes primeiro), inclusive cancelados.
