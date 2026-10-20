@@ -54,6 +54,14 @@ const requireSystemAdmin = (req, res, next) => {
   return res.status(403).json({ error: "Acesso restrito a administradores do sistema" });
 };
 
+// Somente admin do sistema autenticado por JWT. Diferente de requireSystemAdmin,
+// NÃO libera o principal de serviço (API Key): ações de alto impacto em todas
+// as empresas precisam de um usuário admin identificado.
+const requireSystemAdminUser = (req, res, next) => {
+  if (!req.isService && req.isSystemAdmin === true) return next();
+  return res.status(403).json({ error: "Acesso restrito a administradores do sistema" });
+};
+
 // Administrador da conta (users.type = 0) ou administrador global. Diferente de
 // requireSystemAdmin, este middleware não libera o principal de serviço: a
 // cotação de entrega é, inicialmente, uma ação manual do comerciante.
@@ -110,6 +118,7 @@ module.exports = {
   getUserCompanyIds,
   getUserAuthContext,
   requireSystemAdmin,
+  requireSystemAdminUser,
   requireAdminUser,
   authorizeCompanyParam,
   authorizeCompanyBody,

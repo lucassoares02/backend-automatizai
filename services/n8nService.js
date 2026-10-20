@@ -60,15 +60,33 @@ const remove = async (instance) => {
 
 const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const duplicate = async (instance, company) => {
-  // 1. Fetch the template workflow
-  const templateRes = await fetch(`${n8nUrl}workflows/sBNtd2jZC8s9YQPO`, {
+/**
+ * Id do workflow "fluxo principal" (template master) no n8n. Todo fluxo de
+ * conexão é uma cópia dele adaptada à instância/empresa.
+ */
+const TEMPLATE_WORKFLOW_ID = "sBNtd2jZC8s9YQPO";
+
+/**
+ * Busca o workflow template (fluxo principal) no n8n.
+ */
+const fetchTemplate = async () => {
+  const templateRes = await fetch(`${n8nUrl}workflows/${TEMPLATE_WORKFLOW_ID}`, {
     headers: _headers,
   });
   if (!templateRes.ok) {
     throw new Error(`N8N template fetch failed [${templateRes.status}]: ${await templateRes.text()}`);
   }
-  const workflow = await templateRes.json();
+  return templateRes.json();
+};
+
+/**
+ * `template` é opcional: quando omitido, busca o fluxo principal no n8n. A
+ * atualização em massa busca uma vez e reaproveita para todas as conexões.
+ */
+const duplicate = async (instance, company, template = null) => {
+  // 1. Fetch the template workflow. Os transformers alteram os nós no lugar,
+  // então um template reaproveitado é clonado para não vazar entre empresas.
+  const workflow = template ? structuredClone(template) : await fetchTemplate();
 
   // 2. Adapt nodes for this instance/company
   const updatedNodes = rewriteWebhookIds(replaceCompanyId(workflow.nodes, company), instance);
@@ -222,8 +240,8 @@ const replaceCompanyId = (nodes, company) => {
  * fluxo (deactivate → delete → fetch template → adapt → create → activate).
  * Mantida como função separada para deixar a intenção clara no controller.
  */
-const update = async (instance, company) => {
-  return duplicate(instance, company);
+const update = async (instance, company, template = null) => {
+  return duplicate(instance, company, template);
 };
 
-module.exports = { duplicate, update, remove };
+module.exports = { duplicate, update, remove, fetchTemplate, TEMPLATE_WORKFLOW_ID };

@@ -4,7 +4,7 @@ const user = require("../controllers/userController");
 const login = require("../controllers/loginController");
 const googleAuth = require("../controllers/googleAuthController");
 const authMiddleware = require("../src/middlewares/middleware");
-const { authorizeCompanyParam, authorizeCompanyBody, authorizeByLookup, requireSystemAdmin, requireAdminUser } = require("../src/middlewares/authorize");
+const { authorizeCompanyParam, authorizeCompanyBody, authorizeByLookup, requireSystemAdmin, requireSystemAdminUser, requireAdminUser } = require("../src/middlewares/authorize");
 const rateLimit = require("../src/middlewares/rateLimit");
 const mailer = require("../controllers/maillerController");
 const register = require("../controllers/registerController");
@@ -17,6 +17,7 @@ const companiessss = require("../controllers/companiessssController");
 const company = require("../controllers/company_address_Controller");
 const payment_methods = require("../controllers/payment_methodsController");
 const connections = require("../controllers/connectionsController");
+const adminFlows = require("../controllers/adminFlowsController");
 const aiIgnoredPhoneNumbers = require("../controllers/aiIgnoredPhoneNumbersController");
 const additional_info = require("../controllers/additional_infoController");
 const orders = require("../controllers/ordersController");
@@ -213,6 +214,9 @@ router.post("/connections", authMiddleware, authorizeCompanyBody("company"), con
 router.patch("/connections/:id", authMiddleware, authorizeConnection, connections.update);
 router.post("/connections/:id/update-workflow", authMiddleware, authorizeConnection, connections.updateWorkflow);
 router.delete("/connections/:id/:instance", authMiddleware, authorizeConnection, connections.remove);
+// Somente admin do sistema (usuário, não API Key): recria o fluxo de TODAS as
+// conexões a partir do fluxo principal (template do n8n).
+router.post("/admin/flows/update-all", authMiddleware, requireSystemAdminUser, adminFlows.updateAll);
 router.post("/search-address", authMiddleware, connections.searchAddress);
 
 //additional_info
