@@ -115,6 +115,24 @@ const remove = async (req, res) => {
 };
 
 /**
+ * Duplicate MenuItems (com galeria, adicionais e profissionais)
+ */
+const duplicate = async (req, res) => {
+  const { id } = req.params;
+  if (!id || isNaN(id)) {
+    return res.status(400).json({ error: "Invalid ID" });
+  }
+  try {
+    const copy = await service.duplicate(id);
+    if (!copy) return res.status(404).json({ error: "MenuItems not found" });
+    return res.status(201).json(copy);
+  } catch (error) {
+    console.error("Error duplicating MenuItems:", error);
+    return res.status(500).json({ error: "Failed to duplicate MenuItems" });
+  }
+};
+
+/**
  * Upload image to MinIO and return the public URL
  */
 const uploadImage = async (req, res) => {
@@ -133,4 +151,4 @@ const uploadImage = async (req, res) => {
   }
 };
 
-module.exports = { findAll, find, findByCompany, create, update, remove, uploadImage, upload };
+module.exports = { findAll, find, findByCompany, create, update, remove, duplicate, uploadImage, upload };

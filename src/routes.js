@@ -73,6 +73,7 @@ const authorizeCoupon = authorizeByLookup("SELECT company_id FROM coupons WHERE 
 const authorizeGoal = authorizeByLookup("SELECT company_id FROM purchase_goals WHERE id = $1", "id");
 const authorizeReview = authorizeByLookup("SELECT company_id FROM order_reviews WHERE id = $1", "id");
 const authorizeDriver = authorizeByLookup("SELECT company_id FROM delivery_drivers WHERE id = $1", "id");
+const authorizeMenuItem = authorizeByLookup("SELECT company_id FROM menu_items WHERE id = $1", "id");
 const authorizeProfessional = authorizeByLookup("SELECT company_id FROM professionals WHERE id = $1", "id");
 const authorizeAppointment = authorizeByLookup("SELECT company_id FROM appointments WHERE id = $1", "id");
 const authorizeConnection = authorizeByLookup("SELECT company_id FROM connections WHERE id = $1", "id");
@@ -164,6 +165,7 @@ router.post("/menu_items/upload-image", authMiddleware, menu_items.upload.single
 router.post("/menu_items", authMiddleware, menu_items.create);
 router.patch("/menu_items", authMiddleware, menu_items.update);
 router.delete("/menu_items/:id", authMiddleware, menu_items.remove);
+router.post("/menu_items/:id/duplicate", authMiddleware, authorizeMenuItem, menu_items.duplicate);
 
 router.get("/company/address/:id", company.find);
 router.patch("/company/address", authMiddleware, authorizeCompanyBody("company_id"), company.update);

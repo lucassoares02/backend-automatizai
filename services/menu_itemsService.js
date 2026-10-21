@@ -343,4 +343,71 @@ const remove = async (id) => {
   return result.rows[0];
 };
 
-module.exports = { findAll, find, findByCompany, create, update, remove };
+// Colunas que a cópia não herda: identidade, remoção lógica e SKU (único por
+// empresa). Nome e disponibilidade recebem valores próprios no INSERT.
+const _DUPLICATE_SKIP = new Set(["id", "deleted_at", "sku", "name", "available"]);
+
+// Duplica o item com galeria, adicionais (grupos + opções) e profissionais.
+// A cópia nasce desativada e com " (cópia)" no nome, para ser revisada antes
+// de aparecer no cardápio público. Retorna null se o item não existir.
+const duplicate = async (id) => {
+  const created = await _withTransaction(async (client) => {
+    const src = await client.query(
+      "SELECT * FROM menu_items WHERE id = $1 AND deleted_at IS NULL",
+      [id],
+    );
+    const source = src.rows[0];
+    if (!source) return null;
+
+    const cols = Object.keys(source).filter((c) => !_DUPLICATE_SKIP.has(c)).map((c) => `"${c}"`);
+    const result = await client.query(
+      `INSERT INTO menu_items (name, available, ${cols.join(", ")})
+       SELECT LEFT(name || ' (cópia)', 150), false, ${cols.join(", ")}
+       FROM menu_items WHERE id = $1
+       RETURNING *`,
+      [id],
+    );
+    const row = result.rows[0];
+
+    if (await tableExists("menu_item_images")) {
+      await client.query(
+        `INSERT INTO menu_item_images (menu_item_id, url, position)
+         SELECT $2, url, position FROM menu_item_images WHERE menu_item_id = $1 ORDER BY position, id`,
+        [id, row.id],
+      );
+    }
+    if (await tableExists("professional_services")) {
+      await client.query(
+        `INSERT INTO professional_services (professional_id, menu_item_id, price_override, duration_override)
+         SELECT professional_id, $2, price_override, duration_override
+         FROM professional_services WHERE menu_item_id = $1`,
+        [id, row.id],
+      );
+    }
+    if (await tableExists("product_option_groups")) {
+      const groups = await client.query(
+        "SELECT * FROM product_option_groups WHERE product_id = $1 ORDER BY sort_order, id",
+        [id],
+      );
+      for (const g of groups.rows) {
+        const ng = await client.query(
+          `INSERT INTO product_option_groups
+             (company_id, product_id, name, type, min_selection, max_selection, is_required, sort_order)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+          [row.company_id, row.id, g.name, g.type, g.min_selection, g.max_selection, g.is_required, g.sort_order],
+        );
+        await client.query(
+          `INSERT INTO product_option_items (group_id, name, additional_price, sort_order, is_active, image_url)
+           SELECT $2, name, additional_price, sort_order, is_active, image_url
+           FROM product_option_items WHERE group_id = $1 ORDER BY sort_order, id`,
+          [g.id, ng.rows[0].id],
+        );
+      }
+    }
+    return row;
+  });
+  if (!created) return null;
+  return (await find(created.id)) || created;
+};
+
+module.exports = { findAll, find, findByCompany, create, update, remove, duplicate };

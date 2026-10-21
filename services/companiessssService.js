@@ -113,6 +113,7 @@ const update = async (data) => {
     accepts_scheduling,
     scheduling_min_days,
     scheduling_max_days,
+    scheduling_min_hours,
     scheduling_open_days_only,
     booking_slot_step_minutes,
     booking_min_notice_minutes,
@@ -171,6 +172,16 @@ const update = async (data) => {
       schedWindowSet =
         `, scheduling_min_days = COALESCE($${minParam}, scheduling_min_days)` +
         `, scheduling_max_days = COALESCE($${maxParam}, scheduling_max_days)`;
+    }
+
+    // Antecedência mínima em horas (0 = usa só os dias) — guardado por columnExists.
+    let minHoursSet = "";
+    if (await columnExists("companies", "scheduling_min_hours")) {
+      const minH = Number.isFinite(Number(scheduling_min_hours)) && scheduling_min_hours !== null
+        ? Math.min(8760, Math.max(0, Math.round(Number(scheduling_min_hours))))
+        : null;
+      params.push(minH);
+      minHoursSet = `, scheduling_min_hours = COALESCE($${params.length}, scheduling_min_hours)`;
     }
 
     // Só dias abertos vs todos os dias (boolean) — guardado por columnExists.
@@ -248,7 +259,7 @@ const update = async (data) => {
          custom_dietary_restrictions = $14,
          custom_ai_personalities = $15,
          accepts_delivery = COALESCE($16, accepts_delivery),
-         accepts_pickup = COALESCE($17, accepts_pickup)${schedulingSet}${businessSegmentSet}${schedWindowSet}${openDaysOnlySet}${bookingSet}${slugSet}
+         accepts_pickup = COALESCE($17, accepts_pickup)${schedulingSet}${businessSegmentSet}${schedWindowSet}${minHoursSet}${openDaysOnlySet}${bookingSet}${slugSet}
        WHERE id = $1 RETURNING *`,
       params,
     );

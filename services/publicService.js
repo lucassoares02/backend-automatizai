@@ -184,12 +184,18 @@ const getCompanyPublicMenu = async (companyRef) => {
   const openDaysOnlyCol = hasOpenDaysOnly
     ? "COALESCE(scheduling_open_days_only, true) AS scheduling_open_days_only,"
     : "true AS scheduling_open_days_only,";
+  // Antecedência mínima em horas (alternativa aos dias) — fallback 0.
+  const hasSchedMinHours = await columnExists("companies", "scheduling_min_hours");
+  const schedMinHoursCol = hasSchedMinHours
+    ? "COALESCE(scheduling_min_hours, 0) AS scheduling_min_hours,"
+    : "0 AS scheduling_min_hours,";
   const companyRes = await pool.query(
     `SELECT id, uuid, ${slugSelect} name, description, phone, status, manual_open,
             logo_url, banner_url, brand_color,
             accepts_delivery, accepts_pickup, ${schedulingCol}
             ${schedWindowCols}
             ${openDaysOnlyCol}
+            ${schedMinHoursCol}
             cuisine_type, dietary_restrictions, custom_dietary_restrictions,
             stripe_account_id, stripe_charges_enabled,
             pagarme_recipient_id, pagarme_charges_enabled
@@ -892,11 +898,25 @@ const createPublicOrder = async (data) => {
     const preorderMinDays = preorderRequirement
       ? inclusiveLeadDayOffset(preorderRequirement.leadDays)
       : 0;
+    let minHours = 0;
+    if (await columnExists("companies", "scheduling_min_hours")) {
+      const h = await pool.query(
+        "SELECT COALESCE(scheduling_min_hours, 0) AS min_hours FROM companies WHERE id = $1",
+        [company_id],
+      );
+      if (h.rows[0]) minHours = Math.max(0, Number(h.rows[0].min_hours) || 0);
+    }
     minDays = Math.max(minDays, preorderMinDays);
-    maxDays = Math.max(maxDays, minDays);
+    // Antecedência em horas pode empurrar o último dia da janela.
+    const minHoursDayOffset = minHours > 0
+      ? Math.round((new Date(Date.now() + minHours * 3600000).setHours(0, 0, 0, 0) - dayStart(0).getTime()) / 86400000)
+      : 0;
+    maxDays = Math.max(maxDays, minDays, minHoursDayOffset);
     const lower = dayStart(minDays - 1); // tolerância de 1 dia
     const upper = dayStart(maxDays + 2); // +1 dia de tolerância além do fim do dia
-    if (when < lower || when >= upper) {
+    // Horas: tolerância de 1h (relógio do cliente / tempo até finalizar).
+    const lowerByHours = new Date(Date.now() + (minHours - 1) * 3600000);
+    if (when < lower || when >= upper || (minHours > 0 && when < lowerByHours)) {
       throw new Error("A data de agendamento está fora do período permitido pela loja.");
     }
   }
