@@ -38,6 +38,7 @@ const orderStatusNotifications = require("../controllers/orderStatusNotification
 const orderAutoAccept = require("../controllers/orderAutoAcceptController");
 const productOptions = require("../controllers/productOptionsController");
 const purchaseGoals = require("../controllers/purchaseGoalsController");
+const technicalSheet = require("../controllers/technicalSheetController");
 const customerTracking = require("../controllers/customerTrackingController");
 const ifoodImport = require("../controllers/ifoodImportController");
 const ifood = require("../controllers/ifoodController");
@@ -166,6 +167,9 @@ router.post("/menu_items", authMiddleware, menu_items.create);
 router.patch("/menu_items", authMiddleware, menu_items.update);
 router.delete("/menu_items/:id", authMiddleware, menu_items.remove);
 router.post("/menu_items/:id/duplicate", authMiddleware, authorizeMenuItem, menu_items.duplicate);
+// Ficha técnica (matérias-primas, rendimento e custo por porção) do produto.
+router.get("/menu_items/:id/technical-sheet", authMiddleware, authorizeMenuItem, technicalSheet.find);
+router.put("/menu_items/:id/technical-sheet", authMiddleware, authorizeMenuItem, technicalSheet.save);
 
 router.get("/company/address/:id", company.find);
 router.patch("/company/address", authMiddleware, authorizeCompanyBody("company_id"), company.update);

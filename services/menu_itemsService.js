@@ -1,6 +1,7 @@
 const pool = require("../db");
 const { columnExists, tableExists } = require("../helpers/schema");
 const { normalizePreorder } = require("../helpers/preorder");
+const technicalSheetService = require("./technicalSheetService");
 const { normalizeServiceFields, normalizeImageUrls, normalizeIdList } = require("../helpers/serviceItem");
 
 // Normaliza a lista de selos (restrições alimentares) do produto: só strings,
@@ -404,6 +405,7 @@ const duplicate = async (id) => {
         );
       }
     }
+    await technicalSheetService.copy(client, id, row.id);
     return row;
   });
   if (!created) return null;
