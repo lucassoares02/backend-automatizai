@@ -174,6 +174,10 @@ const getCompanyPublicMenu = async (companyRef) => {
   // accepts_scheduling pode não ter sido migrada; sem a coluna devolve false.
   const hasScheduling = await columnExists("companies", "accepts_scheduling");
   const schedulingCol = hasScheduling ? "accepts_scheduling," : "false AS accepts_scheduling,";
+  const hasEstimatedPrepTime = await columnExists("companies", "estimated_prep_time_minutes");
+  const estimatedPrepTimeCol = hasEstimatedPrepTime
+    ? "COALESCE(estimated_prep_time_minutes, 40) AS estimated_prep_time_minutes,"
+    : "40 AS estimated_prep_time_minutes,";
   // Janela de agendamento (min/max dias) — fallback 0/7 sem a coluna migrada.
   const hasSchedWindow = await columnExists("companies", "scheduling_min_days");
   const schedWindowCols = hasSchedWindow
@@ -193,6 +197,7 @@ const getCompanyPublicMenu = async (companyRef) => {
     `SELECT id, uuid, ${slugSelect} name, description, phone, status, manual_open,
             logo_url, banner_url, brand_color,
             accepts_delivery, accepts_pickup, ${schedulingCol}
+            ${estimatedPrepTimeCol}
             ${schedWindowCols}
             ${openDaysOnlyCol}
             ${schedMinHoursCol}

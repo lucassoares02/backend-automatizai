@@ -117,6 +117,7 @@ const update = async (data) => {
     scheduling_open_days_only,
     booking_slot_step_minutes,
     booking_min_notice_minutes,
+    estimated_prep_time_minutes,
     booking_max_days_ahead,
     cancel_window_hours,
     max_distance_meters_delivery,
@@ -191,6 +192,17 @@ const update = async (data) => {
       openDaysOnlySet = `, scheduling_open_days_only = COALESCE($${params.length}, scheduling_open_days_only)`;
     }
 
+    // Estimativa exibida no cardápio público. Zero remove a estimativa.
+    let estimatedPrepTimeSet = "";
+    if (estimated_prep_time_minutes !== undefined && estimated_prep_time_minutes !== null && estimated_prep_time_minutes !== "" && await columnExists("companies", "estimated_prep_time_minutes")) {
+      const minutes = Number(estimated_prep_time_minutes);
+      if (!Number.isInteger(minutes) || minutes < 0 || minutes > 1440) {
+        throw Object.assign(new Error("O tempo estimado deve ficar entre 0 e 1440 minutos."), { status: 400 });
+      }
+      params.push(minutes);
+      estimatedPrepTimeSet = `, estimated_prep_time_minutes = $${params.length}`;
+    }
+
     // Regras da agenda de serviços (Fase 2) — cada coluna só entra quando existe
     // e veio no payload; valores fora da faixa da CHECK constraint são recusados.
     let bookingSet = "";
@@ -259,7 +271,7 @@ const update = async (data) => {
          custom_dietary_restrictions = $14,
          custom_ai_personalities = $15,
          accepts_delivery = COALESCE($16, accepts_delivery),
-         accepts_pickup = COALESCE($17, accepts_pickup)${schedulingSet}${businessSegmentSet}${schedWindowSet}${minHoursSet}${openDaysOnlySet}${bookingSet}${slugSet}
+         accepts_pickup = COALESCE($17, accepts_pickup)${schedulingSet}${businessSegmentSet}${schedWindowSet}${minHoursSet}${openDaysOnlySet}${estimatedPrepTimeSet}${bookingSet}${slugSet}
        WHERE id = $1 RETURNING *`,
       params,
     );
