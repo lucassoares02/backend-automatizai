@@ -359,6 +359,20 @@ const getCompanyPublicMenu = async (companyRef) => {
   } else {
     for (const item of services) item.professionals = [];
   }
+  // Produtos sugeridos por serviço ("Leve junto"), na ordem definida no painel.
+  if (services.length && (await tableExists("service_related_products"))) {
+    const relRes = await pool.query(
+      `SELECT service_id, array_agg(product_id ORDER BY position, product_id) AS ids
+       FROM service_related_products
+       WHERE service_id = ANY($1::int[])
+       GROUP BY service_id`,
+      [services.map((item) => item.id)],
+    );
+    const byService = new Map(relRes.rows.map((r) => [r.service_id, r.ids]));
+    for (const item of services) item.related_product_ids = byService.get(item.id) || [];
+  } else {
+    for (const item of services) item.related_product_ids = [];
+  }
 
   const categoriesMap = new Map();
   const uncategorized = [];

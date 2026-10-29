@@ -67,9 +67,10 @@ const _hasServicePayload = (data) =>
 // Seleciona galeria e profissionais junto do item (subqueries), quando as
 // tabelas existem. Usado pelas listagens do painel.
 const _extrasSelect = async (alias = "mi") => {
-  const [hasImages, hasProfessionals] = await Promise.all([
+  const [hasImages, hasProfessionals, hasRelated] = await Promise.all([
     tableExists("menu_item_images"),
     tableExists("professional_services"),
+    tableExists("service_related_products"),
   ]);
   const images = hasImages
     ? `COALESCE((SELECT json_agg(json_build_object('id', img.id, 'url', img.url, 'position', img.position)
@@ -80,7 +81,11 @@ const _extrasSelect = async (alias = "mi") => {
     ? `COALESCE((SELECT array_agg(ps.professional_id ORDER BY ps.professional_id)
                  FROM professional_services ps WHERE ps.menu_item_id = ${alias}.id), '{}'::int[]) AS professional_ids`
     : `'{}'::int[] AS professional_ids`;
-  return `${images}, ${professionals}`;
+  const related = hasRelated
+    ? `COALESCE((SELECT array_agg(srp.product_id ORDER BY srp.position, srp.product_id)
+                 FROM service_related_products srp WHERE srp.service_id = ${alias}.id), '{}'::int[]) AS related_product_ids`
+    : `'{}'::int[] AS related_product_ids`;
+  return `${images}, ${professionals}, ${related}`;
 };
 
 // Substitui a galeria do item pela lista recebida (ordem = posição).
@@ -109,6 +114,24 @@ const _syncProfessionals = async (client, itemId, companyId, ids) => {
      SELECT p.id, $1 FROM professionals p
      WHERE p.company_id = $2 AND p.id = ANY($3::int[])
      ON CONFLICT (professional_id, menu_item_id) DO NOTHING`,
+    [itemId, companyId, ids],
+  );
+};
+
+// Substitui os produtos sugeridos do serviço ("Leve junto"), na ordem recebida.
+// Só aceita produtos (não serviços) ativos da mesma empresa.
+const _syncRelatedProducts = async (client, itemId, companyId, ids) => {
+  if (ids === null || !(await tableExists("service_related_products"))) return;
+  await client.query("DELETE FROM service_related_products WHERE service_id = $1", [itemId]);
+  if (!ids.length) return;
+  await client.query(
+    `INSERT INTO service_related_products (service_id, product_id, position)
+     SELECT $1, mi.id, u.ord - 1
+     FROM unnest($3::int[]) WITH ORDINALITY AS u(id, ord)
+     JOIN menu_items mi ON mi.id = u.id
+     WHERE mi.company_id = $2 AND mi.id <> $1 AND mi.deleted_at IS NULL
+       AND COALESCE(mi.item_type, 'product') <> 'service'
+     ON CONFLICT (service_id, product_id) DO NOTHING`,
     [itemId, companyId, ids],
   );
 };
@@ -215,6 +238,7 @@ const create = async (data) => {
   const isService = hasService && service.itemType === "service";
   const imageUrls = normalizeImageUrls(data.images);
   const professionalIds = isService ? normalizeIdList(data.professional_ids) : null;
+  const relatedIds = isService ? normalizeIdList(data.related_product_ids) : null;
   // Serviço não tem preparo, SKU, estoque nem encomenda.
   const cols = ["company_id", "category_id", "name", "description", "price", "available", "image_url", "featured", "display_order", "prep_time_minutes", "sku"];
   const vals = [
@@ -250,6 +274,7 @@ const create = async (data) => {
     const row = result.rows[0];
     await _syncImages(client, row.id, imageUrls);
     await _syncProfessionals(client, row.id, row.company_id, professionalIds);
+    await _syncRelatedProducts(client, row.id, row.company_id, relatedIds);
     return row;
   });
   return (await find(created.id)) || created;
@@ -275,6 +300,8 @@ const update = async (data) => {
   const imageUrls = normalizeImageUrls(data.images);
   // Ao virar produto, remove os vínculos com profissionais.
   const professionalIds = isService ? normalizeIdList(data.professional_ids) : updatesService ? [] : null;
+  // Idem para os produtos sugeridos; clientes que não enviam a lista a preservam.
+  const relatedIds = isService ? normalizeIdList(data.related_product_ids) : updatesService ? [] : null;
 
   const sets = ["company_id = $2", "category_id = $3", "name = $4", "description = $5", "price = $6", "available = $7", "image_url = $8", "featured = $9", "display_order = $10", "prep_time_minutes = $11", "sku = $12"];
   const vals = [
@@ -327,6 +354,7 @@ const update = async (data) => {
     if (!row) return null;
     await _syncImages(client, row.id, imageUrls);
     await _syncProfessionals(client, row.id, row.company_id, professionalIds);
+    await _syncRelatedProducts(client, row.id, row.company_id, relatedIds);
     return row;
   });
   if (!updated) return null;
@@ -382,6 +410,13 @@ const duplicate = async (id) => {
         `INSERT INTO professional_services (professional_id, menu_item_id, price_override, duration_override)
          SELECT professional_id, $2, price_override, duration_override
          FROM professional_services WHERE menu_item_id = $1`,
+        [id, row.id],
+      );
+    }
+    if (await tableExists("service_related_products")) {
+      await client.query(
+        `INSERT INTO service_related_products (service_id, product_id, position)
+         SELECT $2, product_id, position FROM service_related_products WHERE service_id = $1`,
         [id, row.id],
       );
     }
