@@ -74,6 +74,8 @@ const updateSettings = async (companyId, data) => {
 const decideAction = (order, settings) => {
   if (!order || !settings) return null;
   if (Number(order.status) !== STATUS_AWAITING) return null;
+  // Pedidos agendados sempre exigem confirmação manual da loja.
+  if (order.scheduled_for != null) return null;
   const isOnline = ["pagarme", "stripe"].includes(String(order.payment_provider || ""));
   if (isOnline) {
     return order.payment_status === "paid" && settings.auto_accept_paid_orders === true
@@ -99,7 +101,7 @@ const applyToOrder = async (orderId) => {
     if (!(await _hasColumns())) return null;
 
     const r = await pool.query(
-      `SELECT o.id, o.status, o.payment_status, o.payment_provider,
+      `SELECT o.id, o.status, o.payment_status, o.payment_provider, o.scheduled_for,
               pm.type AS payment_method_type,
               c.auto_accept_paid_orders, c.auto_accept_cash_orders,
               COALESCE((to_jsonb(o)->>'delivery_fee_pending_agreement')::boolean, false)
