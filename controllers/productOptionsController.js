@@ -1,4 +1,5 @@
 const service = require("../services/productOptionsService");
+const { resolveCompanyId, companyScopedBody } = require("../src/middlewares/authorize");
 const minio = require("./minioController");
 const multer = require("multer");
 
@@ -42,7 +43,7 @@ const publicFindByProduct = async (req, res) => {
 
 const create = async (req, res) => {
   try {
-    const group = await service.create(req.body);
+    const group = await service.create(companyScopedBody(req));
     return res.status(201).json(group);
   } catch (err) {
     console.error("productOptions create:", err);
@@ -54,7 +55,7 @@ const update = async (req, res) => {
   const groupId = _int(req.params.groupId);
   if (!groupId || groupId <= 0) return res.status(400).json({ error: "Invalid groupId" });
   try {
-    const group = await service.update(groupId, req.body);
+    const group = await service.update(groupId, companyScopedBody(req));
     return res.status(200).json(group);
   } catch (err) {
     console.error("productOptions update:", err);
@@ -64,7 +65,7 @@ const update = async (req, res) => {
 
 const remove = async (req, res) => {
   const groupId = _int(req.params.groupId);
-  const companyId = _int(req.query.company_id ?? req.body?.company_id);
+  const companyId = _int(resolveCompanyId(req));
   if (!groupId || groupId <= 0) return res.status(400).json({ error: "Invalid groupId" });
   if (!companyId || companyId <= 0) return res.status(400).json({ error: "Invalid company_id" });
   try {
@@ -79,7 +80,7 @@ const remove = async (req, res) => {
 
 const reorder = async (req, res) => {
   const productId = _int(req.params.productId);
-  const companyId = _int(req.body?.company_id);
+  const companyId = _int(resolveCompanyId(req));
   const orderedIds = Array.isArray(req.body?.ordered_ids) ? req.body.ordered_ids.map(_int).filter(Boolean) : [];
   if (!productId || productId <= 0) return res.status(400).json({ error: "Invalid productId" });
   if (!companyId || companyId <= 0) return res.status(400).json({ error: "Invalid company_id" });
@@ -96,7 +97,11 @@ const uploadImage = async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "Nenhuma imagem enviada" });
   try {
     const { buffer, originalname, mimetype } = req.file;
-    const { url } = await minio.uploadFile(buffer, originalname, mimetype);
+    // Chave gerada no servidor: com o nome original, um arquivo de mesmo nome
+    // sobrescreveria a imagem de outra empresa no bucket.
+    const ext = originalname.split(".").pop().toLowerCase();
+    const filename = `product_options/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
+    const { url } = await minio.uploadFile(buffer, filename, mimetype);
     return res.status(200).json({ url });
   } catch (error) {
     console.error("Error uploading option item image:", error);

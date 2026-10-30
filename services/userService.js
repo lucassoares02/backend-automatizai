@@ -36,14 +36,14 @@ const validateLogin = async (email, password) => {
 const getAllUsers = async () => {
   // Nunca retornar o hash de senha. Selecionar colunas explicitamente.
   const result = await pool.query(
-    `SELECT id, name, email, type, active FROM users ORDER BY id DESC`,
+    `SELECT id, name, email, active FROM users ORDER BY id DESC`,
   );
   return result.rows;
 };
 
 const createUser = async (name, email, password, active) => {
   const hashedPassword = await hashPassword(password);
-  const result = await pool.query("INSERT INTO users (name, email, password,active) VALUES ($1, $2, $3,$4) RETURNING *", [
+  const result = await pool.query("INSERT INTO users (name, email, password,active) VALUES ($1, $2, $3,$4) RETURNING id, name, email, active", [
     name,
     email,
     hashedPassword,

@@ -1,4 +1,5 @@
 const service = require("../services/company_opening_hoursService");
+const { companyScopedBody } = require("../src/middlewares/authorize");
 
 /**
  * Get all CompanyOpeningHours
@@ -57,7 +58,7 @@ const create = async (req, res) => {
     return res.status(400).json({ error: "Invalid request body" });
   }
   try {
-    const newItem = await service.create(company_opening_hours);
+    const newItem = await service.create(companyScopedBody(req));
     return res.status(201).json(newItem);
   } catch (error) {
     console.error("Error creating CompanyOpeningHours:", error);
@@ -75,7 +76,7 @@ const update = async (req, res) => {
     return res.status(400).json({ error: "Invalid ID" });
   }
   try {
-    const updated = await service.update({ ...company_opening_hours, id: parseInt(id) });
+    const updated = await service.update({ ...companyScopedBody(req), id: parseInt(id) });
     if (!updated) return res.status(404).json({ error: "CompanyOpeningHours not found" });
     return res.status(200).json(updated);
   } catch (error) {

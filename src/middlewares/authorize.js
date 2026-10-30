@@ -39,11 +39,20 @@ const getUserAuthContext = async (userId) => {
   return { companyIds, isSystemAdmin };
 };
 
+// Aceita somente inteiros canônicos (number inteiro ou string só de dígitos).
+// Com Number() puro, "1e1" seria autorizado como empresa 10 e os controllers que
+// usam parseInt agiriam sobre a empresa 1.
+const _parseId = (value) => {
+  if (typeof value !== "number" && !(typeof value === "string" && /^\d+$/.test(value))) return null;
+  const id = Number(value);
+  return Number.isSafeInteger(id) ? id : null;
+};
+
 const _isMember = (req, companyId) => {
   // Admin do sistema tem acesso a todas as empresas.
   if (req.isSystemAdmin) return true;
-  const cid = Number(companyId);
-  if (!Number.isFinite(cid)) return false;
+  const cid = _parseId(companyId);
+  if (cid === null) return false;
   const list = Array.isArray(req.userCompanies) ? req.userCompanies : [];
   return list.map(Number).includes(cid);
 };
@@ -77,9 +86,13 @@ const _deny = (res) => res.status(403).json({ error: "Acesso negado a esta empre
  * Ex.: router.get("/orders/company/:id", authMiddleware, authorizeCompanyParam("id"), ...)
  */
 const authorizeCompanyParam = (paramName = "companyId") => (req, res, next) => {
-  if (req.isService) return next();
   const companyId = req.params[paramName];
+  if (req.isService) {
+    req.authorizedCompanyId = companyId;
+    return next();
+  }
   if (!companyId || !_isMember(req, companyId)) return _deny(res);
+  req.authorizedCompanyId = companyId;
   next();
 };
 
@@ -87,9 +100,13 @@ const authorizeCompanyParam = (paramName = "companyId") => (req, res, next) => {
  * Autoriza quando o company_id vem do corpo da requisição (create).
  */
 const authorizeCompanyBody = (field = "company_id") => (req, res, next) => {
-  if (req.isService) return next();
   const companyId = req.body?.[field] ?? req.body?.companyId;
+  if (req.isService) {
+    req.authorizedCompanyId = companyId;
+    return next();
+  }
   if (!companyId || !_isMember(req, companyId)) return _deny(res);
+  req.authorizedCompanyId = companyId;
   next();
 };
 
@@ -98,15 +115,16 @@ const authorizeCompanyBody = (field = "company_id") => (req, res, next) => {
  * via uma query. `sql` deve selecionar uma coluna company_id a partir de $1 (id).
  * Ex.: authorizeByLookup("SELECT company_id FROM orders WHERE id = $1")
  */
-const authorizeByLookup = (sql, paramName = "id") => async (req, res, next) => {
+const _authorizeLookup = (sql, readId) => async (req, res, next) => {
   try {
     if (req.isService) return next();
-    const id = req.params[paramName];
+    const id = readId(req);
     if (!id) return _deny(res);
     const result = await pool.query(sql, [id]);
     const companyId = result.rows[0]?.company_id;
     if (companyId == null) return res.status(404).json({ error: "Recurso não encontrado" });
     if (!_isMember(req, companyId)) return _deny(res);
+    req.authorizedCompanyId = companyId;
     next();
   } catch (err) {
     console.error("authorizeByLookup error:", err.message);
@@ -114,7 +132,38 @@ const authorizeByLookup = (sql, paramName = "id") => async (req, res, next) => {
   }
 };
 
+const authorizeByLookup = (sql, paramName = "id") => _authorizeLookup(sql, (req) => req.params[paramName]);
+
+/**
+ * Igual a authorizeByLookup, para rotas que recebem o id do recurso no corpo.
+ * O id precisa ser canônico: é o mesmo valor que o controller vai usar no UPDATE.
+ */
+const authorizeByBodyLookup = (sql, field = "id") => _authorizeLookup(sql, (req) => _parseId(req.body?.[field]));
+
+/**
+ * Empresa sobre a qual o controller deve agir: a que o middleware da rota validou
+ * (parâmetro, corpo ou dona do recurso). O company_id da query ou do corpo nunca
+ * tem prioridade sobre ela. Só o principal de serviço, que não passa pelo lookup
+ * e tem escopo global, pode informar a empresa nesses campos.
+ */
+const resolveCompanyId = (req) =>
+  Number(req.authorizedCompanyId ?? (req.isService ? req.query?.company_id ?? req.body?.company_id : undefined));
+
+/**
+ * Corpo da requisição com a empresa fixada na que foi autorizada. Impede gravar em
+ * outra empresa pelo alias companyId (que alguns services leem primeiro) e mover um
+ * recurso em PATCH pelo company_id do corpo. O principal de serviço em rota por id
+ * não tem empresa autorizada, e o corpo segue como veio.
+ */
+const companyScopedBody = (req) => {
+  if (req.authorizedCompanyId == null) return req.body;
+  const companyId = Number(req.authorizedCompanyId);
+  return { ...req.body, company_id: companyId, companyId };
+};
+
 module.exports = {
+  resolveCompanyId,
+  companyScopedBody,
   getUserCompanyIds,
   getUserAuthContext,
   requireSystemAdmin,
@@ -123,4 +172,5 @@ module.exports = {
   authorizeCompanyParam,
   authorizeCompanyBody,
   authorizeByLookup,
+  authorizeByBodyLookup,
 };

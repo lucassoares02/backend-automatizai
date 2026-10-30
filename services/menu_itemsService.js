@@ -2,6 +2,7 @@ const pool = require("../db");
 const { columnExists, tableExists } = require("../helpers/schema");
 const { normalizePreorder } = require("../helpers/preorder");
 const technicalSheetService = require("./technicalSheetService");
+const { assertIdsBelongToCompany } = require("../helpers/tenantOwnership");
 const { normalizeServiceFields, normalizeImageUrls, normalizeIdList } = require("../helpers/serviceItem");
 
 // Normaliza a lista de selos (restrições alimentares) do produto: só strings,
@@ -225,8 +226,13 @@ const findByCompany = async (id) => {
   return result.rows || null;
 };
 
+// O cardápio público mostra o nome da categoria do produto, então ela precisa ser da mesma empresa.
+const _assertCategoryBelongsToCompany = (categoryId, companyId) =>
+  assertIdsBelongToCompany("menu_categories", [categoryId], companyId, "Categoria não pertence a esta empresa.");
+
 const create = async (data) => {
   const { company_id, category_id, name, description, price, available, image_url, featured, display_order, prep_time_minutes, sku, dietary_restrictions } = data;
+  await _assertCategoryBelongsToCompany(category_id, company_id);
   // Só grava os selos se a coluna já existir (migration em DB_CHANGES_NEEDED.md).
   const [hasSelos, hasStock, hasPreorder, hasService] = await Promise.all([
     columnExists("menu_items", "dietary_restrictions"),
@@ -282,6 +288,7 @@ const create = async (data) => {
 
 const update = async (data) => {
   const { id, company_id, category_id, name, description, price, available, image_url, featured, display_order, prep_time_minutes, sku, dietary_restrictions } = data;
+  await _assertCategoryBelongsToCompany(category_id, company_id);
   const [hasSelos, hasStock, hasPreorder, hasService] = await Promise.all([
     columnExists("menu_items", "dietary_restrictions"),
     _hasStockColumns(),

@@ -1,5 +1,6 @@
 const pool = require("../db");
 const { tableExists, columnExists } = require("../helpers/schema");
+const { assertIdsBelongToCompany } = require("../helpers/tenantOwnership");
 
 // A tabela `coupons` é criada manualmente (ver DB_CHANGES_NEEDED.md). Enquanto
 // não existir, as operações degradam de forma segura em vez de quebrar.
@@ -66,13 +67,26 @@ const _extendedSchema = () => columnExists("coupons", "applies_to");
 // Coluna do limite por cliente existe? (schema mais recente)
 const _hasPerCustomer = () => columnExists("coupons", "per_customer_limit");
 
+// Cliente, categorias e produtos vinculados precisam ser da empresa do cupom.
+// Categoria apagada continua em category_ids e o portal reenvia o id ao editar,
+// sem mostrá-lo ao usuário: por isso id inexistente não é recusado nas listas.
+const _assertOwnedRefs = async (s, companyId) => {
+  await assertIdsBelongToCompany("clients", [s.client_id], companyId, "Cliente não pertence a esta empresa.");
+  await assertIdsBelongToCompany("menu_categories", s.category_ids, companyId, "Categoria não pertence a esta empresa.", {
+    allowMissing: true,
+  });
+  await assertIdsBelongToCompany("menu_items", s.menu_item_ids, companyId, "Produto não pertence a esta empresa.", {
+    allowMissing: true,
+  });
+};
+
 const findByCompany = async (companyId) => {
   if (!(await couponsAvailable())) return [];
   // client_name só existe quando o schema estendido (client_id) está aplicado.
   const hasClient = await columnExists("coupons", "client_id");
   const sql = hasClient
     ? `SELECT c.*, cl.name AS client_name, cl.phone AS client_phone
-         FROM coupons c LEFT JOIN clients cl ON cl.id = c.client_id
+         FROM coupons c LEFT JOIN clients cl ON cl.id = c.client_id AND cl.company_id = c.company_id
         WHERE c.company_id = $1 ORDER BY c.active DESC, c.created_at DESC`
     : `SELECT * FROM coupons WHERE company_id = $1 ORDER BY active DESC, created_at DESC`;
   const { rows } = await pool.query(sql, [companyId]);
@@ -123,6 +137,7 @@ const create = async (data) => {
     s.active,
   ];
   if (await _extendedSchema()) {
+    await _assertOwnedRefs(s, data.company_id);
     cols.push("applies_to", "category_ids", "menu_item_ids", "client_id");
     vals.push(s.applies_to, s.category_ids, s.menu_item_ids, s.client_id);
   }
@@ -163,6 +178,7 @@ const update = async (id, data) => {
     ["active", s.active],
   ];
   if (await _extendedSchema()) {
+    await _assertOwnedRefs(s, data.company_id);
     sets.push(
       ["applies_to", s.applies_to],
       ["category_ids", s.category_ids],
@@ -461,7 +477,8 @@ const redemptions = async (couponId) => {
     `SELECT r.id, r.order_id, r.client_id, r.discount_amount, r.created_at,
             c.name AS client_name, c.phone AS client_phone, o.tag AS order_tag
        FROM coupon_redemptions r
-       LEFT JOIN clients c ON c.id = r.client_id
+       JOIN coupons cp ON cp.id = r.coupon_id
+       LEFT JOIN clients c ON c.id = r.client_id AND c.company_id = cp.company_id
        LEFT JOIN orders o ON o.id = r.order_id
       WHERE r.coupon_id = $1
       ORDER BY r.created_at DESC

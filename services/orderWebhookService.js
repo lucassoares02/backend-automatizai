@@ -103,7 +103,7 @@ const _findAwaitingOrderPayload = async (orderId) => {
        ), '[]'::jsonb) AS status_history
      FROM orders o
      JOIN companies comp ON comp.id = o.company_id
-     JOIN clients cli ON cli.id = o.client_id
+     JOIN clients cli ON cli.id = o.client_id AND cli.company_id = o.company_id
      LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id
      WHERE o.id = $1
        AND o.status = $2`,
@@ -263,7 +263,7 @@ const _sendServiceEvent = async (orderId, eventId, appointment = null) => {
     `SELECT o.*, comp.name AS company_name, cli.name AS client_name, cli.phone AS client_phone
      FROM orders o
      JOIN companies comp ON comp.id = o.company_id
-     JOIN clients cli ON cli.id = o.client_id
+     JOIN clients cli ON cli.id = o.client_id AND cli.company_id = o.company_id
      WHERE o.id = $1`,
     [orderId],
   );
@@ -359,7 +359,7 @@ const notifyStatusChange = async (order, status, { noShow = false } = {}) => {
       `SELECT comp.name AS company_name, cli.name AS client_name, cli.phone AS client_phone, o.tag
        FROM orders o
        JOIN companies comp ON comp.id = o.company_id
-       JOIN clients cli ON cli.id = o.client_id
+       JOIN clients cli ON cli.id = o.client_id AND cli.company_id = o.company_id
        WHERE o.id = $1`,
       [order.id],
     );

@@ -1,5 +1,6 @@
 const pool = require("../db");
 const { n8nUrlWebhook } = require("./evolutionService");
+const { assertIdsBelongToCompany } = require("../helpers/tenantOwnership");
 
 // Webhook do n8n que roda a campanha (IA dispara as mensagens no WhatsApp).
 const WEBHOOK_PATH = "alerta-promo";
@@ -111,8 +112,8 @@ const _resolveAudienceClients = async (campaign) => {
       `SELECT c.id, c.name, c.phone
          FROM campaign_clients cc
          JOIN clients c ON c.id = cc.client_id
-        WHERE cc.campaign_id = $1`,
-      [campaign.id],
+        WHERE cc.campaign_id = $1 AND c.company_id = $2`,
+      [campaign.id, companyId],
     );
     return res.rows;
   }
@@ -234,7 +235,7 @@ const find = async (id, companyId) => {
               ) ORDER BY cc.id)
               FROM campaign_clients cc
               JOIN clients c ON c.id = cc.client_id
-              WHERE cc.campaign_id = ca.id
+              WHERE cc.campaign_id = ca.id AND c.company_id = ca.company_id
             ), '[]'::json) AS clients
        FROM campaigns ca
       WHERE ca.id = $1 AND ca.company_id = $2`,
@@ -264,6 +265,7 @@ const create = async (data) => {
   const products = await _buildProducts(companyId, data.products);
   const selectedClientIds =
     audienceType === "selected" && Array.isArray(data.client_ids) ? [...new Set(data.client_ids.map(Number).filter(Boolean))] : [];
+  await assertIdsBelongToCompany("clients", selectedClientIds, companyId, "Cliente selecionado não pertence a esta empresa.");
 
   // 'now' já nasce como 'scheduled' e é despachado logo abaixo; o cron cobre o resto.
   const status = "scheduled";
@@ -343,6 +345,7 @@ const update = async (id, companyId, data) => {
   const products = await _buildProducts(companyId, data.products);
   const selectedClientIds =
     audienceType === "selected" && Array.isArray(data.client_ids) ? [...new Set(data.client_ids.map(Number).filter(Boolean))] : null;
+  await assertIdsBelongToCompany("clients", selectedClientIds, companyId, "Cliente selecionado não pertence a esta empresa.");
 
   const client = await pool.connect();
   try {
@@ -452,8 +455,8 @@ const dispatchCampaign = async (campaignId) => {
   const targetRes = await pool.query(
     `SELECT cc.id AS campaign_client_id, c.id AS client_id, c.name, c.phone
        FROM campaign_clients cc JOIN clients c ON c.id = cc.client_id
-      WHERE cc.campaign_id = $1`,
-    [campaign.id],
+      WHERE cc.campaign_id = $1 AND c.company_id = $2`,
+    [campaign.id, campaign.company_id],
   );
   // Garante o DDI 55 no telefone antes de enviar ao n8n (Evolution exige o número completo).
   const targets = targetRes.rows.map((t) => ({ ...t, phone: _normalizeBrazilPhone(t.phone) }));

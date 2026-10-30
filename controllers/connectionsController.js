@@ -64,6 +64,12 @@ const create = async (req, res) => {
   }
 
   try {
+    // n8n.duplicate apaga o workflow que já tem esse nome, mesmo de outra empresa,
+    // então um nome repetido precisa ser recusado antes de chegar ao n8n.
+    if (await service.find_by_instance(instanceName)) {
+      return res.status(409).json({ error: "Já existe uma conexão com esse nome." });
+    }
+
     const templateN8N = await n8n.duplicate(instanceName, company);
 
     const newConnection = await evolution.create(instanceName, integration, qrcode ?? true, {
@@ -101,7 +107,11 @@ const update = async (req, res) => {
     return res.status(400).json({ error: "Invalid ID" });
   }
   try {
-    const updated = await service.update({ ...connections, id: parseInt(id) });
+    // O nome da instância é o vínculo com a Evolution e o n8n: renomear para o nome
+    // de outra empresa daria acesso à instância dela. Só o principal de serviço altera.
+    const data = { ...connections, id: parseInt(id) };
+    if (!req.isService) delete data.instanceName;
+    const updated = await service.update(data);
     if (!updated) return res.status(404).json({ error: "Connection not found" });
     return res.status(200).json(updated);
   } catch (error) {
@@ -114,11 +124,17 @@ const update = async (req, res) => {
  * Delete Connection (Evolution instance + DB record)
  */
 const remove = async (req, res) => {
-  const { id, instance } = req.params;
+  const { id } = req.params;
   if (!id || isNaN(id)) {
     return res.status(400).json({ error: "Invalid ID" });
   }
   try {
+    // O nome vem do registro autorizado, nunca da URL: senão bastaria uma conexão
+    // própria para apagar a instância e o fluxo de outra empresa.
+    const connection = await service.find(id);
+    if (!connection) return res.status(404).json({ error: "Connection not found" });
+    const instance = connection.instance_name;
+
     // Limpeza dos recursos externos é BEST-EFFORT: se a instância da Evolution
     // já não existir (404), a Evolution estiver fora, ou o workflow do n8n já
     // tiver sido removido, isso NÃO deve impedir a exclusão local. O registro no

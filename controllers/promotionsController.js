@@ -1,9 +1,8 @@
 const service = require("../services/promotionsService");
-
-const _companyFromReq = (req) => Number(req.query.company_id ?? req.body?.company_id ?? req.params?.companyId);
+const { resolveCompanyId } = require("../src/middlewares/authorize");
 
 const findByCompany = async (req, res) => {
-  const companyId = _companyFromReq(req);
+  const companyId = resolveCompanyId(req);
   if (!Number.isInteger(companyId) || companyId <= 0) {
     return res.status(400).json({ error: "Invalid company_id" });
   }
@@ -17,7 +16,7 @@ const findByCompany = async (req, res) => {
 };
 
 const create = async (req, res) => {
-  const companyId = _companyFromReq(req);
+  const companyId = resolveCompanyId(req);
   if (!Number.isInteger(companyId) || companyId <= 0) {
     return res.status(400).json({ error: "Invalid company_id" });
   }
@@ -35,7 +34,7 @@ const create = async (req, res) => {
 
 const update = async (req, res) => {
   const id = Number(req.params.id);
-  const companyId = _companyFromReq(req);
+  const companyId = resolveCompanyId(req);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid id" });
   if (!Number.isInteger(companyId) || companyId <= 0) return res.status(400).json({ error: "Invalid company_id" });
   try {
@@ -50,7 +49,7 @@ const update = async (req, res) => {
 
 const remove = async (req, res) => {
   const id = Number(req.params.id);
-  const companyId = _companyFromReq(req);
+  const companyId = resolveCompanyId(req);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid id" });
   if (!Number.isInteger(companyId) || companyId <= 0) return res.status(400).json({ error: "Invalid company_id" });
   try {
@@ -65,7 +64,7 @@ const remove = async (req, res) => {
 
 const toggleStatus = async (req, res) => {
   const id = Number(req.params.id);
-  const companyId = _companyFromReq(req);
+  const companyId = resolveCompanyId(req);
   const active = req.body?.active;
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid id" });
   if (!Number.isInteger(companyId) || companyId <= 0) return res.status(400).json({ error: "Invalid company_id" });

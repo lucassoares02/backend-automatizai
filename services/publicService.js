@@ -15,6 +15,7 @@ const bookingService = require("./bookingService");
 const { normalizePhone } = require("../helpers/phone");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 const { columnExists, tableExists } = require("../helpers/schema");
+const { assertIdsBelongToCompany } = require("../helpers/tenantOwnership");
 const { UUID_RE: _UUID_RE } = require("../helpers/companySlug");
 const {
   hasStockControlSchema: _hasStockControlSchema,
@@ -804,7 +805,23 @@ const _deliveryAddressSnapshot = (value) => {
 };
 
 const createPublicOrder = async (data) => {
-  const { company_id, client_id, notes, items, scheduled_for, payment_method_id } = data;
+  const { company_id, notes, items, scheduled_for } = data;
+  // O corpo pode trazer o id como string; a conferência de dono e a gravação usam o mesmo número.
+  const client_id = Number(data.client_id);
+  const payment_method_id = data.payment_method_id == null ? null : Number(data.payment_method_id);
+  // A rota aceita pedido sem login, então os ids do corpo sempre passam por aqui.
+  await assertIdsBelongToCompany(
+    "clients",
+    [client_id],
+    company_id,
+    "Atualize sua identificação antes de finalizar este pedido.",
+  );
+  await assertIdsBelongToCompany(
+    "payment_methods",
+    [payment_method_id],
+    company_id,
+    "Forma de pagamento indisponível.",
+  );
   if (data.authenticated_user_id) {
     const owner = await pool.query(
       `SELECT 1 FROM clients

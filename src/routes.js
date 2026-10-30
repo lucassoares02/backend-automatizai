@@ -4,7 +4,7 @@ const user = require("../controllers/userController");
 const login = require("../controllers/loginController");
 const googleAuth = require("../controllers/googleAuthController");
 const authMiddleware = require("../src/middlewares/middleware");
-const { authorizeCompanyParam, authorizeCompanyBody, authorizeByLookup, requireSystemAdmin, requireSystemAdminUser, requireAdminUser } = require("../src/middlewares/authorize");
+const { authorizeCompanyParam, authorizeCompanyBody, authorizeByLookup, authorizeByBodyLookup, requireSystemAdmin, requireSystemAdminUser, requireAdminUser } = require("../src/middlewares/authorize");
 const rateLimit = require("../src/middlewares/rateLimit");
 const mailer = require("../controllers/maillerController");
 const register = require("../controllers/registerController");
@@ -41,6 +41,7 @@ const purchaseGoals = require("../controllers/purchaseGoalsController");
 const technicalSheet = require("../controllers/technicalSheetController");
 const customerTracking = require("../controllers/customerTrackingController");
 const ifoodImport = require("../controllers/ifoodImportController");
+const menuImport = require("../controllers/menuImportController");
 const ifood = require("../controllers/ifoodController");
 const deliveries = require("../controllers/deliveriesController");
 const deliveryDrivers = require("../controllers/deliveryDriversController");
@@ -60,6 +61,8 @@ const { customerAuth, optionalCustomerAuth } = require("./middlewares/customerAu
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30, scope: "auth", message: "Muitas tentativas. Aguarde alguns minutos." });
 const publicLimiter = rateLimit({ windowMs: 60 * 1000, max: 300, scope: "public" });
 const googleLimiter = rateLimit({ windowMs: 60 * 1000, max: 60, scope: "google" });
+const menuImportLimiter = rateLimit({ windowMs: 5 * 60 * 1000, max: 10, scope: "menu-import", message: "Muitas importações em sequência. Aguarde alguns minutos." });
+const ifoodPreviewLimiter = rateLimit({ windowMs: 5 * 60 * 1000, max: 10, scope: "ifood-preview", message: "Muitas consultas em sequência. Aguarde alguns minutos." });
 const paymentLimiter = rateLimit({ windowMs: 5 * 60 * 1000, max: 12, scope: "pagarme-payment", message: "Muitas tentativas de pagamento. Aguarde alguns minutos." });
 const paymentMethodsLimiter = rateLimit({ windowMs: 5 * 60 * 1000, max: 30, scope: "pagarme-methods", message: "Muitas tentativas. Aguarde alguns minutos." });
 
@@ -72,12 +75,25 @@ const authorizeCampaign = authorizeByLookup("SELECT company_id FROM campaigns WH
 const authorizeUpsell = authorizeByLookup("SELECT company_id FROM upsell_rules WHERE id = $1", "id");
 const authorizeCoupon = authorizeByLookup("SELECT company_id FROM coupons WHERE id = $1", "id");
 const authorizeGoal = authorizeByLookup("SELECT company_id FROM purchase_goals WHERE id = $1", "id");
+const authorizeOptionGroup = authorizeByLookup("SELECT company_id FROM product_option_groups WHERE id = $1", "groupId");
 const authorizeReview = authorizeByLookup("SELECT company_id FROM order_reviews WHERE id = $1", "id");
 const authorizeDriver = authorizeByLookup("SELECT company_id FROM delivery_drivers WHERE id = $1", "id");
 const authorizeMenuItem = authorizeByLookup("SELECT company_id FROM menu_items WHERE id = $1", "id");
 const authorizeProfessional = authorizeByLookup("SELECT company_id FROM professionals WHERE id = $1", "id");
 const authorizeAppointment = authorizeByLookup("SELECT company_id FROM appointments WHERE id = $1", "id");
 const authorizeConnection = authorizeByLookup("SELECT company_id FROM connections WHERE id = $1", "id");
+// instance_name não tem índice único: em caso de repetição, vale o registro mais antigo.
+const authorizeConnectionInstance = authorizeByLookup(
+  "SELECT company_id FROM connections WHERE instance_name = $1 ORDER BY id LIMIT 1",
+  "instance",
+);
+const authorizeMenuCategory = authorizeByLookup("SELECT company_id FROM menu_categories WHERE id = $1", "id");
+// PATCH /menu_items recebe o id no corpo.
+const authorizeMenuItemBody = authorizeByBodyLookup("SELECT company_id FROM menu_items WHERE id = $1", "id");
+const authorizeMenuItemByProductId = authorizeByLookup("SELECT company_id FROM menu_items WHERE id = $1", "productId");
+const authorizePaymentMethod = authorizeByLookup("SELECT company_id FROM payment_methods WHERE id = $1", "id");
+const authorizeAdditionalInfo = authorizeByLookup("SELECT company_id FROM additional_info WHERE id = $1", "id");
+const authorizeOpeningHours = authorizeByLookup("SELECT company_id FROM company_opening_hours WHERE id = $1", "id");
 const authorizeAiIgnoredPhoneNumber = authorizeByLookup(
   "SELECT company_id FROM ai_ignored_phone_numbers WHERE id = $1",
   "id",
@@ -101,8 +117,8 @@ router.post("/signin", authLimiter, login.signin);
 router.post("/auth/google", authLimiter, googleAuth.googleSignIn);
 
 // USER
-router.get("/users", authMiddleware, user.getAllUsers);
-router.post("/users", authMiddleware, user.createUser);
+router.get("/users", authMiddleware, requireSystemAdmin, user.getAllUsers);
+router.post("/users", authMiddleware, requireSystemAdminUser, user.createUser);
 
 // SEND EMAIL — rate-limited para evitar abuso como relay de spam.
 router.post("/send-email", authLimiter, mailer.sendEmail);
@@ -128,24 +144,30 @@ router.get("/account", authMiddleware, account.find);
 router.patch("/account", authMiddleware, account.update);
 
 //company_opening_hours
-router.get("/company_opening_hours", company_opening_hours.findAll);
-router.get("/company_opening_hours/company/:id", company_opening_hours.findByCompany);
-router.get("/company_opening_hours/:id", company_opening_hours.find);
-router.post("/company_opening_hours", authMiddleware, company_opening_hours.create);
-router.patch("/company_opening_hours/:id", authMiddleware, company_opening_hours.update);
-router.delete("/company_opening_hours/:id", authMiddleware, company_opening_hours.remove);
+router.get("/company_opening_hours", authMiddleware, requireSystemAdmin, company_opening_hours.findAll);
+router.get("/company_opening_hours/company/:id", authMiddleware, authorizeCompanyParam("id"), company_opening_hours.findByCompany);
+router.get("/company_opening_hours/:id", authMiddleware, authorizeOpeningHours, company_opening_hours.find);
+router.post("/company_opening_hours", authMiddleware, authorizeCompanyBody(), company_opening_hours.create);
+router.patch("/company_opening_hours/:id", authMiddleware, authorizeOpeningHours, company_opening_hours.update);
+router.delete("/company_opening_hours/:id", authMiddleware, authorizeOpeningHours, company_opening_hours.remove);
 
 //menu_categories
-router.get("/menu_categories", menu_categories.findAll);
-router.get("/menu_categories/company/:companyId", menu_categories.findByCompany);
-router.get("/menu_categories/:id", menu_categories.find);
-router.post("/menu_categories", authMiddleware, menu_categories.create);
-router.patch("/menu_categories/:id", authMiddleware, menu_categories.update);
-router.delete("/menu_categories/:id", authMiddleware, menu_categories.remove);
+router.get("/menu_categories", authMiddleware, requireSystemAdmin, menu_categories.findAll);
+router.get("/menu_categories/company/:companyId", authMiddleware, authorizeCompanyParam("companyId"), menu_categories.findByCompany);
+router.get("/menu_categories/:id", authMiddleware, authorizeMenuCategory, menu_categories.find);
+router.post("/menu_categories", authMiddleware, authorizeCompanyBody(), menu_categories.create);
+router.patch("/menu_categories/:id", authMiddleware, authorizeMenuCategory, menu_categories.update);
+router.delete("/menu_categories/:id", authMiddleware, authorizeMenuCategory, menu_categories.remove);
 
 //ifood import (preenchimento automático de cardápio)
-router.post("/ifood/import-preview", authMiddleware, ifoodImport.importPreview);
-router.post("/ifood/import", authMiddleware, ifoodImport.importMenu);
+// O preview dispara uma execução paga na Apify a cada chamada.
+router.post("/ifood/import-preview", ifoodPreviewLimiter, authMiddleware, ifoodImport.importPreview);
+// O campo precisa ser "companyId": o padrão checaria `company_id` primeiro, e o controller lê `companyId`.
+router.post("/ifood/import", authMiddleware, authorizeCompanyBody("companyId"), ifoodImport.importMenu);
+
+//importação de cardápio por arquivo (PDF/imagem) ou URL, processada pelo n8n
+// O multer roda antes da autorização porque o company_id vem no corpo multipart.
+router.post("/menu-import", menuImportLimiter, authMiddleware, menuImport.upload, authorizeCompanyBody("company_id"), menuImport.importMenu);
 
 //ifood integração oficial (API de parceiros — perfil, produtos, pedidos)
 router.get("/ifood/merchant/:companyId", authMiddleware, authorizeCompanyParam("companyId"), ifood.getMerchant);
@@ -159,43 +181,44 @@ router.get(
 );
 
 //menu_items
-router.get("/menu_items", menu_items.findAll);
-router.get("/menu_items/company/:id", menu_items.findByCompany);
-router.get("/menu_items/:id", menu_items.find);
+router.get("/menu_items", authMiddleware, requireSystemAdmin, menu_items.findAll);
+router.get("/menu_items/company/:id", authMiddleware, authorizeCompanyParam("id"), menu_items.findByCompany);
+router.get("/menu_items/:id", authMiddleware, authorizeMenuItem, menu_items.find);
 router.post("/menu_items/upload-image", authMiddleware, menu_items.upload.single("image"), menu_items.uploadImage);
-router.post("/menu_items", authMiddleware, menu_items.create);
-router.patch("/menu_items", authMiddleware, menu_items.update);
-router.delete("/menu_items/:id", authMiddleware, menu_items.remove);
+router.post("/menu_items", authMiddleware, authorizeCompanyBody(), menu_items.create);
+router.patch("/menu_items", authMiddleware, authorizeMenuItemBody, menu_items.update);
+router.delete("/menu_items/:id", authMiddleware, authorizeMenuItem, menu_items.remove);
 router.post("/menu_items/:id/duplicate", authMiddleware, authorizeMenuItem, menu_items.duplicate);
 // Ficha técnica (matérias-primas, rendimento e custo por porção) do produto.
 router.get("/menu_items/:id/technical-sheet", authMiddleware, authorizeMenuItem, technicalSheet.find);
 router.put("/menu_items/:id/technical-sheet", authMiddleware, authorizeMenuItem, technicalSheet.save);
 
-router.get("/company/address/:id", company.find);
+router.get("/company/address/:id", authMiddleware, authorizeCompanyParam("id"), company.find);
 router.patch("/company/address", authMiddleware, authorizeCompanyBody("company_id"), company.update);
 
 //companiessss
-router.get("/companiessss", companiessss.findAll);
-router.get("/companiessss/:id", companiessss.find);
+router.get("/companiessss", authMiddleware, requireSystemAdmin, companiessss.findAll);
+router.get("/companiessss/:id", authMiddleware, authorizeCompanyParam("id"), companiessss.find);
 router.post("/companiessss/upload-image", authMiddleware, companiessss.upload.single("image"), companiessss.uploadImage);
-router.post("/companiessss", authMiddleware, companiessss.create);
-router.patch("/companiessss", authMiddleware, companiessss.update);
-router.delete("/companiessss/:id", authMiddleware, companiessss.remove);
+// A empresa criada aqui não fica vinculada a ninguém; o cadastro pelo portal usa POST /companies/withoutid.
+router.post("/companiessss", authMiddleware, requireSystemAdmin, companiessss.create);
+router.patch("/companiessss", authMiddleware, authorizeCompanyBody("id"), companiessss.update);
+router.delete("/companiessss/:id", authMiddleware, authorizeCompanyParam("id"), companiessss.remove);
 
 //payment_methods
-router.get("/payment_methods", payment_methods.findAll);
-router.get("/payment_methods/:id", payment_methods.find);
-router.get("/payment_methods/company/:id", payment_methods.findByCompany);
-router.post("/payment_methods", authMiddleware, payment_methods.create);
-router.patch("/payment_methods/:id", authMiddleware, payment_methods.update);
-router.delete("/payment_methods/:id", authMiddleware, payment_methods.remove);
+router.get("/payment_methods", authMiddleware, requireSystemAdmin, payment_methods.findAll);
+router.get("/payment_methods/:id", authMiddleware, authorizePaymentMethod, payment_methods.find);
+router.get("/payment_methods/company/:id", authMiddleware, authorizeCompanyParam("id"), payment_methods.findByCompany);
+router.post("/payment_methods", authMiddleware, authorizeCompanyBody(), payment_methods.create);
+router.patch("/payment_methods/:id", authMiddleware, authorizePaymentMethod, payment_methods.update);
+router.delete("/payment_methods/:id", authMiddleware, authorizePaymentMethod, payment_methods.remove);
 
 //connections
 router.post("/connections/webhook", verifyWebhookToken, connections.webhook); // chamado pela Evolution API
 router.get("/connections/all/:company", authMiddleware, authorizeCompanyParam("company"), connections.findAll);
-router.get("/connections/qrcode/:instance", authMiddleware, connections.getQrCode);
-router.get("/connections/test/:instance", authMiddleware, connections.testConnection);
-router.get("/connections/status/:instance", authMiddleware, connections.getStatus);
+router.get("/connections/qrcode/:instance", authMiddleware, authorizeConnectionInstance, connections.getQrCode);
+router.get("/connections/test/:instance", authMiddleware, authorizeConnectionInstance, connections.testConnection);
+router.get("/connections/status/:instance", authMiddleware, authorizeConnectionInstance, connections.getStatus);
 router.get(
   "/connections/ignored-numbers/company/:companyId",
   authMiddleware,
@@ -226,11 +249,11 @@ router.post("/admin/flows/update-all", authMiddleware, requireSystemAdminUser, a
 router.post("/search-address", authMiddleware, connections.searchAddress);
 
 //additional_info
-router.get("/additional_info/company/:id", additional_info.findAll);
-router.get("/additional_info/:id", additional_info.find);
-router.post("/additional_info", authMiddleware, additional_info.create);
-router.patch("/additional_info/:id", authMiddleware, additional_info.update);
-router.delete("/additional_info/:id", authMiddleware, additional_info.remove);
+router.get("/additional_info/company/:id", authMiddleware, authorizeCompanyParam("id"), additional_info.findAll);
+router.get("/additional_info/:id", authMiddleware, authorizeAdditionalInfo, additional_info.find);
+router.post("/additional_info", authMiddleware, authorizeCompanyBody(), additional_info.create);
+router.patch("/additional_info/:id", authMiddleware, authorizeAdditionalInfo, additional_info.update);
+router.delete("/additional_info/:id", authMiddleware, authorizeAdditionalInfo, additional_info.remove);
 
 //clients
 router.get("/clients/company/:id/summary", authMiddleware, authorizeCompanyParam("id"), clients.getSummary);
@@ -413,7 +436,7 @@ router.get("/address/details/:placeId", googleLimiter, address.details);
 
 // ─── Identidade de cliente (camada global) ────────────────────────────────────
 // Resolução de identidade para o n8n (aceita service key `x-api-key` via authMiddleware).
-router.post("/identity/resolve", authMiddleware, identity.resolve);
+router.post("/identity/resolve", authMiddleware, authorizeCompanyBody(), identity.resolve);
 // Endereços salvos do usuário (público — prova de posse via telefone, rate-limited).
 router.get("/public/addresses", publicLimiter, identity.listAddresses);
 router.post("/public/addresses", publicLimiter, identity.createAddress);
@@ -426,11 +449,11 @@ router.post("/public/orders/:orderId/messages", publicLimiter, orderMessages.pub
 
 // product options / additionals
 router.post("/product-options/upload-item-image", authMiddleware, productOptions.upload.single("image"), productOptions.uploadImage);
-router.get("/product-options/product/:productId", authMiddleware, productOptions.findByProduct);
-router.post("/product-options", authMiddleware, productOptions.create);
-router.patch("/product-options/reorder/:productId", authMiddleware, productOptions.reorder);
-router.patch("/product-options/:groupId", authMiddleware, productOptions.update);
-router.delete("/product-options/:groupId", authMiddleware, productOptions.remove);
+router.get("/product-options/product/:productId", authMiddleware, authorizeMenuItemByProductId, productOptions.findByProduct);
+router.post("/product-options", authMiddleware, authorizeCompanyBody(), productOptions.create);
+router.patch("/product-options/reorder/:productId", authMiddleware, authorizeMenuItemByProductId, productOptions.reorder);
+router.patch("/product-options/:groupId", authMiddleware, authorizeOptionGroup, productOptions.update);
+router.delete("/product-options/:groupId", authMiddleware, authorizeOptionGroup, productOptions.remove);
 router.get("/public/product-options/:productId", publicLimiter, productOptions.publicFindByProduct);
 
 // purchase goals (objetivo de compra)

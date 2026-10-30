@@ -1,4 +1,5 @@
 const service = require("../services/purchaseGoalsService");
+const { resolveCompanyId } = require("../src/middlewares/authorize");
 
 const _int = (v) => {
   const n = Number(v);
@@ -56,7 +57,7 @@ const setStatus = async (req, res) => {
 
 const remove = async (req, res) => {
   const id = _int(req.params.id);
-  const companyId = _int(req.query.company_id ?? req.body?.company_id);
+  const companyId = _int(resolveCompanyId(req));
   if (!id || id <= 0) return res.status(400).json({ error: "Invalid id" });
   if (!companyId || companyId <= 0) return res.status(400).json({ error: "Invalid company_id" });
   try {

@@ -1,4 +1,5 @@
 const service = require("../services/menu_itemsService");
+const { companyScopedBody } = require("../src/middlewares/authorize");
 const minio = require("./minioController");
 const multer = require("multer");
 
@@ -69,7 +70,7 @@ const create = async (req, res) => {
     return res.status(400).json({ error: "Invalid request body" });
   }
   try {
-    const newItem = await service.create(menu_items);
+    const newItem = await service.create(companyScopedBody(req));
     return res.status(201).json(newItem);
   } catch (error) {
     console.error("Error creating MenuItems:", error);
@@ -87,7 +88,7 @@ const update = async (req, res) => {
     return res.status(400).json({ error: "Invalid ID" });
   }
   try {
-    const updated = await service.update({ ...menu_items, id: parseInt(id) });
+    const updated = await service.update({ ...companyScopedBody(req), id: parseInt(id) });
     if (!updated) return res.status(404).json({ error: "MenuItems not found" });
     return res.status(200).json(updated);
   } catch (error) {

@@ -1,4 +1,5 @@
 const service = require("../services/payment_methodsService");
+const { companyScopedBody } = require("../src/middlewares/authorize");
 
 /**
  * Get all PaymentMethods
@@ -58,7 +59,7 @@ const create = async (req, res) => {
     return res.status(400).json({ error: "Invalid request body" });
   }
   try {
-    const newItem = await service.create(payment_methods);
+    const newItem = await service.create(companyScopedBody(req));
     return res.status(201).json(newItem);
   } catch (error) {
     console.error("Error creating PaymentMethods:", error);

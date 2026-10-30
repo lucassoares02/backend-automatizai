@@ -5,6 +5,7 @@ const couponsService = require("./couponsService");
 const bookingService = require("./bookingService");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 const { columnExists, tableExists } = require("../helpers/schema");
+const { assertIdsBelongToCompany } = require("../helpers/tenantOwnership");
 const STATUS_IN_PROGRESS = [1, 2, 3, 4, 8];
 const STATUS_COMPLETED = [5, 9];
 const STATUS_CANCELLED = [6, 7];
@@ -99,7 +100,7 @@ const ORDER_SELECT = `
           WHERE m.order_id = o.id AND m.sender_type = 'customer' AND m.is_read = false) AS unread_messages_count
          /*APPOINTMENT*/
   FROM orders o
-  JOIN clients c ON c.id = o.client_id
+  LEFT JOIN clients c ON c.id = o.client_id AND c.company_id = o.company_id
   LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id
 `;
 
@@ -192,16 +193,15 @@ const summarize = async (companyId) => {
   return result.rows[0];
 };
 
+const CLIENT_NOT_OWNED = "Cliente não pertence a esta empresa.";
+
+// O corpo pode trazer o id como string; a conferência de dono e a gravação usam o mesmo número.
+const _toId = (value) => (value === null || value === undefined ? null : Number(value));
+
 const create = async (data) => {
-  const {
-    company_id,
-    client_id,
-    notes,
-    items,
-    payment_method_id,
-    delivery_address,
-    scheduled_for,
-  } = data;
+  const { company_id, notes, items, delivery_address, scheduled_for } = data;
+  const client_id = Number(data.client_id);
+  const payment_method_id = _toId(data.payment_method_id);
 
   // delivery_type é BOOLEAN no DB (TRUE = entrega, FALSE = retirada).
   // Aceita boolean direto, ou string 'delivery'/'pickup' por compatibilidade.
@@ -229,6 +229,10 @@ const create = async (data) => {
     }
     scheduledFor = parsed.toISOString();
   }
+
+  await assertIdsBelongToCompany("clients", [client_id], company_id, CLIENT_NOT_OWNED);
+  await assertIdsBelongToCompany("payment_methods", [payment_method_id], company_id, "Forma de pagamento não pertence a esta empresa.");
+  await assertIdsBelongToCompany("menu_items", items.map((i) => _toId(i.menu_item_id)), company_id, "Produto não pertence a esta empresa.");
 
   const client = await pool.connect();
   try {
@@ -297,7 +301,7 @@ const create = async (data) => {
       await client.query(
         `INSERT INTO order_items (order_id, menu_item_id, item_name, quantity, item_price, subtotal)
          VALUES ($1, $2, $3, $4, $5, $6)`,
-        [order.id, item.menu_item_id ?? null, item.name, item.quantity, item.unit_price, item.subtotal],
+        [order.id, _toId(item.menu_item_id), item.name, item.quantity, item.unit_price, item.subtotal],
       );
     }
 
@@ -426,6 +430,15 @@ const upsertCart = async ({ order: orderId, company_id, client_id, items }) => {
   const ids = [...qtyById.keys()];
   const menuById = await _resolveMenuItems(companyId, ids);
 
+  // Na edição o client_id do corpo é ignorado: o cliente do pedido não muda.
+  const clientId = Number(client_id);
+  if (orderId == null) {
+    if (!Number.isInteger(clientId) || clientId <= 0) {
+      throw Object.assign(new Error("client_id é obrigatório para criar o pedido."), { status: 400 });
+    }
+    await assertIdsBelongToCompany("clients", [clientId], companyId, CLIENT_NOT_OWNED);
+  }
+
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -433,10 +446,6 @@ const upsertCart = async ({ order: orderId, company_id, client_id, items }) => {
     let order;
     if (orderId == null) {
       // ── CRIAÇÃO ──────────────────────────────────────────────────────────
-      const clientId = Number(client_id);
-      if (!Number.isInteger(clientId) || clientId <= 0) {
-        throw Object.assign(new Error("client_id é obrigatório para criar o pedido."), { status: 400 });
-      }
       const subtotal = ids.reduce((sum, id) => sum + menuById.get(id).price * qtyById.get(id), 0);
       const tag = await generateUniqueOrderTag(client);
       const orderRes = await client.query(

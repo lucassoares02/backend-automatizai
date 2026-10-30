@@ -1,4 +1,5 @@
 const service = require("../services/campaignsService");
+const { resolveCompanyId } = require("../src/middlewares/authorize");
 
 const findByCompany = async (req, res) => {
   try {
@@ -14,7 +15,7 @@ const findByCompany = async (req, res) => {
 const find = async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const companyId = Number(req.query.company_id || req.companyId);
+    const companyId = resolveCompanyId(req);
     const row = await service.find(id, companyId);
     if (!row) return res.status(404).json({ error: "Campanha não encontrada" });
     return res.status(200).json(row);
@@ -53,7 +54,7 @@ const create = async (req, res) => {
 const update = async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const companyId = Number(req.body.company_id);
+    const companyId = resolveCompanyId(req);
     const result = await service.update(id, companyId, req.body);
     return res.status(200).json(result);
   } catch (error) {
@@ -76,7 +77,7 @@ const dispatch = async (req, res) => {
 const remove = async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const companyId = Number(req.query.company_id);
+    const companyId = resolveCompanyId(req);
     const result = await service.remove(id, companyId);
     return res.status(200).json(result);
   } catch (error) {

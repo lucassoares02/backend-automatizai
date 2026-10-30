@@ -38,7 +38,7 @@ api/
 
 - Health: `GET /`
 - Auth: `POST /signin`
-- Users: `GET /users` (auth), `POST /users`
+- Users: `GET /users` (admin do sistema ou serviço), `POST /users` (admin do sistema por JWT)
 - Mail: `POST /send-email`
 - Register/Companies:
   `POST /register`, `POST /companies/withoutid` (auth), `POST /companies`, `GET /cnpj/:cnpj`
@@ -53,6 +53,7 @@ api/
 - Payment methods (CRUD + `GET /payment_methods/company/:id`)
 - Connections:
   `GET /connections/all/:company`, `GET /connections/:id`, `POST /connections`, `PATCH /connections/:id`, `DELETE /connections/:id/:instance`, `POST /search-address`
+- Leituras de cardápio, horários, pagamentos, informações e empresa exigem login e vínculo com a empresa; listagens globais são só de admin do sistema. O cardápio público usa `/public/*`.
 - Additional info:
   `GET /additional_info/company/:id`, `GET /additional_info/:id`, `POST /additional_info`, `PATCH /additional_info/:id`, `DELETE /additional_info/:id`
 

@@ -118,12 +118,14 @@ const importPreview = async (req, res) => {
 // ─── POST /ifood/import ─────────────────────────────────────────────────────
 
 const importMenu = async (req, res) => {
-  const companyId = parseInt(req.body?.companyId, 10);
+  // Number(), e não parseInt(): a autorização não vale para o principal de serviço,
+  // e parseInt leria "1e1" como empresa 1.
+  const companyId = Number(req.body?.companyId);
   const items = Array.isArray(req.body?.items) ? req.body.items : [];
   // 'ignore' | 'update' — o que fazer com produtos já existentes (mesmo nome+categoria)
   const conflictStrategy = req.body?.conflictStrategy === "update" ? "update" : "ignore";
 
-  if (!companyId || Number.isNaN(companyId)) {
+  if (!Number.isInteger(companyId) || companyId <= 0) {
     return res.status(400).json({ error: "INVALID_COMPANY", message: "Empresa inválida." });
   }
   if (items.length === 0) {
