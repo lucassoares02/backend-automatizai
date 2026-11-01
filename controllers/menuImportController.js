@@ -3,10 +3,14 @@ const service = require("../services/menuImportService");
 
 const MAX_URL_LENGTH = 2048;
 const ALLOWED_MIME_TYPES = ["application/pdf", "image/jpeg", "image/jpg", "image/png", "image/webp"];
+const MAX_PDF_BYTES = 50 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
 const _upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
+  // O multer aplica um único teto; o limite menor das imagens é conferido em `upload`.
+  // O +1 é porque ele recusa o arquivo ao atingir o teto, e 50 MB exatos são permitidos.
+  limits: { fileSize: MAX_PDF_BYTES + 1 },
   fileFilter: (_req, file, cb) => {
     if (ALLOWED_MIME_TYPES.includes(file.mimetype)) return cb(null, true);
     const error = new Error("Formato não suportado. Use PDF, JPG, PNG ou WEBP.");
@@ -18,9 +22,14 @@ const _upload = multer({
 // Traduz os erros do multer em respostas 4xx (o handler global devolveria 500).
 const upload = (req, res, next) => {
   _upload.single("file")(req, res, (error) => {
-    if (!error) return next();
+    if (!error) {
+      if (req.file && req.file.mimetype !== "application/pdf" && req.file.size > MAX_IMAGE_BYTES) {
+        return res.status(413).json({ error: "FILE_TOO_LARGE", message: "A imagem deve ter no máximo 10 MB." });
+      }
+      return next();
+    }
     if (error.code === "LIMIT_FILE_SIZE") {
-      return res.status(413).json({ error: "FILE_TOO_LARGE", message: "O arquivo deve ter no máximo 10 MB." });
+      return res.status(413).json({ error: "FILE_TOO_LARGE", message: "O arquivo deve ter no máximo 50 MB." });
     }
     if (error.code === "INVALID_FILE") {
       return res.status(400).json({ error: "INVALID_FILE", message: error.message });

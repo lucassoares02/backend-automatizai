@@ -1,6 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const express = require("express");
 const controller = require("../controllers/menuImportController");
+const service = require("../services/menuImportService");
 
 const fakeRes = () => {
   const res = { statusCode: null, body: null };
@@ -24,6 +26,62 @@ const withFetch = async (impl, fn) => {
 };
 
 const ok = () => new Response("{}", { status: 200 });
+
+const MB = 1024 * 1024;
+
+// Passa o multipart real pelo multer, com o envio ao webhook substituído.
+const postFile = async ({ size, type, name }) => {
+  const original = service.sendToWebhook;
+  const sent = [];
+  service.sendToWebhook = async (args) => { sent.push(args); };
+
+  const app = express();
+  app.post("/menu-import", controller.upload, controller.importMenu);
+  const server = await new Promise((resolve) => {
+    const s = app.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  try {
+    const form = new FormData();
+    form.append("company_id", "7");
+    form.append("file", new Blob([Buffer.alloc(size)], { type }), name);
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/menu-import`, { method: "POST", body: form });
+    return { status: res.status, body: await res.json(), sent };
+  } finally {
+    service.sendToWebhook = original;
+    await new Promise((resolve) => server.close(resolve));
+  }
+};
+
+test("PDF de 45 MB passa pelo limite e chega inteiro ao webhook", async () => {
+  const { status, sent } = await postFile({ size: 45 * MB, type: "application/pdf", name: "cardapio.pdf" });
+
+  assert.equal(status, 200);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].file.buffer.length, 45 * MB);
+});
+
+test("PDF de exatamente 50 MB é aceito", async () => {
+  const { status } = await postFile({ size: 50 * MB, type: "application/pdf", name: "cardapio.pdf" });
+  assert.equal(status, 200);
+});
+
+test("PDF acima de 50 MB é recusado com 413", async () => {
+  const { status, body, sent } = await postFile({ size: 50 * MB + 1, type: "application/pdf", name: "cardapio.pdf" });
+
+  assert.equal(status, 413);
+  assert.equal(body.error, "FILE_TOO_LARGE");
+  assert.equal(sent.length, 0);
+});
+
+test("imagem continua limitada a 10 MB", async () => {
+  const accepted = await postFile({ size: 10 * MB, type: "image/png", name: "cardapio.png" });
+  assert.equal(accepted.status, 200);
+
+  const refused = await postFile({ size: 10 * MB + 1, type: "image/png", name: "cardapio.png" });
+  assert.equal(refused.status, 413);
+  assert.equal(refused.body.error, "FILE_TOO_LARGE");
+  assert.equal(refused.sent.length, 0);
+});
 
 test("URL é encaminhada ao webhook via https com company_id e source", async () => {
   await withFetch(ok, async (calls) => {

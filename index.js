@@ -83,7 +83,7 @@ app.use("/api/stripe/webhook", express.raw({ type: "*/*" }));
 app.use("/api/pagarme/webhook", express.raw({ type: "*/*", limit: "256kb" }));
 
 // Limite de tamanho de corpo — mitiga DoS por payload grande. Uploads de imagem
-// usam multer (limite próprio de 10MB), não passam por aqui.
+// usam multer (limite próprio em cada controller), não passam por aqui.
 app.use(express.urlencoded({ extended: true, limit: "256kb" }));
 app.use(express.json({ limit: "256kb" }));
 
