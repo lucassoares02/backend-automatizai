@@ -25,6 +25,42 @@ const findTodayByCompany = async (req, res) => {
   }
 };
 
+const unseenCountByCompany = async (req, res) => {
+  const { id } = req.params;
+  if (!id || isNaN(id)) return res.status(400).json({ error: "Invalid company ID" });
+  try {
+    const data = await service.unseenCountByCompany(id);
+    return res.status(200).json(data);
+  } catch (error) {
+    console.error("Error fetching unseen orders count:", error);
+    return res.status(500).json({ error: "Failed to fetch unseen orders count" });
+  }
+};
+
+const markCompanyOrdersViewed = async (req, res) => {
+  const { id } = req.params;
+  if (!id || isNaN(id)) return res.status(400).json({ error: "Invalid company ID" });
+  try {
+    const trackingEnabled = await service.markCompanyOrdersViewed(id);
+    return res.status(200).json({ success: true, tracking_enabled: trackingEnabled });
+  } catch (error) {
+    console.error("Error marking company orders as viewed:", error);
+    return res.status(500).json({ error: "Failed to mark orders as viewed" });
+  }
+};
+
+const markOrderViewed = async (req, res) => {
+  const { id } = req.params;
+  if (!id || isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
+  try {
+    const trackingEnabled = await service.markOrderViewed(id);
+    return res.status(200).json({ success: true, tracking_enabled: trackingEnabled });
+  } catch (error) {
+    console.error("Error marking order as viewed:", error);
+    return res.status(500).json({ error: "Failed to mark order as viewed" });
+  }
+};
+
 const find = async (req, res) => {
   const { id } = req.params;
   if (!id || isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
@@ -170,6 +206,9 @@ const remove = async (req, res) => {
 module.exports = {
   findByCompany,
   findTodayByCompany,
+  unseenCountByCompany,
+  markCompanyOrdersViewed,
+  markOrderViewed,
   find,
   summarize,
   create,

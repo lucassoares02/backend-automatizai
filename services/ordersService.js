@@ -157,6 +157,51 @@ const findTodayByCompany = async (companyId) => {
   return result.rows;
 };
 
+const unseenCountByCompany = async (companyId) => {
+  if (!(await columnExists("orders", "merchant_viewed"))) {
+    return { tracking_enabled: false, count: 0 };
+  }
+
+  const hasAppointments = await tableExists("appointments");
+  const appointmentFilter = hasAppointments
+    ? `AND (
+         NOT EXISTS (SELECT 1 FROM appointments a WHERE a.order_id = o.id)
+         OR EXISTS (
+           SELECT 1 FROM appointments a
+           WHERE a.order_id = o.id AND a.status IN ('pending', 'confirmed')
+         )
+       )`
+    : "";
+  const result = await pool.query(
+    `SELECT COUNT(*)::int AS count
+     FROM orders o
+     WHERE o.company_id = $1
+       AND o.merchant_viewed = false
+       ${appointmentFilter}`,
+    [companyId],
+  );
+  return { tracking_enabled: true, count: result.rows[0]?.count ?? 0 };
+};
+
+const markCompanyOrdersViewed = async (companyId) => {
+  if (!(await columnExists("orders", "merchant_viewed"))) return false;
+  await pool.query(
+    `UPDATE orders SET merchant_viewed = true
+     WHERE company_id = $1 AND merchant_viewed = false`,
+    [companyId],
+  );
+  return true;
+};
+
+const markOrderViewed = async (orderId) => {
+  if (!(await columnExists("orders", "merchant_viewed"))) return false;
+  await pool.query(
+    "UPDATE orders SET merchant_viewed = true WHERE id = $1",
+    [orderId],
+  );
+  return true;
+};
+
 const find = async (id) => {
   const result = await pool.query(
     `${await _orderSelect()}
@@ -861,6 +906,9 @@ const remove = async (id) => {
 module.exports = {
   findByCompany,
   findTodayByCompany,
+  unseenCountByCompany,
+  markCompanyOrdersViewed,
+  markOrderViewed,
   find,
   summarize,
   create,

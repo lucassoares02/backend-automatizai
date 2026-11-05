@@ -271,6 +271,9 @@ router.post("/orders/:orderId/messages", authMiddleware, authorizeOrderByOrderId
 router.patch("/orders/:orderId/messages/read", authMiddleware, authorizeOrderByOrderId, orderMessages.markRead);
 
 //orders
+router.get("/orders/unseen/:id", authMiddleware, authorizeCompanyParam("id"), orders.unseenCountByCompany);
+router.patch("/orders/company/:id/seen", authMiddleware, authorizeCompanyParam("id"), orders.markCompanyOrdersViewed);
+router.patch("/orders/:id/seen", authMiddleware, authorizeOrder, orders.markOrderViewed);
 router.get("/orders/company/:id", authMiddleware, authorizeCompanyParam("id"), orders.findByCompany);
 router.get("/orders/today/:id", authMiddleware, authorizeCompanyParam("id"), orders.findTodayByCompany);
 router.get("/orders/summary/:id", authMiddleware, authorizeCompanyParam("id"), orders.summarize);
