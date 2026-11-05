@@ -75,6 +75,20 @@ const reschedule = async (req, res) => {
   }
 };
 
+// GET /appointments/:id/professionals?starts_at — quem está livre para assumir
+const professionalOptions = async (req, res) => {
+  const { id } = req.params;
+  if (!_validId(id)) return res.status(400).json({ error: "Invalid ID" });
+  try {
+    const data = await service.professionalOptions(id, {
+      startsAt: req.query.starts_at ? String(req.query.starts_at) : null,
+    });
+    return res.status(200).json(data);
+  } catch (error) {
+    return _fail(res, error, "Failed to fetch professionals");
+  }
+};
+
 // GET /orders/:id/appointment
 const findByOrder = async (req, res) => {
   const { id } = req.params;
@@ -142,6 +156,7 @@ module.exports = {
   availability,
   create,
   reschedule,
+  professionalOptions,
   findByOrder,
   noShow,
   aiServices,

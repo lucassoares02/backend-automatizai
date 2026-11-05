@@ -370,6 +370,7 @@ router.get("/appointments/company/:companyId", authMiddleware, authorizeCompanyP
 router.get("/appointments/company/:companyId/availability", authMiddleware, authorizeCompanyParam("companyId"), appointments.availability);
 router.post("/appointments", authMiddleware, authorizeCompanyBody(), appointments.create);
 router.patch("/appointments/:id/reschedule", authMiddleware, authorizeAppointment, appointments.reschedule);
+router.get("/appointments/:id/professionals", authMiddleware, authorizeAppointment, appointments.professionalOptions);
 
 //dashboard (aggregated executive view)
 router.get("/dashboard/:companyId", authMiddleware, authorizeCompanyParam("companyId"), dashboard.getDashboard);

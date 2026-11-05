@@ -93,6 +93,56 @@ const _forcedSlot = async (db, { service, professional, startsAt, excludeAppoint
   return { professional, slot: { time: null, startsAt, endsAt, blockedUntil } };
 };
 
+const _UNAVAILABLE_MESSAGES = {
+  busy: "Esse profissional já tem outro agendamento nesse horário.",
+  time_off: "Esse profissional está de folga/bloqueado nesse horário.",
+  outside_hours: "Esse horário está fora da jornada do profissional.",
+  invalid: "Defina a duração do serviço antes de agendar.",
+};
+
+// Disponibilidade dos profissionais no instante EXATO (sem a grade de slots):
+// jornada ∩ abertura da loja, folgas e colisões, ignorando o próprio
+// agendamento. Retorna Map<professionalId, resultado do checkStartAt>.
+const _availabilityAt = async (db, { company, service, professionals, startsAt, excludeAppointmentId = null }) => {
+  const out = new Map();
+  if (!professionals.length) return out;
+  const date = slots.localDate(startsAt, company.timezone);
+  const { from, to } = _rangeFor(company, date, date);
+  const [agenda, openingHours] = await Promise.all([
+    _loadAgenda(db, professionals.map((p) => Number(p.id)), from, to, { excludeAppointmentId }),
+    _loadOpeningHours(db, company.id),
+  ]);
+  for (const professional of professionals) {
+    const id = Number(professional.id);
+    out.set(
+      id,
+      slots.checkStartAt({
+        startsAt,
+        timezone: company.timezone,
+        openingHours,
+        workingHours: agenda.hours.get(id) || [],
+        durationMinutes: _durationFor(service, professional),
+        bufferMinutes: Number(service.buffer_minutes) || 0,
+        busy: agenda.busy.get(id) || [],
+        timeOff: agenda.timeOff.get(id) || [],
+      }),
+    );
+  }
+  return out;
+};
+
+// Valida o horário exato para UM profissional (já travado na transação).
+const _exactSlot = async (db, { company, service, professional, startsAt, excludeAppointmentId }) => {
+  const check = (
+    await _availabilityAt(db, { company, service, professionals: [professional], startsAt, excludeAppointmentId })
+  ).get(Number(professional.id));
+  if (!check.ok) {
+    if (check.reason === "invalid") throw _error(400, _UNAVAILABLE_MESSAGES.invalid);
+    throw _error(409, _UNAVAILABLE_MESSAGES[check.reason], "BOOKING_SLOT_TAKEN");
+  }
+  return { professional, slot: { time: null, startsAt, endsAt: check.endsAt, blockedUntil: check.blockedUntil } };
+};
+
 const _reminderResetSql = async () => {
   const [r24, r2] = await Promise.all([
     columnExists("appointments", "reminder_24h_sent_at"),
@@ -329,6 +379,7 @@ const rescheduleByStore = async (appointmentId, { startsAt: rawStartsAt, profess
   let releasedOrders = [];
   let current;
   let chosen;
+  let moved = false;
   try {
     await client.query("BEGIN");
     current = (await client.query("SELECT * FROM appointments WHERE id = $1 FOR UPDATE", [id])).rows[0];
@@ -353,17 +404,18 @@ const rescheduleByStore = async (appointmentId, { startsAt: rawStartsAt, profess
       const professionals = await _loadProfessionals(client, company.id, service.id, { lock: true, onlyId: wanted });
       if (!professionals.length) throw _error(409, "Esse profissional não executa este serviço.");
       releasedOrders = await _releaseHolds(client, [wanted]);
-      chosen = await _resolveSlot(client, {
+      // Horário exato (a loja pode manter um encaixe fora da grade de slots):
+      // jornada, folgas e nenhum outro agendamento ativo do profissional.
+      chosen = await _exactSlot(client, {
         company,
         service,
-        professionals,
+        professional: professionals[0],
         startsAt,
         excludeAppointmentId: id,
-        admin: true,
       });
     }
 
-    const moved = new Date(current.starts_at).getTime() !== chosen.slot.startsAt.getTime();
+    moved = new Date(current.starts_at).getTime() !== chosen.slot.startsAt.getTime();
     await client.query(
       `UPDATE appointments
        SET professional_id = $2, starts_at = $3, ends_at = $4, blocked_until = $5,
@@ -392,8 +444,63 @@ const rescheduleByStore = async (appointmentId, { startsAt: rawStartsAt, profess
     client.release();
   }
   _cancelReleasedOrders(releasedOrders);
-  if (notify) orderWebhookService.notifyAppointmentEvent(current.order_id, "rescheduled");
+  // Só a troca de profissional (mesmo horário) não é remarcação para o cliente.
+  if (notify && moved) orderWebhookService.notifyAppointmentEvent(current.order_id, "rescheduled");
   return getOrderAppointment(current.order_id);
+};
+
+/**
+ * GET /appointments/:id/professionals?starts_at — profissionais (ativos, que
+ * executam o serviço) LIVRES no horário do agendamento (ou em `starts_at`),
+ * sem o atual. Quem está ocupado, de folga ou fora da jornada não entra na
+ * lista; `unavailable` traz só a contagem por motivo.
+ */
+const professionalOptions = async (appointmentId, { startsAt: rawStartsAt = null } = {}) => {
+  await _ensureSchema();
+  const id = _positiveInt(appointmentId);
+  if (!id) throw _error(400, "Agendamento inválido.");
+  const current = (await pool.query("SELECT * FROM appointments WHERE id = $1", [id])).rows[0];
+  if (!current) throw _error(404, "Agendamento não encontrado.");
+  const company = await _company(current.company_id);
+  const service = current.menu_item_id ? await _loadServiceAny(pool, company.id, current.menu_item_id) : null;
+  if (!service) throw _error(409, "O serviço deste agendamento não existe mais.");
+  const startsAt = rawStartsAt ? _parseStartsAt(rawStartsAt) : new Date(current.starts_at);
+
+  const candidates = (await _loadProfessionals(pool, company.id, service.id)).filter(
+    (p) => Number(p.id) !== Number(current.professional_id),
+  );
+  const checks = await _availabilityAt(pool, {
+    company,
+    service,
+    professionals: candidates,
+    startsAt,
+    excludeAppointmentId: id,
+  });
+  const unavailable = { busy: 0, time_off: 0, outside_hours: 0 };
+  const available = [];
+  for (const p of candidates) {
+    const check = checks.get(Number(p.id));
+    if (check?.ok) {
+      available.push({
+        id: Number(p.id),
+        name: p.name,
+        photo_url: p.photo_url,
+        price: _priceFor(service, p),
+        duration_minutes: _durationFor(service, p),
+        ends_at: check.endsAt.toISOString(),
+      });
+    } else if (check && unavailable[check.reason] != null) {
+      unavailable[check.reason] += 1;
+    }
+  }
+  available.sort((a, b) => String(a.name).localeCompare(String(b.name), "pt-BR"));
+  return {
+    appointment_id: id,
+    starts_at: startsAt.toISOString(),
+    current_professional_id: Number(current.professional_id),
+    professionals: available,
+    unavailable,
+  };
 };
 
 // ─── Encaixe manual (painel) ─────────────────────────────────────────────────
@@ -770,6 +877,7 @@ module.exports = {
   listAgenda,
   adminAvailability,
   rescheduleByStore,
+  professionalOptions,
   createManualBooking,
   markNoShow,
   getOrderAppointment,

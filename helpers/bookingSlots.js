@@ -208,6 +208,49 @@ const buildDaySlots = ({
   return slots.sort((a, b) => a.startsAt - b.startsAt);
 };
 
+/**
+ * Confere se UM profissional atende no instante EXATO `startsAt` (sem grade de
+ * `step`): serviço inteiro dentro da jornada ∩ abertura da loja, sem folga e
+ * sem colidir com outro agendamento ativo (incluindo o buffer).
+ *
+ * Retorna `{ ok, reason, endsAt, blockedUntil }`; `reason` ∈ "busy" (outro
+ * agendamento), "time_off" (folga/bloqueio), "outside_hours" (fora da jornada)
+ * ou "invalid" (duração/horário inválidos).
+ */
+const checkStartAt = ({
+  startsAt,
+  timezone,
+  openingHours,
+  workingHours,
+  durationMinutes,
+  bufferMinutes = 0,
+  busy = [],
+  timeOff = [],
+}) => {
+  const duration = Number(durationMinutes);
+  const start = _ms(startsAt);
+  if (!Number.isFinite(start) || !Number.isInteger(duration) || duration <= 0) {
+    return { ok: false, reason: "invalid", endsAt: null, blockedUntil: null };
+  }
+  const buffer = Math.max(0, Number(bufferMinutes) || 0);
+  const end = start + duration * 60000;
+  const blocked = end + buffer * 60000;
+  const result = (ok, reason = null) => ({ ok, reason, endsAt: new Date(end), blockedUntil: new Date(blocked) });
+
+  if (_overlaps(start, blocked, busy)) return result(false, "busy");
+  if (_overlaps(start, end, timeOff)) return result(false, "time_off");
+
+  const tz = resolveTimezone(timezone);
+  const date = localDate(start, tz);
+  const weekday = weekdayOf(date);
+  let windows = professionalDayIntervals(workingHours, weekday);
+  const company = companyDayIntervals(openingHours, weekday);
+  if (company) windows = intersectIntervals(windows, company);
+  const t = Math.round((start - zonedTimeToUtc(date, 0, tz).getTime()) / 60000);
+  const fits = windows.some((w) => t >= w.start && t + duration <= w.end);
+  return fits ? result(true) : result(false, "outside_hours");
+};
+
 module.exports = {
   DEFAULT_TIMEZONE,
   resolveTimezone,
@@ -222,4 +265,5 @@ module.exports = {
   professionalDayIntervals,
   intersectIntervals,
   buildDaySlots,
+  checkStartAt,
 };
