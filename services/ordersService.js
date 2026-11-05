@@ -72,6 +72,7 @@ const ORDER_SELECT = `
                 'menu_item_id', oi.menu_item_id,
                 'item_name', oi.item_name,
                 'name', oi.item_name,
+                'image_url', (SELECT mi.image_url FROM menu_items mi WHERE mi.id = oi.menu_item_id),
                 'quantity', oi.quantity,
                 'item_price', oi.item_price,
                 'unit_price', oi.item_price,
