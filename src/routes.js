@@ -514,6 +514,7 @@ router.post("/public/customer-tracking/location", publicLimiter, customerTrackin
 router.post("/public/customer-tracking/order", publicLimiter, customerTracking.attachOrder);
 router.post("/public/customer-tracking/event", publicLimiter, customerTracking.trackEvent);
 router.get("/customer-tracking/company/:companyId/sessions", authMiddleware, authorizeCompanyParam("companyId"), customerTracking.listSessions);
+router.get("/customer-tracking/company/:companyId/session/:sessionId", authMiddleware, authorizeCompanyParam("companyId"), customerTracking.getSessionDetails);
 router.get("/customer-tracking/company/:companyId/map", authMiddleware, authorizeCompanyParam("companyId"), customerTracking.listMapPoints);
 router.get("/customer-tracking/company/:companyId/metrics", authMiddleware, authorizeCompanyParam("companyId"), customerTracking.getMetrics);
 router.get("/customer-tracking/company/:companyId/session/:sessionId/events", authMiddleware, authorizeCompanyParam("companyId"), customerTracking.listSessionEvents);

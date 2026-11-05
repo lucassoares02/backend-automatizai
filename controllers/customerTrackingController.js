@@ -55,6 +55,20 @@ const listSessions = async (req, res) => {
   }
 };
 
+const getSessionDetails = async (req, res) => {
+  try {
+    const data = await tracking.getSessionDetails(
+      req.params.companyId,
+      req.params.sessionId,
+    );
+    if (!data) return res.status(404).json({ error: "Sessão não encontrada" });
+    res.json(data);
+  } catch (err) {
+    console.error("tracking.sessionDetails error:", err.message);
+    res.status(500).json({ error: "Erro ao obter detalhes da sessão" });
+  }
+};
+
 const listMapPoints = async (req, res) => {
   try {
     const data = await tracking.listMapPoints(req.params.companyId);
@@ -113,6 +127,7 @@ module.exports = {
   attachOrder,
   trackEvent,
   listSessions,
+  getSessionDetails,
   listMapPoints,
   getMetrics,
   listSessionEvents,

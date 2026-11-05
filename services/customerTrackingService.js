@@ -19,9 +19,13 @@ const VALID_STEPS = new Set([
   "identify",
   "address",
   "checkout",
+  "card_entry",
+  "payment_processing",
+  "payment",
   "success",
   "tracking",
   "history",
+  "cancel",
 ]);
 
 const _str = (v, max = 255) => {
@@ -269,6 +273,27 @@ const listSessions = async (companyId, opts = {}) => {
   return res.rows;
 };
 
+const getSessionDetails = async (companyId, sessionId) => {
+  const cid = _int(companyId);
+  const sid = _str(sessionId, 64);
+  if (!cid || !sid) return null;
+
+  const res = await pool.query(
+    `SELECT s.id, s.session_id, s.company_id, s.customer_id,
+            s.customer_name, s.customer_phone, s.status, s.current_step,
+            s.cart_items_count, s.subtotal, s.cart_items,
+            s.latitude, s.longitude, s.address, s.order_id, s.device_type,
+            s.is_active, s.last_activity_at, s.created_at, s.updated_at,
+            o.status AS order_status
+       FROM customer_tracking_sessions s
+       LEFT JOIN orders o ON o.id = s.order_id
+      WHERE s.company_id = $1 AND s.session_id = $2
+      LIMIT 1`,
+    [cid, sid],
+  );
+  return res.rows[0] || null;
+};
+
 // Sessões com coordenadas (para o mapa). Pedidos de retirada (delivery_type =
 // 'pickup') são excluídos do mapa — eles não têm coordenadas relevantes para
 // rastreio geográfico.
@@ -364,6 +389,7 @@ module.exports = {
   attachOrder,
   trackEvent,
   listSessions,
+  getSessionDetails,
   listMapPoints,
   getMetrics,
   listSessionEvents,
