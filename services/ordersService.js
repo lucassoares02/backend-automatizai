@@ -3,6 +3,7 @@ const orderWebhookService = require("./orderWebhookService");
 const campaignsService = require("./campaignsService");
 const couponsService = require("./couponsService");
 const bookingService = require("./bookingService");
+const pagarmeService = require("./pagarmeService");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 const { columnExists, tableExists } = require("../helpers/schema");
 const { assertIdsBelongToCompany } = require("../helpers/tenantOwnership");
@@ -555,6 +556,7 @@ const updateStatus = async (id, status, cancelReason, options = {}) => {
          o.status,
          o.payment_status,
          o.payment_provider,
+         o.pagarme_charge_id,
          ${stockReservationSelect}
          COALESCE(
            (to_jsonb(o)->>'delivery_fee_pending_agreement')::boolean,
@@ -649,6 +651,37 @@ const updateStatus = async (id, status, cancelReason, options = {}) => {
     });
     if (Number(status) === 1 && Number(current.status) !== 1) {
       orderWebhookService.notifyAwaitingOrder(order.id);
+    }
+
+    // Cancelamentos/recusas feitos pela loja devolvem pagamentos Pagar.me já
+    // liquidados. Executa após o COMMIT: a chamada externa e suas atualizações
+    // de pagamento não devem manter a transação do pedido aberta.
+    const shouldRefund =
+      [6, 7].includes(Number(status)) &&
+      current.payment_provider === "pagarme" &&
+      current.payment_status === "paid";
+    if (shouldRefund) {
+      try {
+        if (!current.pagarme_charge_id) {
+          throw new Error("Cobrança Pagar.me não encontrada para estorno.");
+        }
+        const refund = await pagarmeService.requestRefundForOrder(
+          id,
+          current.pagarme_charge_id,
+        );
+        order.payment_status =
+          refund.status === "refunded" ? "refunded" : "refund_pending";
+      } catch (err) {
+        console.error(
+          `Falha ao solicitar estorno Pagar.me (pedido ${id}):`,
+          err.message,
+        );
+        await pool.query(
+          "UPDATE orders SET payment_status = 'refund_pending' WHERE id = $1",
+          [id],
+        );
+        order.payment_status = "refund_pending";
+      }
     }
 
     return order;

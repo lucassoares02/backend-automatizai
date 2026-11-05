@@ -47,7 +47,8 @@ const _renderMessage = (template, order, status, extra) => {
     .replaceAll("{cliente}", extra.client_name ?? "")
     .replaceAll("{pedido}", code)
     .replaceAll("{loja}", extra.company_name ?? "")
-    .replaceAll("{status}", STATUS_NAMES[status] ?? "");
+    .replaceAll("{status}", STATUS_NAMES[status] ?? "")
+    .replaceAll("{motivo}", String(order.cancel_reason ?? "").trim());
 };
 
 const _buildPayload = (order, status, extra, message) => ({
@@ -67,6 +68,8 @@ const _buildPayload = (order, status, extra, message) => ({
   },
   total: order.total != null ? Number(order.total) : null,
   delivery_type: _deliveryTypeLabel(order.delivery_type),
+  // Motivo informado ao cancelar/recusar (pode ser vazio).
+  cancel_reason: [6, 7].includes(Number(status)) ? String(order.cancel_reason ?? "").trim() || null : null,
   tag: extra.tag ?? null,
   created_at: order.created_at,
   updated_at: order.updated_at,
@@ -195,8 +198,13 @@ const APP_URL = (process.env.PUBLIC_APP_URL || process.env.ORIGIN || "").replace
 const WEEKDAYS = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"];
 
 // Etapa do pedido → evento de serviço (ids em orderStatusNotificationService).
-const SERVICE_EVENT_BY_STATUS = { 2: 102, 3: 103, 5: 109, 9: 109, 6: 106, 7: 106 };
-const SERVICE_EVENT_BY_KIND = { rescheduled: 104, reminder_24h: 201, reminder_2h: 202 };
+const SERVICE_EVENT_BY_STATUS = { 2: 102, 3: 103, 5: 109, 9: 109, 6: 106, 7: 107 };
+const SERVICE_EVENT_BY_KIND = {
+  awaiting_approval: 101,
+  rescheduled: 104,
+  reminder_24h: 201,
+  reminder_2h: 202,
+};
 
 /** "sex, 10/10" e "14:30" no fuso da empresa. */
 const formatAppointmentDate = (startsAt, timezone) => {
@@ -211,10 +219,11 @@ const formatAppointmentDate = (startsAt, timezone) => {
 
 const renderServiceMessage = (template, vars) => {
   if (!template) return "";
-  return Object.entries(vars).reduce(
-    (text, [key, value]) => text.replaceAll(`{${key}}`, value ?? ""),
-    String(template),
-  );
+  return Object.entries(vars)
+    .reduce((text, [key, value]) => text.replaceAll(`{${key}}`, value ?? ""), String(template))
+    // Variável vazia (ex.: {motivo} sem motivo) não deixa espaço duplo.
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
 };
 
 const _loadAppointment = async (orderId) => {
@@ -284,6 +293,7 @@ const _sendServiceEvent = async (orderId, eventId, appointment = null) => {
     hora: when.time,
     link,
     link_avaliacao: link,
+    motivo: [106, 107].includes(eventId) ? String(order.cancel_reason ?? "").trim() : "",
     status: orderStatusNotificationService.SERVICE_EVENTS[eventId] ?? "",
   });
   const status = Number(order.status);

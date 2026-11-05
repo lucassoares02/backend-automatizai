@@ -1,5 +1,5 @@
 const pool = require("../db");
-const { columnExists } = require("../helpers/schema");
+const { columnExists, tableExists } = require("../helpers/schema");
 
 // Aceite automático de pedidos, configurado por empresa:
 //  - auto_accept_paid_orders: pedido já PAGO online (Pagar.me/Stripe) é aceito
@@ -8,11 +8,16 @@ const { columnExists } = require("../helpers/schema");
 //    ou recusado automaticamente.
 // Os demais métodos presenciais (débito/crédito na entrega, PIX manual etc.)
 // continuam manuais.
+//
+// Pedidos de SERVIÇO (com agendamento) seguem outra regra: são aceitos
+// automaticamente, a menos que a loja tenha ligado
+// companies.booking_requires_approval ("aceitar agendamentos manualmente").
 
 const CASH_MODES = ["manual", "accept", "reject"];
 const STATUS_AWAITING = 1;
 const STATUS_CONFIRMED = 2;
 const STATUS_REJECTED = 7;
+const CASH_PAYMENT_TYPE = 4;
 const CASH_REJECT_REASON = "Pedido recusado automaticamente: a loja não aceita pagamento em dinheiro no momento.";
 
 const DEFAULT_SETTINGS = Object.freeze({
@@ -26,6 +31,11 @@ const _hasColumns = async () =>
 
 const _normalizeCashMode = (value) =>
   CASH_MODES.includes(String(value)) ? String(value) : "manual";
+
+const _isCashPaymentMethod = (type) => {
+  const normalized = String(type ?? "").trim().toLowerCase();
+  return normalized === String(CASH_PAYMENT_TYPE) || normalized === "cash";
+};
 
 const getSettings = async (companyId) => {
   if (!(await _hasColumns())) return { ...DEFAULT_SETTINGS, available: false };
@@ -82,11 +92,33 @@ const decideAction = (order, settings) => {
       ? "accept"
       : null;
   }
-  if (String(order.payment_method_type || "").toLowerCase() === "cash") {
+  if (_isCashPaymentMethod(order.payment_method_type)) {
     const mode = _normalizeCashMode(settings.auto_accept_cash_orders);
     return mode === "manual" ? null : mode;
   }
   return null;
+};
+
+/**
+ * Pedido de serviço em "Aguardando": aceita sozinho ("accept"), salvo quando a
+ * loja aprova os agendamentos manualmente ("await"). "skip" = fora de
+ * "Aguardando"; null = o pedido não é de serviço.
+ */
+const _serviceAction = async (orderId) => {
+  if (!(await tableExists("appointments"))) return null;
+  const hasApproval = await columnExists("companies", "booking_requires_approval");
+  const r = await pool.query(
+    `SELECT o.status, ${hasApproval ? "c.booking_requires_approval" : "FALSE"} AS requires_approval
+       FROM orders o
+       JOIN companies c ON c.id = o.company_id
+      WHERE o.id = $1
+        AND EXISTS (SELECT 1 FROM appointments a WHERE a.order_id = o.id)`,
+    [orderId],
+  );
+  const row = r.rows[0];
+  if (!row) return null;
+  if (Number(row.status) !== STATUS_AWAITING) return "skip";
+  return row.requires_approval === true ? "await" : "accept";
 };
 
 /**
@@ -98,6 +130,24 @@ const decideAction = (order, settings) => {
 const applyToOrder = async (orderId) => {
   try {
     if (!Number.isInteger(Number(orderId)) || Number(orderId) <= 0) return null;
+
+    const serviceAction = await _serviceAction(Number(orderId));
+    if (serviceAction === "skip") return null;
+    if (serviceAction === "await") {
+      // Avisa o cliente que o horário está reservado aguardando a loja aceitar.
+      require("./orderWebhookService").notifyAppointmentEvent(Number(orderId), "awaiting_approval");
+      return null;
+    }
+    if (serviceAction === "accept") {
+      const ordersService = require("./ordersService");
+      const updated = await ordersService.updateStatus(Number(orderId), STATUS_CONFIRMED, null, {
+        onlyFrom: STATUS_AWAITING,
+      });
+      if (!updated) return null;
+      console.log(`Aceite automático: agendamento do pedido ${orderId} -> accept`);
+      return "accept";
+    }
+
     if (!(await _hasColumns())) return null;
 
     const r = await pool.query(

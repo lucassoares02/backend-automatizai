@@ -35,8 +35,9 @@ const DEFAULT_MESSAGES = {
 // Eventos próprios, guardados na mesma tabela com ids fora da faixa de status
 // de pedido (100+ espelham o status; 201/202 são os lembretes do cron).
 // Placeholders extras: {servico}, {profissional}, {data}, {hora}, {link},
-// {link_avaliacao}.
+// {link_avaliacao}, {motivo} (cancelamento/recusa; pode vir vazio).
 const SERVICE_EVENTS = Object.freeze({
+  101: "Agendamento aguardando confirmação",
   102: "Agendamento confirmado",
   103: "Atendimento iniciado",
   104: "Agendamento remarcado",
@@ -44,18 +45,21 @@ const SERVICE_EVENTS = Object.freeze({
   202: "Lembrete 2h antes",
   109: "Atendimento concluído (pedir avaliação)",
   106: "Agendamento cancelado",
+  107: "Agendamento recusado",
   111: "Não compareceu",
 });
-const SERVICE_NOTIFIABLE = [102, 103, 104, 201, 202, 109, 106, 111];
-const SERVICE_DEFAULT_ENABLED = new Set([102, 104, 201, 202, 109, 106]);
+const SERVICE_NOTIFIABLE = [101, 102, 103, 104, 201, 202, 109, 106, 107, 111];
+const SERVICE_DEFAULT_ENABLED = new Set([101, 102, 104, 201, 202, 109, 106, 107]);
 const SERVICE_DEFAULT_MESSAGES = {
+  101: "Olá {cliente}! Recebemos seu pedido de horário de {servico} para {data} às {hora}. A {loja} vai confirmar e te avisamos por aqui. ⏳",
   102: "Olá {cliente}! Seu horário de {servico} com {profissional} está confirmado para {data} às {hora}. Te esperamos na {loja}! 📅",
   103: "{cliente}, seu atendimento de {servico} começou. Aproveite! ✨",
   104: "{cliente}, seu horário de {servico} foi remarcado para {data} às {hora} com {profissional}. Detalhes: {link}",
   201: "Lembrete 📅 {cliente}, seu horário de {servico} com {profissional} é {data} às {hora} na {loja}. Precisa remarcar? {link}",
   202: "{cliente}, falta pouco! Seu horário de {servico} é hoje às {hora} com {profissional}. Até já! 😉",
   109: "Obrigado pela visita, {cliente}! 💜 Conta pra gente como foi o seu {servico}: {link_avaliacao}",
-  106: "Olá {cliente}, seu agendamento de {servico} em {data} às {hora} foi cancelado. Para marcar outro horário, fale com a {loja}.",
+  106: "Olá {cliente}, seu agendamento de {servico} em {data} às {hora} foi cancelado. {motivo} Para marcar outro horário, fale com a {loja}.",
+  107: "Olá {cliente}, a {loja} não conseguiu aceitar seu horário de {servico} em {data} às {hora}. {motivo} Que tal escolher outro horário? {link}",
   111: "Olá {cliente}, sentimos sua falta no horário de {servico} ({data} às {hora}). Quer remarcar? É só responder esta mensagem.",
 };
 

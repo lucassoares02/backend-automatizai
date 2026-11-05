@@ -120,6 +120,7 @@ const update = async (data) => {
     estimated_prep_time_minutes,
     booking_max_days_ahead,
     cancel_window_hours,
+    booking_requires_approval,
     max_distance_meters_delivery,
     kilometer_price,
     max_distance_meters_free_delivery,
@@ -221,6 +222,11 @@ const update = async (data) => {
       }
       params.push(n);
       bookingSet += `, ${column} = $${params.length}`;
+    }
+    // Aceite dos agendamentos: false = automático (padrão), true = manual.
+    if (typeof booking_requires_approval === "boolean" && (await columnExists("companies", "booking_requires_approval"))) {
+      params.push(booking_requires_approval);
+      bookingSet += `, booking_requires_approval = $${params.length}`;
     }
 
     // Slug público (endereço do subdomínio/cardápio). Só é tocado quando muda:

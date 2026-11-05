@@ -14,7 +14,7 @@ const { tableExists } = require("../helpers/schema");
 const slots = require("../helpers/bookingSlots");
 const { availableMinutes, rate } = require("../helpers/appointmentMetrics");
 
-const OCCUPYING = ["hold", "confirmed", "in_progress", "done", "no_show"];
+const OCCUPYING = ["hold", "pending", "confirmed", "in_progress", "done", "no_show"];
 
 const getServicesReport = async (companyId, from, to) => {
   if (!(await bookingService.hasBookingSchema())) return { enabled: false };
@@ -140,7 +140,7 @@ const getServicesReport = async (companyId, from, to) => {
       done,
       no_show: noShow,
       cancelled: appts.filter((a) => a.status === "cancelled").length,
-      upcoming: appts.filter((a) => ["hold", "confirmed", "in_progress"].includes(a.status)).length,
+      upcoming: appts.filter((a) => ["hold", "pending", "confirmed", "in_progress"].includes(a.status)).length,
       revenue: Number(byProfessional.reduce((sum, p) => sum + p.revenue, 0).toFixed(2)),
       avg_ticket: done ? Number((byProfessional.reduce((sum, p) => sum + p.revenue, 0) / done).toFixed(2)) : 0,
       booked_minutes: booked,

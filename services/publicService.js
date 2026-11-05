@@ -1508,6 +1508,8 @@ const changePendingOnlinePaymentMethod = async ({
          RETURNING id, payment_method_id, total`,
         [order.id, Number(paymentMethodId), newTotal],
       );
+      // Serviço: a reserva deixa de esperar o pagamento ('hold' sem prazo).
+      await bookingService.releaseHoldForOfflinePayment(db, order.id);
       await db.query(
         "INSERT INTO order_status_history (order_id, status) VALUES ($1, $2)",
         [order.id, "1"],
@@ -1521,7 +1523,9 @@ const changePendingOnlinePaymentMethod = async ({
 
     if (changeableOffline) {
       // Presencial -> online: só faz sentido antes de a loja confirmar (status 1),
-      // pois recoloca o pedido em "Pagamento pendente".
+      // pois recoloca o pedido em "Pagamento pendente". Vale também para
+      // serviços: com o aceite automático o agendamento sai de 1 para 2 logo
+      // após criado, e um pedido já confirmado pela loja não regride para 10.
       if (Number(order.status) !== 1) {
         throw Object.assign(
           new Error("Para pagar online, troque a forma antes de a loja confirmar o pedido."),
@@ -1548,6 +1552,9 @@ const changePendingOnlinePaymentMethod = async ({
          RETURNING id, online_payment_method, total`,
         [order.id, method, fee, newTotal],
       );
+      // Serviço: o horário passa a depender do pagamento ('hold' com prazo),
+      // senão o cron nunca o libera se o cliente não pagar.
+      await bookingService.holdForOnlinePayment(db, order.id);
       await db.query(
         "INSERT INTO order_status_history (order_id, status) VALUES ($1, $2)",
         [order.id, "10"],
@@ -1586,6 +1593,9 @@ const _PUBLIC_ORDER_SELECT = `
       AS delivery_fee_agreement_confirmed_at,
     o.payment_status, o.payment_provider, o.online_payment_method,
     o.scheduled_for, o.created_at, o.updated_at,
+    -- Motivo do cancelamento/recusa escrito pela loja (ou pelo cliente): o
+    -- acompanhamento mostra ao cliente. Só sai em pedido cancelado/recusado.
+    CASE WHEN o.status::text IN ('6', '7') THEN NULLIF(TRIM(o.cancel_reason), '') END AS cancel_reason,
     c.name AS client_name, c.phone AS client_phone,
     co.name AS company_name, co.brand_color, co.logo_url, co.phone AS company_phone,
     (SELECT ca.latitude FROM company_addresses ca WHERE ca.company_id = o.company_id ORDER BY ca.id DESC LIMIT 1) AS company_lat,

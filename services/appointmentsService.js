@@ -539,7 +539,7 @@ const markNoShow = async (orderId) => {
     await pool.query("SELECT status FROM appointments WHERE order_id = $1 ORDER BY id DESC LIMIT 1", [orderId])
   ).rows[0];
   if (!appointment) throw _error(404, "Este pedido não tem agendamento.");
-  if (!["confirmed", "in_progress", "hold"].includes(appointment.status)) {
+  if (!ACTIVE_STATUSES.includes(appointment.status)) {
     throw _error(409, "Este agendamento já foi encerrado.");
   }
   const ordersService = require("./ordersService");

@@ -25,7 +25,9 @@ const MAX_DAYS_PER_REQUEST = 14;
 const MAX_ADDON_LINES = 30;
 const MAX_ADDON_QUANTITY = 99;
 const ADDON_PICKUP_NOTE = "Retirar junto com o atendimento";
-const ACTIVE_STATUSES = ["hold", "confirmed", "in_progress"];
+// 'pending' = aguardando a loja aceitar (empresas com aprovação manual); também
+// ocupa o horário para ninguém reservar por cima enquanto a loja decide.
+const ACTIVE_STATUSES = ["hold", "pending", "confirmed", "in_progress"];
 const ONLINE_PROVIDERS = ["pagarme", "stripe"];
 // A reserva de um pedido online dura o PIX inteiro + folga. Enquanto houver uma
 // tentativa de pagamento em andamento, o cron não libera o horário.
@@ -59,13 +61,14 @@ const _ensureSchema = async () => {
 // ─── Leitura ──────────────────────────────────────────────────────────────────
 
 const _companySettingsSelect = async () => {
-  const [tz, step, notice, maxDays, cancel, slug] = await Promise.all([
+  const [tz, step, notice, maxDays, cancel, slug, approval] = await Promise.all([
     columnExists("companies", "timezone"),
     columnExists("companies", "booking_slot_step_minutes"),
     columnExists("companies", "booking_min_notice_minutes"),
     columnExists("companies", "booking_max_days_ahead"),
     columnExists("companies", "cancel_window_hours"),
     columnExists("companies", "slug"),
+    columnExists("companies", "booking_requires_approval"),
   ]);
   return {
     hasSlug: slug,
@@ -75,6 +78,9 @@ const _companySettingsSelect = async () => {
       notice ? "booking_min_notice_minutes" : `${DEFAULTS.notice} AS booking_min_notice_minutes`,
       maxDays ? "booking_max_days_ahead" : `${DEFAULTS.maxDays} AS booking_max_days_ahead`,
       cancel ? "cancel_window_hours" : `${DEFAULTS.cancelWindow} AS cancel_window_hours`,
+      // A coluna chega na mesma migração que libera o status 'pending' em
+      // appointments: sem ela, todo agendamento é aceito automaticamente.
+      approval ? "booking_requires_approval" : "FALSE AS booking_requires_approval",
     ].join(", "),
   };
 };
@@ -88,6 +94,7 @@ const _normalizeCompany = (row) =>
     notice: Math.max(0, Number(row.booking_min_notice_minutes ?? DEFAULTS.notice)),
     maxDays: Math.max(1, Number(row.booking_max_days_ahead) || DEFAULTS.maxDays),
     cancelWindow: Math.max(0, Number(row.cancel_window_hours ?? DEFAULTS.cancelWindow)),
+    requiresApproval: row.booking_requires_approval === true,
   };
 
 /** Configurações de agenda da empresa por id, UUID ou slug. */
@@ -115,6 +122,7 @@ const publicBookingInfo = async (companyId) => {
     max_days_ahead: company?.maxDays ?? DEFAULTS.maxDays,
     min_notice_minutes: company?.notice ?? DEFAULTS.notice,
     cancel_window_hours: company?.cancelWindow ?? DEFAULTS.cancelWindow,
+    requires_approval: company?.requiresApproval === true,
   };
 };
 
@@ -532,7 +540,9 @@ const _resolveAddOnProducts = async ({ companyId, products, startsAt, campaignPr
 /**
  * POST /public/bookings — cria o pedido do serviço e reserva o horário.
  * Pagamento online: pedido em Pagamento Pendente (10) + agendamento 'hold' com
- * expiração. Pagamento no local: pedido em Aguardando (1) + 'confirmed'.
+ * expiração. Pagamento no local: pedido em Aguardando (1) + 'confirmed', ou
+ * 'pending' quando a loja aprova manualmente. Sem aprovação manual o aceite
+ * automático (orderAutoAcceptService) leva o pedido a Confirmado (2).
  */
 const createBookingOrder = async (data) => {
   await _ensureSchema();
@@ -738,7 +748,7 @@ const createBookingOrder = async (data) => {
         slot.startsAt,
         slot.endsAt,
         slot.blockedUntil,
-        paymentProvider ? "hold" : "confirmed",
+        paymentProvider ? "hold" : company.requiresApproval ? "pending" : "confirmed",
         paymentProvider ? new Date(Date.now() + HOLD_MINUTES * 60000) : null,
       ],
     );
@@ -782,27 +792,42 @@ const createBookingOrder = async (data) => {
 // ─── Ciclo de vida ───────────────────────────────────────────────────────────
 
 /**
- * Pagamento confirmado: confirma a reserva. Se ela já tinha sido liberada por
- * vencimento, tenta recuperá-la (a EXCLUDE constraint recusa se o horário foi
- * ocupado por outra pessoa — nesse caso a loja precisa remarcar).
+ * Status do agendamento quando a reserva deixa de ser 'hold': 'pending' se a
+ * loja aprova manualmente, senão 'confirmed'.
+ */
+const _reservedStatusFor = async (db, orderId) => {
+  if (!(await columnExists("companies", "booking_requires_approval"))) return "confirmed";
+  const result = await db.query(
+    `SELECT c.booking_requires_approval FROM orders o JOIN companies c ON c.id = o.company_id WHERE o.id = $1`,
+    [orderId],
+  );
+  return result.rows[0]?.booking_requires_approval === true ? "pending" : "confirmed";
+};
+
+/**
+ * Pagamento confirmado: garante a reserva ('confirmed', ou 'pending' quando a
+ * loja aprova manualmente). Se ela já tinha sido liberada por vencimento, tenta
+ * recuperá-la (a EXCLUDE constraint recusa se o horário foi ocupado por outra
+ * pessoa — nesse caso a loja precisa remarcar).
  */
 const confirmForOrder = async (orderId) => {
   try {
     if (!(await tableExists("appointments"))) return;
+    const target = await _reservedStatusFor(pool, orderId);
     const confirmed = await pool.query(
-      `UPDATE appointments SET status = 'confirmed', hold_expires_at = NULL, updated_at = NOW()
+      `UPDATE appointments SET status = $2, hold_expires_at = NULL, updated_at = NOW()
        WHERE order_id = $1 AND status = 'hold'`,
-      [orderId],
+      [orderId, target],
     );
     if (confirmed.rowCount > 0) return;
     await pool.query(
       `UPDATE appointments a
-       SET status = 'confirmed', hold_expires_at = NULL, cancel_reason = NULL, cancelled_at = NULL, updated_at = NOW()
+       SET status = $3, hold_expires_at = NULL, cancel_reason = NULL, cancelled_at = NULL, updated_at = NOW()
        FROM orders o
        WHERE a.order_id = $1 AND o.id = a.order_id
          AND a.status = 'cancelled' AND a.cancel_reason = $2
          AND o.status::text NOT IN ('6', '7')`,
-      [orderId, HOLD_EXPIRED_REASON],
+      [orderId, HOLD_EXPIRED_REASON, target],
     );
   } catch (err) {
     console.error(`[booking] não foi possível confirmar o agendamento do pedido ${orderId}:`, err.message);
@@ -811,32 +836,87 @@ const confirmForOrder = async (orderId) => {
 
 /**
  * Espelha a etapa do pedido no agendamento. Roda DENTRO da transação de
- * ordersService.updateStatus para que cancelar o pedido libere o horário junto.
+ * ordersService.updateStatus para que cancelar/recusar o pedido libere o
+ * horário junto. Pendente (1) → Confirmado (2) é o aceite da loja.
  */
 const syncOrderStatus = async (db, orderId, status, { appointmentStatus = null } = {}) => {
   if (!(await tableExists("appointments"))) return;
   const s = Number(status);
+  const open = "('hold', 'pending', 'confirmed', 'in_progress')";
   let sql = null;
+  let params = [orderId];
   if ((s === 6 || s === 7) && appointmentStatus === "no_show") {
     // Não compareceu: o pedido é cancelado, mas o histórico guarda o no-show.
     sql = `UPDATE appointments
            SET status = 'no_show', cancelled_at = NOW(), cancel_reason = 'no_show', updated_at = NOW()
-           WHERE order_id = $1 AND status IN ('hold', 'confirmed', 'in_progress')`;
+           WHERE order_id = $1 AND status IN ${open}`;
   } else if (s === 6 || s === 7) {
+    // 7 = recusado pela loja; o motivo escrito fica em orders.cancel_reason.
     sql = `UPDATE appointments
-           SET status = 'cancelled', cancelled_at = NOW(), cancel_reason = COALESCE(cancel_reason, 'order_cancelled'), updated_at = NOW()
-           WHERE order_id = $1 AND status IN ('hold', 'confirmed', 'in_progress')`;
+           SET status = 'cancelled', cancelled_at = NOW(), cancel_reason = COALESCE(cancel_reason, $2), updated_at = NOW()
+           WHERE order_id = $1 AND status IN ${open}`;
+    params.push(s === 7 ? "rejected" : "order_cancelled");
   } else if (s === 5 || s === 9) {
     sql = `UPDATE appointments SET status = 'done', updated_at = NOW()
-           WHERE order_id = $1 AND status IN ('hold', 'confirmed', 'in_progress')`;
+           WHERE order_id = $1 AND status IN ${open}`;
   } else if (s === 3) {
     sql = `UPDATE appointments SET status = 'in_progress', hold_expires_at = NULL, updated_at = NOW()
-           WHERE order_id = $1 AND status IN ('hold', 'confirmed')`;
-  } else if (s === 1 || s === 2) {
+           WHERE order_id = $1 AND status IN ('hold', 'pending', 'confirmed')`;
+  } else if (s === 2) {
     sql = `UPDATE appointments SET status = 'confirmed', hold_expires_at = NULL, updated_at = NOW()
+           WHERE order_id = $1 AND status IN ('hold', 'pending')`;
+  } else if (s === 1) {
+    // De volta a Pendente: com aprovação manual o horário volta a aguardar a loja.
+    const target = await _reservedStatusFor(db, orderId);
+    sql =
+      target === "pending"
+        ? `UPDATE appointments SET status = 'pending', hold_expires_at = NULL, updated_at = NOW()
+           WHERE order_id = $1 AND status IN ('hold', 'confirmed')`
+        : `UPDATE appointments SET status = 'confirmed', hold_expires_at = NULL, updated_at = NOW()
            WHERE order_id = $1 AND status = 'hold'`;
   }
-  if (sql) await db.query(sql, [orderId]);
+  if (sql) await db.query(sql, params);
+};
+
+/**
+ * Troca presencial → online (pedido volta a Pagamento Pendente, 10): a reserva
+ * vira 'hold' com prazo, igual a um agendamento criado já como online. Sem isso
+ * o cron nunca libera o horário se o cliente não pagar. Roda DENTRO da
+ * transação da troca de pagamento.
+ */
+const holdForOnlinePayment = async (db, orderId) => {
+  if (!(await tableExists("appointments"))) return;
+  await db.query(
+    `UPDATE appointments
+     SET status = 'hold', hold_expires_at = $2, updated_at = NOW()
+     WHERE order_id = $1 AND status IN ('pending', 'confirmed')`,
+    [orderId, new Date(Date.now() + HOLD_MINUTES * 60000)],
+  );
+};
+
+/**
+ * Troca online → presencial (pedido volta a Aguardando, 1): a reserva deixa de
+ * depender do pagamento e assume o status de um agendamento presencial
+ * ('pending' com aprovação manual, senão 'confirmed'). Mesma transação da troca.
+ */
+const releaseHoldForOfflinePayment = async (db, orderId) => {
+  if (!(await tableExists("appointments"))) return;
+  const target = await _reservedStatusFor(db, orderId);
+  const kept = await db.query(
+    `UPDATE appointments SET status = $2, hold_expires_at = NULL, updated_at = NOW()
+     WHERE order_id = $1 AND status = 'hold'`,
+    [orderId, target],
+  );
+  if (kept.rowCount > 0) return;
+  // A reserva já foi liberada por falta de pagamento: o pedido não pode voltar
+  // a Aguardando sem horário.
+  const lost = await db.query(
+    `SELECT 1 FROM appointments WHERE order_id = $1 AND status = 'cancelled' AND cancel_reason = $2 LIMIT 1`,
+    [orderId, HOLD_EXPIRED_REASON],
+  );
+  if (lost.rowCount > 0) {
+    throw _error(409, "O horário reservado expirou. Faça um novo agendamento.");
+  }
 };
 
 /** Cron: libera holds vencidos e cancela os pedidos que ficaram sem horário. */
@@ -859,7 +939,7 @@ const _appointmentSelect = `
 
 const _customerRules = (appointment, company, orderStatus, now = new Date()) => {
   const deadline = new Date(new Date(appointment.starts_at).getTime() - company.cancelWindow * 3600000);
-  const active = ["hold", "confirmed"].includes(appointment.status) && ![6, 7].includes(Number(orderStatus));
+  const active = ["hold", "pending", "confirmed"].includes(appointment.status) && ![6, 7].includes(Number(orderStatus));
   const withinWindow = now <= deadline;
   return {
     cancel_deadline: deadline.toISOString(),
@@ -918,7 +998,7 @@ const getForOrder = async (orderId, orderStatus) => {
  */
 const customerCancelBlock = async (orderId, orderStatus) => {
   const appointment = await getForOrder(orderId, orderStatus);
-  if (!appointment || !["hold", "confirmed"].includes(appointment.status)) return null;
+  if (!appointment || !["hold", "pending", "confirmed"].includes(appointment.status)) return null;
   if (appointment.can_cancel) return null;
   return `O cancelamento pelo site vai até ${appointment.cancel_window_hours}h antes do horário. Fale com o estabelecimento.`;
 };
@@ -1030,6 +1110,8 @@ module.exports = {
   createBookingOrder,
   confirmForOrder,
   syncOrderStatus,
+  holdForOnlinePayment,
+  releaseHoldForOfflinePayment,
   releaseExpiredHolds,
   getForOrder,
   customerCancelBlock,
