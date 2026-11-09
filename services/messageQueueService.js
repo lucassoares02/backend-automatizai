@@ -57,14 +57,41 @@ const _parseMessage = (body) => {
   };
 };
 
+// Eventos internos (ex.: retomada de carrinho) injetados pelo silence hook no
+// formato da Evolution. O `key.id` deles se repete entre disparos, então não
+// podem passar pela fila (o índice único de message_key os descartaria).
+const SILENCE_HOOK_SOURCE = "silence_hook";
+const _isSilenceHook = (body) => body?.data?.source === SILENCE_HOOK_SOURCE;
+
 // ─── Enqueue (buffer + debounce) ────────────────────────────────────────────────
+
+/**
+ * Envia ao n8n sem debounce nem persistência na fila, preservando o envelope da
+ * Evolution e acrescentando o bloco `_queue` (sem `id`: não há job a liberar).
+ */
+const _forwardImmediately = async (instanceName, body, parsed, aiEnabled, direction) => {
+  const payload = JSON.parse(JSON.stringify(body || {}));
+  payload.ai_enabled = aiEnabled;
+  payload._queue = {
+    immediate: true,
+    direction,
+    instance_name: instanceName,
+    remote_jid: parsed.remoteJid,
+    message_count: 1,
+    aggregated_text: parsed.text || "",
+    ai_enabled: aiEnabled,
+  };
+  await evolution.forwardToN8n(instanceName, payload);
+};
 
 /**
  * Recebe um MESSAGES_UPSERT da Evolution, grava no buffer e (re)arma a janela de
  * debounce do job pendente daquela conversa. Mensagens de mídia forçam flush
  * imediato. Com Atendimento com IA ativo, mensagens próprias (`fromMe`) seguem
  * diretamente ao n8n para registrar o contexto sem passar pela fila ou pelas
- * regras de bloqueio de contatos.
+ * regras de bloqueio de contatos. Eventos do silence hook (`data.source =
+ * "silence_hook"`) também vão direto ao n8n, respeitando apenas os contatos
+ * ignorados.
  */
 const enqueue = async (instanceName, body) => {
   const parsed = _parseMessage(body);
@@ -74,23 +101,22 @@ const enqueue = async (instanceName, body) => {
   const companyId = conn?.company_id ?? null;
   const aiEnabled = conn?.ai_enabled !== false;
 
+  if (_isSilenceHook(body)) {
+    if (await aiIgnoredPhoneNumbersService.shouldIgnoreMessage({ companyId, body, remoteJid: parsed.remoteJid })) {
+      console.log(`[message-queue] silence hook ignorado pela empresa ${companyId} (${parsed.remoteJid})`);
+      return;
+    }
+    await _forwardImmediately(instanceName, body, parsed, aiEnabled, "system");
+    console.log(`[message-queue] silence hook despachado imediatamente (${parsed.remoteJid})`);
+    return;
+  }
+
   // Nova regra: com a IA ativa, a mensagem da própria conta precisa chegar ao
   // n8n imediatamente. Ela não passa por debounce, persistência na fila ou
   // pelas regras de contatos ignorados. O envelope da Evolution é preservado,
   // inclusive `data.key.fromMe = true`, para o fluxo distinguir a direção.
   if (parsed.fromMe && aiEnabled) {
-    const payload = JSON.parse(JSON.stringify(body || {}));
-    payload.ai_enabled = true;
-    payload._queue = {
-      immediate: true,
-      direction: "outbound",
-      instance_name: instanceName,
-      remote_jid: parsed.remoteJid,
-      message_count: 1,
-      aggregated_text: parsed.text || "",
-      ai_enabled: true,
-    };
-    await evolution.forwardToN8n(instanceName, payload);
+    await _forwardImmediately(instanceName, body, parsed, true, "outbound");
     console.log(`[message-queue] mensagem enviada despachada imediatamente (${parsed.remoteJid})`);
     return;
   }
