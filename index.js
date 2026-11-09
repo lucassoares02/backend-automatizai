@@ -84,6 +84,8 @@ app.use("/api/pagarme/webhook", express.raw({ type: "*/*", limit: "256kb" }));
 
 // Limite de tamanho de corpo — mitiga DoS por payload grande. Uploads de imagem
 // usam multer (limite próprio em cada controller), não passam por aqui.
+// O pacote do cardápio importado (centenas de produtos) passa do limite geral.
+app.use("/api/menu-import/confirm", express.json({ limit: "5mb" }));
 app.use(express.urlencoded({ extended: true, limit: "256kb" }));
 app.use(express.json({ limit: "256kb" }));
 

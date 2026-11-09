@@ -67,13 +67,66 @@ const importMenu = async (req, res) => {
     return res.status(400).json({ error: "INVALID_URL", message: "Informe uma URL válida, começando com http:// ou https://." });
   }
 
+  let result;
   try {
-    await service.sendToWebhook({ companyId, url, file });
-    return res.status(200).json({ success: true });
+    result = await service.sendToWebhook({ companyId, url, file });
   } catch (error) {
-    console.error("Falha ao enviar cardápio ao webhook:", error.message);
-    return res.status(502).json({ error: "WEBHOOK_FAILED", message: "Não foi possível enviar o cardápio. Tente novamente." });
+    console.error("Falha ao extrair cardápio no webhook:", error.message);
+    if (["UNSUPPORTED_VERSION", "COMPANY_MISMATCH", "INVALID_PACKAGE"].includes(error.code)) {
+      return res.status(502).json({ error: error.code, message: "O extrator devolveu um formato inesperado. Tente novamente." });
+    }
+    const timedOut = error.name === "TimeoutError" || error.name === "AbortError";
+    return res.status(502).json({
+      error: timedOut ? "WEBHOOK_TIMEOUT" : "WEBHOOK_FAILED",
+      message: timedOut
+        ? "A leitura do cardápio demorou demais. Tente com um arquivo menor ou menos páginas."
+        : "Não foi possível ler o cardápio. Tente novamente.",
+    });
+  }
+
+  // 422: nada aproveitável; o motivo vem em review.issues.
+  if (result.status === 422) {
+    const issue = (result.pack.review?.issues || [])[0];
+    return res.status(422).json({
+      error: "NO_MENU",
+      code: issue?.code || null,
+      message: issue?.message || "Não encontramos um cardápio nesse arquivo ou link.",
+      pack: result.pack,
+    });
+  }
+
+  try {
+    const context = await service.buildPreviewContext(companyId, result.pack);
+    return res.status(200).json({ success: true, pack: result.pack, context });
+  } catch (error) {
+    console.error("Falha ao montar a prévia da importação:", error.message);
+    return res.status(200).json({ success: true, pack: result.pack, context: null });
   }
 };
 
-module.exports = { upload, importMenu };
+// ─── POST /menu-import/confirm ─────────────────────────────────────────────
+// Recebe o pacote já conferido pelo dono e grava tudo numa transação.
+
+const confirmImport = async (req, res) => {
+  const companyId = Number(req.body?.company_id);
+  const pack = req.body?.pack;
+  if (!Number.isInteger(companyId) || companyId <= 0) {
+    return res.status(400).json({ error: "INVALID_COMPANY", message: "Empresa inválida." });
+  }
+
+  try {
+    const summary = await service.applyPackage(companyId, pack, { applyCompany: req.body?.apply_company !== false });
+    return res.status(200).json({ success: true, ...summary });
+  } catch (error) {
+    if (["UNSUPPORTED_VERSION", "COMPANY_MISMATCH", "INVALID_PACKAGE"].includes(error.code)) {
+      return res.status(400).json({ error: error.code, message: error.message });
+    }
+    if (error.status && error.status < 500) {
+      return res.status(error.status).json({ error: error.code, message: error.message, ref: error.ref ?? null });
+    }
+    console.error("Falha ao gravar a importação de cardápio:", error);
+    return res.status(500).json({ error: "IMPORT_FAILED", message: "Não foi possível importar o cardápio. Nada foi gravado." });
+  }
+};
+
+module.exports = { upload, importMenu, confirmImport };

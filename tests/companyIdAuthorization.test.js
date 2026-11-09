@@ -35,6 +35,7 @@ test.before(async () => {
   };
   menuImportService.sendToWebhook = async ({ companyId }) => {
     touchedCompanies.push(companyId);
+    return { status: 200, pack: { version: menuImportService.PACKAGE_VERSION, company_id: companyId, categories: [] } };
   };
   addressService.saveForCompany = async ({ company_id }) => {
     touchedCompanies.push(company_id);
@@ -179,6 +180,11 @@ test("POST /menu-import envia para a empresa autorizada", async () => {
   const res = await sendMenuImport(String(OWN_COMPANY));
   assert.equal(res.status, 200);
   assert.deepEqual(touchedCompanies, [OWN_COMPANY]);
+});
+
+test("POST /menu-import/confirm recusa empresa de outro usuário", async () => {
+  const res = await sendJson("POST", "/menu-import/confirm", { company_id: OTHER_COMPANY, pack: {} });
+  assert.equal(res.status, 403);
 });
 
 test('PATCH /company/address recusa company_id "1e1"', async () => {

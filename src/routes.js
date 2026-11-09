@@ -168,6 +168,8 @@ router.post("/ifood/import", authMiddleware, authorizeCompanyBody("companyId"), 
 //importação de cardápio por arquivo (PDF/imagem) ou URL, processada pelo n8n
 // O multer roda antes da autorização porque o company_id vem no corpo multipart.
 router.post("/menu-import", menuImportLimiter, authMiddleware, menuImport.upload, authorizeCompanyBody("company_id"), menuImport.importMenu);
+// Grava o pacote conferido na prévia (sem chamar a IA de novo).
+router.post("/menu-import/confirm", authMiddleware, authorizeCompanyBody("company_id"), menuImport.confirmImport);
 
 //ifood integração oficial (API de parceiros — perfil, produtos, pedidos)
 router.get("/ifood/merchant/:companyId", authMiddleware, authorizeCompanyParam("companyId"), ifood.getMerchant);
