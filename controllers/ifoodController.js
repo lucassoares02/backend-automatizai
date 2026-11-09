@@ -1,5 +1,4 @@
 const service = require("../services/ifoodService");
-const shippingService = require("../services/ifoodShippingService");
 
 // ─── GET /ifood/merchant/:companyId ─────────────────────────────────────────────
 // Retorna o perfil iFood salvo (merchant id + nome cacheado + status de conexão).
@@ -82,25 +81,4 @@ const getProductDetails = async (req, res) => {
   }
 };
 
-// ─── POST /orders/:id/ifood-delivery-quote ───────────────────────────────────
-// Cota a entrega do pedido pelo iFood Entrega (Shipping). Apenas consulta o
-// valor: nenhuma corrida é solicitada ao iFood.
-const quoteOrderDelivery = async (req, res) => {
-  const orderId = Number(req.params.id);
-  if (!Number.isInteger(orderId) || orderId <= 0) {
-    return res.status(400).json({ error: "ID do pedido inválido." });
-  }
-  try {
-    const data = await shippingService.createDeliveryQuote(orderId);
-    return res.status(200).json(data);
-  } catch (error) {
-    console.error("iFood delivery quote error:", error.code || error.message, error.detail || "");
-    return res.status(error.status || 500).json({
-      error: error.message || "Não foi possível cotar a entrega pelo iFood.",
-      ...(error.code ? { code: error.code } : {}),
-      ...(error.details ? { details: error.details } : {}),
-    });
-  }
-};
-
-module.exports = { getMerchant, saveMerchant, consult, getProductDetails, quoteOrderDelivery };
+module.exports = { getMerchant, saveMerchant, consult, getProductDetails };

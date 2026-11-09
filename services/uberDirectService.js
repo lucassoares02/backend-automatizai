@@ -9,6 +9,32 @@ const DEFAULT_OAUTH_URL = "https://login.uber.com/oauth/v2/token";
 const DEFAULT_OAUTH_SCOPE = "eats.deliveries";
 const DEFAULT_PREP_MINUTES = 20;
 const TOKEN_EXPIRY_MARGIN_MS = 60 * 1000;
+// Folga antes da coleta quando o pedido ainda não começou a ser preparado
+// (aceite + início do preparo).
+const PICKUP_BUFFER_MINUTES = 50;
+// Folga curta quando o preparo já começou ou o pedido já está pronto.
+const READY_PICKUP_BUFFER_MINUTES = 10;
+
+// Status do pedido (ver ordersService/orderStatusNotificationService).
+const STATUS_PREPARING = 3;
+const STATUS_READY = new Set([4, 8]); // Em Entrega, Pronto
+const STATUS_FINAL = new Set([5, 6, 7, 9]); // Entregue, Cancelado, Rejeitado, Retirado
+
+const TIMEOUT_ERROR_CODES = new Set(["ECONNABORTED", "ETIMEDOUT"]);
+const isTimeoutError = (error) =>
+  !error?.response && TIMEOUT_ERROR_CODES.has(error?.code);
+
+// Mensagens amigáveis para recusas conhecidas da Uber (4xx).
+const PROVIDER_REJECTION_MESSAGES = {
+  address_undeliverable:
+    "O endereço de entrega está fora da área atendida pela Uber Direct.",
+  address_undeliverable_limited_couriers:
+    "No momento não há entregadores da Uber Direct disponíveis para este endereço.",
+  unknown_location:
+    "A Uber Direct não conseguiu localizar um dos endereços do pedido.",
+  invalid_params:
+    "A Uber Direct recusou os dados enviados para a cotação.",
+};
 
 let oauthTokenCache = null;
 let oauthTokenRequest = null;
@@ -64,6 +90,63 @@ const buildAddressLine = (address) => {
     .join(" - ");
 };
 
+const formatZip = (value) => {
+  const digits = String(value ?? "").replace(/\D/g, "");
+  return digits.length === 8 ? `${digits.slice(0, 5)}-${digits.slice(5)}` : digits;
+};
+
+// Formato estruturado da Uber: string JSON com street_address[], city, state,
+// zip_code e country. Só é montado quando há rua e cidade; senão retorna null
+// e o chamador usa o texto livre.
+const buildStructuredAddress = (address) => {
+  if (!address) return null;
+  const clean = (value) => String(value ?? "").trim();
+  const line1 = [clean(address.street), clean(address.number)]
+    .filter(Boolean)
+    .join(", ");
+  const city = clean(address.city);
+  if (!clean(address.street) || !city) return null;
+  const line2 = [clean(address.complement), clean(address.neighborhood)]
+    .filter(Boolean)
+    .join(" - ");
+  return JSON.stringify({
+    street_address: [line1, line2].filter(Boolean),
+    city,
+    state: clean(address.state).toUpperCase(),
+    zip_code: formatZip(address.zip ?? address.zip_code),
+    country: "BR",
+  });
+};
+
+// UBER_DIRECT_ADDRESS_FORMAT=text força o texto livre (útil na homologação);
+// o padrão é o formato estruturado, com fallback para texto quando faltam
+// partes do endereço.
+const addressFormat = () =>
+  String(process.env.UBER_DIRECT_ADDRESS_FORMAT || "structured")
+    .trim()
+    .toLowerCase() === "text"
+    ? "text"
+    : "structured";
+
+const resolveAddress = (structuredSource, text, format) => {
+  const structured =
+    format === "structured" ? buildStructuredAddress(structuredSource) : null;
+  return structured
+    ? { value: structured, text, format: "structured" }
+    : { value: text, text, format: "text" };
+};
+
+const buildQuoteAddresses = ({ order, companyAddress, format = addressFormat() }) => {
+  const snapshot = order.delivery_address_snapshot;
+  const pickupText = buildAddressLine(companyAddress);
+  const dropoffText =
+    buildAddressLine(snapshot) || String(order.delivery_address ?? "").trim();
+  return {
+    pickup: resolveAddress(companyAddress, pickupText, format),
+    dropoff: resolveAddress(snapshot, dropoffText, format),
+  };
+};
+
 const normalizeAddress = (value) =>
   String(value ?? "")
     .normalize("NFD")
@@ -99,18 +182,22 @@ const findMatchingSavedAddress = (addresses, deliveryAddress, snapshot) => {
 const addMinutes = (date, minutes) =>
   new Date(date.getTime() + minutes * 60 * 1000);
 
-const quoteTimeWindow = (prepMinutes, now = new Date()) => {
+const quoteTimeWindow = (
+  prepMinutes,
+  now = new Date(),
+  { bufferMinutes = PICKUP_BUFFER_MINUTES, minPrepMinutes = 5 } = {},
+) => {
   const safePrep = Math.min(
     180,
     Math.max(
-      5,
+      minPrepMinutes,
       Number.isFinite(Number(prepMinutes))
         ? Number(prepMinutes)
         : DEFAULT_PREP_MINUTES,
     ),
   );
-  // Além do tempo de preparo, adiciona 50 min de folga antes do courier retirar.
-  const pickupReady = addMinutes(now, safePrep + 50);
+  // Além do tempo de preparo, adiciona uma folga antes do courier retirar.
+  const pickupReady = addMinutes(now, safePrep + bufferMinutes);
   const pickupDeadline = addMinutes(pickupReady, 20);
   // O destinatário já precisa estar apto a receber antes do limite de coleta.
   // A Uber rejeita dropoff_ready_dt posterior a pickup_deadline_dt com
@@ -128,14 +215,93 @@ const quoteTimeWindow = (prepMinutes, now = new Date()) => {
   };
 };
 
+// Quanto falta para o pedido ficar pronto, conforme o status atual:
+// - pronto/em entrega: nada de preparo, só a folga curta;
+// - em preparo: desconta o tempo desde que entrou em preparo;
+// - demais (aguardando, confirmado, aguardando pagamento): preparo inteiro
+//   mais a folga padrão.
+const pickupLeadTime = (order) => {
+  const status = toNumber(order?.status);
+  const prep = toNumber(order?.prep_minutes) ?? DEFAULT_PREP_MINUTES;
+  if (STATUS_READY.has(status)) {
+    return {
+      prepMinutes: 0,
+      bufferMinutes: READY_PICKUP_BUFFER_MINUTES,
+      minPrepMinutes: 0,
+    };
+  }
+  if (status === STATUS_PREPARING) {
+    const elapsed = toNumber(order?.preparing_elapsed_minutes);
+    return {
+      prepMinutes: elapsed === null ? prep : Math.max(0, prep - elapsed),
+      bufferMinutes: READY_PICKUP_BUFFER_MINUTES,
+      minPrepMinutes: 0,
+    };
+  }
+  return {
+    prepMinutes: prep,
+    bufferMinutes: PICKUP_BUFFER_MINUTES,
+    minPrepMinutes: 5,
+  };
+};
+
+const hasDeliveryAddress = (order) =>
+  Boolean(
+    buildAddressLine(order?.delivery_address_snapshot) ||
+      String(order?.delivery_address ?? "").trim(),
+  );
+
+// Regras de negócio que impedem a cotação, antes de chamar a Uber.
+const assertQuotableOrder = (order) => {
+  if (!order) {
+    throw serviceError(404, "Pedido não encontrado.", "ORDER_NOT_FOUND");
+  }
+  const status = toNumber(order.status);
+  if (STATUS_FINAL.has(status)) {
+    throw serviceError(
+      422,
+      "Pedidos finalizados ou cancelados não podem ser cotados para entrega.",
+      "UBER_DIRECT_ORDER_FINALIZED",
+      { order_status: status },
+    );
+  }
+  if (order.delivery_type === false) {
+    throw serviceError(
+      422,
+      "Pedidos para retirada não podem ser cotados para entrega.",
+      "UBER_DIRECT_PICKUP_ORDER",
+    );
+  }
+  // delivery_type NULL (pedido antigo ou criado sem o tipo): só segue como
+  // entrega se o pedido tiver endereço de destino.
+  if (
+    (order.delivery_type === null || order.delivery_type === undefined) &&
+    !hasDeliveryAddress(order)
+  ) {
+    throw serviceError(
+      422,
+      "O pedido não informa se é entrega ou retirada e não possui endereço de entrega.",
+      "UBER_DIRECT_DELIVERY_TYPE_UNDEFINED",
+    );
+  }
+  if (order.client_record_id === null) {
+    throw serviceError(
+      422,
+      "O cliente deste pedido foi removido. Cadastre o cliente novamente para cotar a entrega.",
+      "UBER_DIRECT_CLIENT_MISSING",
+    );
+  }
+};
+
 const getOrderContext = async (orderId) => {
   const result = await pool.query(
     `SELECT
        o.id, o.company_id, o.client_id, o.delivery_address, o.delivery_type,
-       o.subtotal, o.total,
+       o.status, o.subtotal, o.total,
        (to_jsonb(o)->>'delivery_lat')::numeric AS delivery_lat,
        (to_jsonb(o)->>'delivery_lng')::numeric AS delivery_lng,
        to_jsonb(o)->'delivery_address_snapshot' AS delivery_address_snapshot,
+       c.id AS client_record_id,
        c.name AS client_name, c.phone AS client_phone,
        to_jsonb(c)->>'user_id' AS client_user_id,
        co.name AS company_name, co.phone AS company_phone,
@@ -147,9 +313,18 @@ const getOrderContext = async (orderId) => {
          WHERE oi.order_id = o.id
            AND mi.prep_time_minutes IS NOT NULL
            AND mi.prep_time_minutes > 0
-       ), $2)::int AS prep_minutes
+       ), $2)::int AS prep_minutes,
+       (
+         SELECT FLOOR(
+           EXTRACT(EPOCH FROM (LOCALTIMESTAMP - h.created_at)) / 60
+         )::int
+         FROM order_status_history h
+         WHERE h.order_id = o.id AND h.status = '3'
+         ORDER BY h.created_at DESC
+         LIMIT 1
+       ) AS preparing_elapsed_minutes
      FROM orders o
-     JOIN clients c ON c.id = o.client_id
+     LEFT JOIN clients c ON c.id = o.client_id
      JOIN companies co ON co.id = o.company_id
      WHERE o.id = $1
      LIMIT 1`,
@@ -193,11 +368,16 @@ const appendCoordinates = (payload, prefix, source) => {
   }
 };
 
-const buildQuotePayload = ({ order, companyAddress, savedAddress, now }) => {
-  const pickupAddress = buildAddressLine(companyAddress);
-  const snapshot = order.delivery_address_snapshot;
-  const dropoffAddress =
-    buildAddressLine(snapshot) || String(order.delivery_address ?? "").trim();
+const buildQuotePayload = ({
+  order,
+  companyAddress,
+  savedAddress,
+  now,
+  format = addressFormat(),
+}) => {
+  const addresses = buildQuoteAddresses({ order, companyAddress, format });
+  const pickupAddress = addresses.pickup.value;
+  const dropoffAddress = addresses.dropoff.value;
 
   if (!pickupAddress) {
     throw serviceError(
@@ -219,7 +399,10 @@ const buildQuotePayload = ({ order, companyAddress, savedAddress, now }) => {
     pickup_address: pickupAddress,
     pickup_name: String(order.company_name ?? "Estabelecimento").trim(),
     pickup_phone_number: toE164(order.company_phone, "do estabelecimento"),
-    ...quoteTimeWindow(order.prep_minutes, now),
+    ...(() => {
+      const { prepMinutes, ...options } = pickupLeadTime(order);
+      return quoteTimeWindow(prepMinutes, now, options);
+    })(),
     dropoff_address: dropoffAddress,
     dropoff_name: String(order.client_name ?? "Cliente").trim(),
     dropoff_phone_number: toE164(order.client_phone, "do cliente"),
@@ -252,6 +435,66 @@ const normalizeQuote = (data) => ({
   duration_minutes: toNumber(data?.duration),
   pickup_duration_minutes: toNumber(data?.pickup_duration),
 });
+
+const formatMoney = (amount, currency) => {
+  try {
+    return new Intl.NumberFormat("pt-BR", { style: "currency", currency })
+      .format(amount)
+      .replace(/ /g, " ");
+  } catch {
+    return `${currency} ${amount.toFixed(2)}`;
+  }
+};
+
+const minutesUntil = (isoDate, now) => {
+  const time = isoDate ? new Date(isoDate).getTime() : NaN;
+  if (!Number.isFinite(time)) return null;
+  return Math.max(0, Math.floor((time - now.getTime()) / 60000));
+};
+
+const hasCoordinates = (payload, prefix) =>
+  payload[`${prefix}_latitude`] !== undefined &&
+  payload[`${prefix}_longitude`] !== undefined;
+
+// Bloco identificável da Uber na cotação: o valor em reais e os prazos já
+// interpretados, para quem consome a resposta não precisar converter centavos
+// nem cruzar quote/pickup/dropoff.
+const buildUberSummary = ({ quote, payload, addresses, now = new Date() }) => {
+  const feeAmount = quote.fee / 100;
+  return {
+    provider: "uber_direct",
+    provider_name: "Uber Direct",
+    quote_id: quote.id,
+    fee_cents: quote.fee,
+    fee_amount: feeAmount,
+    fee_formatted: formatMoney(feeAmount, quote.currency),
+    currency: quote.currency,
+    created_at: quote.created_at,
+    expires_at: quote.expires_at,
+    expires_in_minutes: minutesUntil(quote.expires_at, now),
+    estimated_delivery_at: quote.dropoff_eta,
+    delivery_duration_minutes: quote.duration_minutes,
+    pickup_duration_minutes: quote.pickup_duration_minutes,
+    pickup: {
+      name: payload.pickup_name,
+      address: addresses?.pickup.text ?? payload.pickup_address,
+      address_format: addresses?.pickup.format ?? "text",
+      ready_at: payload.pickup_ready_dt,
+      deadline_at: payload.pickup_deadline_dt,
+      uses_coordinates: hasCoordinates(payload, "pickup"),
+    },
+    dropoff: {
+      name: payload.dropoff_name,
+      address: addresses?.dropoff.text ?? payload.dropoff_address,
+      address_format: addresses?.dropoff.format ?? "text",
+      ready_at: payload.dropoff_ready_dt,
+      deadline_at: payload.dropoff_deadline_dt,
+      uses_coordinates: hasCoordinates(payload, "dropoff"),
+    },
+    // Só cotação: nenhuma corrida é criada na Uber por esta rota.
+    delivery_requested: false,
+  };
+};
 
 const clearOAuthTokenCache = () => {
   oauthTokenCache = null;
@@ -308,6 +551,14 @@ const requestOAuthToken = async () => {
     return accessToken;
   } catch (error) {
     if (isServiceError(error)) throw error;
+    if (isTimeoutError(error)) {
+      throw serviceError(
+        504,
+        "A autenticação da Uber Direct demorou para responder. Tente novamente em instantes.",
+        "UBER_DIRECT_TIMEOUT",
+        { stage: "auth" },
+      );
+    }
     const providerData = error.response?.data;
     const providerMessage =
       providerData?.error_description || providerData?.message || null;
@@ -356,6 +607,67 @@ const requestDeliveryQuote = (url, payload, token) =>
     timeout: 15000,
   });
 
+// Converte a falha da chamada de cotação em um erro do serviço com status HTTP
+// coerente: recusa da Uber (4xx) → 422, limite de requisições → 429,
+// timeout → 504 e o restante → 502.
+const toQuoteError = (error) => {
+  if (isServiceError(error)) return error;
+  if (isTimeoutError(error)) {
+    return serviceError(
+      504,
+      "A Uber Direct demorou para responder. Tente novamente em instantes.",
+      "UBER_DIRECT_TIMEOUT",
+      { stage: "quote" },
+    );
+  }
+  const providerData = error.response?.data;
+  const providerCode =
+    providerData?.code ||
+    (typeof providerData?.error === "string" ? providerData.error : null) ||
+    providerData?.error?.code ||
+    null;
+  const providerMessage =
+    providerData?.message ||
+    (typeof providerData?.error === "string"
+      ? providerData.error
+      : providerData?.error?.message) ||
+    providerData?.code ||
+    null;
+  const providerStatus = error.response?.status ?? null;
+  const details = {
+    provider_status: providerStatus,
+    provider_code: providerCode,
+  };
+  if (providerStatus === 429) {
+    const retryAfter = toNumber(error.response?.headers?.["retry-after"]);
+    return serviceError(
+      429,
+      "A Uber Direct está recebendo muitas cotações agora. Tente novamente em instantes.",
+      "UBER_DIRECT_RATE_LIMITED",
+      { ...details, retry_after_seconds: retryAfter },
+    );
+  }
+  if (providerStatus === 400 || providerStatus === 422) {
+    return serviceError(
+      422,
+      PROVIDER_REJECTION_MESSAGES[providerCode] ||
+        (providerMessage
+          ? `A Uber Direct recusou a cotação: ${providerMessage}`
+          : "A Uber Direct recusou a cotação."),
+      "UBER_DIRECT_QUOTE_REJECTED",
+      { ...details, provider_message: providerMessage },
+    );
+  }
+  return serviceError(
+    502,
+    providerMessage
+      ? `A Uber Direct não conseguiu gerar a cotação: ${providerMessage}`
+      : "Não foi possível obter a cotação da Uber Direct. Tente novamente.",
+    "UBER_DIRECT_QUOTE_FAILED",
+    details,
+  );
+};
+
 const createDeliveryQuote = async (orderId) => {
   const customerId = String(process.env.UBER_DIRECT_CUSTOMER_ID ?? "").trim();
   if (!customerId) {
@@ -367,16 +679,7 @@ const createDeliveryQuote = async (orderId) => {
   }
 
   const order = await getOrderContext(orderId);
-  if (!order) {
-    throw serviceError(404, "Pedido não encontrado.", "ORDER_NOT_FOUND");
-  }
-  if (order.delivery_type === false) {
-    throw serviceError(
-      422,
-      "Pedidos para retirada não podem ser cotados para entrega.",
-      "UBER_DIRECT_PICKUP_ORDER",
-    );
-  }
+  assertQuotableOrder(order);
 
   const companyAddress = await getCompanyAddress(order.company_id);
   const savedAddresses = await getSavedClientAddresses(order.client_user_id);
@@ -385,7 +688,14 @@ const createDeliveryQuote = async (orderId) => {
     order.delivery_address,
     order.delivery_address_snapshot,
   );
-  const payload = buildQuotePayload({ order, companyAddress, savedAddress });
+  const format = addressFormat();
+  const payload = buildQuotePayload({
+    order,
+    companyAddress,
+    savedAddress,
+    format,
+  });
+  const addresses = buildQuoteAddresses({ order, companyAddress, format });
   const baseUrl = String(
     process.env.UBER_DIRECT_API_URL || DEFAULT_API_URL,
   ).replace(/\/+$/, "");
@@ -415,42 +725,19 @@ const createDeliveryQuote = async (orderId) => {
       provider: "uber_direct",
       quote,
       pickup: {
-        address: payload.pickup_address,
+        address: addresses.pickup.text,
         ready_at: payload.pickup_ready_dt,
         deadline_at: payload.pickup_deadline_dt,
       },
       dropoff: {
-        address: payload.dropoff_address,
+        address: addresses.dropoff.text,
         ready_at: payload.dropoff_ready_dt,
         deadline_at: payload.dropoff_deadline_dt,
       },
+      uber: buildUberSummary({ quote, payload, addresses }),
     };
   } catch (error) {
-    if (isServiceError(error)) throw error;
-    const providerData = error.response?.data;
-    const providerCode =
-      providerData?.code ||
-      (typeof providerData?.error === "string" ? providerData.error : null) ||
-      providerData?.error?.code ||
-      null;
-    const providerMessage =
-      providerData?.message ||
-      (typeof providerData?.error === "string"
-        ? providerData.error
-        : providerData?.error?.message) ||
-      providerData?.code ||
-      null;
-    throw serviceError(
-      502,
-      providerMessage
-        ? `A Uber Direct não conseguiu gerar a cotação: ${providerMessage}`
-        : "Não foi possível obter a cotação da Uber Direct. Tente novamente.",
-      "UBER_DIRECT_QUOTE_FAILED",
-      {
-        provider_status: error.response?.status ?? null,
-        provider_code: providerCode,
-      },
-    );
+    throw toQuoteError(error);
   }
 };
 
@@ -459,6 +746,10 @@ module.exports = {
   _private: {
     buildAddressLine,
     buildQuotePayload,
+    buildQuoteAddresses,
+    buildStructuredAddress,
+    buildUberSummary,
+    assertQuotableOrder,
     findMatchingSavedAddress,
     clearOAuthTokenCache,
     getCompanyAddress,
@@ -466,6 +757,8 @@ module.exports = {
     getSavedClientAddresses,
     getOAuthToken,
     normalizeQuote,
+    pickupLeadTime,
     quoteTimeWindow,
+    toQuoteError,
   },
 };

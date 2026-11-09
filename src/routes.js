@@ -296,14 +296,6 @@ router.post(
   authorizeOrder,
   uberDirect.quoteOrderDelivery,
 );
-// Cotação pelo iFood Entrega (Shipping) — também só cota, sem chamar entregador.
-router.post(
-  "/orders/:id/ifood-delivery-quote",
-  authMiddleware,
-  requireAdminUser,
-  authorizeOrder,
-  ifood.quoteOrderDelivery,
-);
 router.patch("/orders/:id/status", authMiddleware, authorizeOrder, orders.updateStatus);
 // pedido de serviço: agendamento do pedido e "não compareceu"
 router.get("/orders/:id/appointment", authMiddleware, authorizeOrder, appointments.findByOrder);
