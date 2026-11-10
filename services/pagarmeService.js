@@ -823,22 +823,27 @@ const createKycLink = async (companyId) => {
   }
 };
 
+// Pix e cartão de crédito são ativados juntos no cadastro do recebedor
+// (Formas de Pagamento): recebedor ativo habilita os dois.
+const _paymentMethods = (enabled) => ({ card: enabled === true, pix: enabled === true });
+
 /**
  * Consulta o recebedor no Pagar.me e sincroniza status/charges_enabled na
- * empresa. Retorna { connected, charges_enabled, status }.
+ * empresa. Retorna { connected, charges_enabled, status, payment_methods }.
  */
 const refreshRecipientStatus = async (companyId) => {
   const company = await _getCompany(companyId);
   if (!company) throw Object.assign(new Error("Empresa não encontrada."), { status: 404 });
   if (!company.pagarme_recipient_id) {
-    return { connected: false, charges_enabled: false, status: null };
+    return { connected: false, charges_enabled: false, status: null, payment_methods: _paymentMethods(false) };
   }
   try {
     const http = getHttp();
     const r = await http.get(`/recipients/${company.pagarme_recipient_id}`);
     const status = r.data?.status || null;
     await _saveRecipientStatus(company.pagarme_recipient_id, status);
-    return { connected: true, charges_enabled: _isActiveStatus(status), status };
+    const enabled = _isActiveStatus(status);
+    return { connected: true, charges_enabled: enabled, status, payment_methods: _paymentMethods(enabled) };
   } catch (error) {
     throw _wrap(error, "Falha ao consultar o recebedor");
   }
@@ -3324,6 +3329,22 @@ const assertCompanyRecipientActive = async (companyId) => {
   return { ...company, statementDescriptor: _buildStatementDescriptor(company.name) };
 };
 
+/**
+ * Pix e cartão de crédito da loja na Pagar.me → { card, pix }. Sincroniza com a
+ * Pagar.me enquanto o status local estiver pendente; falha na consulta conta
+ * como não habilitado.
+ */
+const getCompanyPaymentMethods = async (companyId) => {
+  const company = await _getCompany(companyId);
+  if (!company?.pagarme_recipient_id) return _paymentMethods(false);
+  if (company.pagarme_charges_enabled === true) return _paymentMethods(true);
+  try {
+    return (await refreshRecipientStatus(companyId)).payment_methods;
+  } catch (_) {
+    return _paymentMethods(false);
+  }
+};
+
 const platformRecipientId = () => PLATFORM_RECIPIENT_ID;
 
 /** Cartão salvo do usuário → { id, card_id, brand, last4 } (card_id nunca sai da API). */
@@ -3439,6 +3460,7 @@ module.exports = {
   reconcileOpenPaymentAttempts,
   // Assinaturas (chamadas HTTP; o domínio fica em subscriptionsService).
   assertCompanyRecipientActive,
+  getCompanyPaymentMethods,
   platformRecipientId,
   resolveSavedCardForUser,
   getUserPagarmeCustomerId,

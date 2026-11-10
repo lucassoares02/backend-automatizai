@@ -2,6 +2,7 @@ const pool = require("../db");
 const { columnExists, tableExists } = require("../helpers/schema");
 const { normalizePreorder } = require("../helpers/preorder");
 const technicalSheetService = require("./technicalSheetService");
+const pagarmeService = require("./pagarmeService");
 const { assertIdsBelongToCompany } = require("../helpers/tenantOwnership");
 const { normalizeServiceFields, normalizeImageUrls, normalizeIdList } = require("../helpers/serviceItem");
 const { SUBSCRIPTION_COLUMNS, hasSubscriptionPayload, normalizeSubscriptionFields } = require("../helpers/subscriptionItem");
@@ -74,6 +75,19 @@ const _hasSubscriptionColumns = async () =>
 
 const _forbidden = (message) => Object.assign(new Error(message), { status: 403 });
 
+// A assinatura é cobrada pela Pagar.me: só vira assinatura o item de uma loja
+// com Pix e cartão de crédito habilitados lá. Itens que já são assinatura não
+// passam de novo pela checagem ao serem editados.
+const _assertSubscriptionPaymentsEnabled = async (companyId) => {
+  const methods = await pagarmeService.getCompanyPaymentMethods(companyId);
+  if (methods?.pix !== true || methods?.card !== true) {
+    throw Object.assign(
+      new Error("Para vender por assinatura, habilite o Pix e o cartão de crédito na Pagar.me em Formas de Pagamento."),
+      { status: 409, code: "subscription_payments_disabled" },
+    );
+  }
+};
+
 // Valida o acesso e devolve a configuração a gravar, ou null para não mexer
 // nas colunas. Sem permissão (hoje: só admin do sistema), os campos recebidos
 // são ignorados — exceto a tentativa de ligar uma assinatura nova.
@@ -93,7 +107,9 @@ const _resolveSubscription = async (data, { allowSubscriptions, isService, curre
     return null;
   }
   if (!hasSubscriptionPayload(data)) return null;
-  return normalizeSubscriptionFields(data, { isService });
+  const subscription = normalizeSubscriptionFields(data, { isService });
+  if (subscription.enabled && !currentEnabled) await _assertSubscriptionPaymentsEnabled(data.company_id);
+  return subscription;
 };
 
 const _subscriptionEntries = (sub) => [
@@ -398,7 +414,7 @@ const update = async (data, { allowSubscriptions = false } = {}) => {
     }
   }
   let currentSubscription = false;
-  if (!allowSubscriptions && data.subscription_enabled === true && (await _hasSubscriptionColumns())) {
+  if (data.subscription_enabled === true && (await _hasSubscriptionColumns())) {
     const cur = await pool.query("SELECT subscription_enabled FROM menu_items WHERE id = $1", [id]);
     currentSubscription = cur.rows[0]?.subscription_enabled === true;
   }
@@ -448,6 +464,15 @@ const _DUPLICATE_SKIP = new Set(["id", "deleted_at", "sku", "name", "available"]
 // A cópia nasce desativada e com " (cópia)" no nome, para ser revisada antes
 // de aparecer no cardápio público. Retorna null se o item não existir.
 const duplicate = async (id, { allowSubscriptions = false } = {}) => {
+  // A cópia de uma assinatura continua assinatura: confere os pagamentos antes
+  // de abrir a transação (a checagem pode consultar a Pagar.me).
+  if (allowSubscriptions && (await _hasSubscriptionColumns())) {
+    const src = await pool.query(
+      "SELECT company_id, subscription_enabled FROM menu_items WHERE id = $1 AND deleted_at IS NULL",
+      [id],
+    );
+    if (src.rows[0]?.subscription_enabled === true) await _assertSubscriptionPaymentsEnabled(src.rows[0].company_id);
+  }
   const created = await _withTransaction(async (client) => {
     const src = await client.query(
       "SELECT * FROM menu_items WHERE id = $1 AND deleted_at IS NULL",

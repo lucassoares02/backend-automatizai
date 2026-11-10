@@ -13,10 +13,24 @@ const ITEM = 55;
 
 // Banco simulado: todas as colunas/tabelas existem, a categoria é da empresa e
 // o INSERT/UPDATE devolve o que recebeu. `writes` guarda o SQL de escrita.
-const withFakeDb = async ({ currentSubscription = false } = {}, fn) => {
+// `pagarmeActive` = recebedor Pagar.me ativo (Pix + cartão habilitados).
+const withFakeDb = async ({ currentSubscription = false, pagarmeActive = true } = {}, fn) => {
   const writes = [];
   const handle = async (sql, params = []) => {
     if (sql.includes("information_schema.columns")) return { rowCount: 1, rows: [{}] };
+    if (sql.includes("FROM companies")) {
+      return {
+        rows: [{
+          id: params[0],
+          pagarme_recipient_id: pagarmeActive ? "rp_loja" : null,
+          pagarme_charges_enabled: pagarmeActive,
+          pagarme_recipient_status: pagarmeActive ? "active" : null,
+        }],
+      };
+    }
+    if (sql.startsWith("SELECT company_id, subscription_enabled")) {
+      return { rows: [{ company_id: COMPANY, subscription_enabled: currentSubscription }] };
+    }
     if (sql.includes("to_regclass")) return { rows: [{ name: "x" }] };
     if (sql.includes("FROM menu_categories")) return { rows: [{ id: params[0][0], company_id: COMPANY }] };
     if (sql.startsWith("SELECT subscription_enabled")) {
@@ -155,6 +169,61 @@ test("comerciante sem permissão não liga a assinatura de um item avulso", asyn
     await assert.rejects(
       menuItemsService.update(base({ id: ITEM, subscription_enabled: true, subscription_interval: "month" })),
       (e) => e.status === 403,
+    );
+    assert.equal(writes.length, 0);
+  });
+});
+
+test("loja sem Pix e cartão na Pagar.me não cria item de assinatura", async () => {
+  await withFakeDb({ pagarmeActive: false }, async (writes) => {
+    await assert.rejects(
+      menuItemsService.create(
+        base({ subscription_enabled: true, subscription_interval: "month" }),
+        { allowSubscriptions: true },
+      ),
+      (e) => e.status === 409 && e.code === "subscription_payments_disabled",
+    );
+    assert.equal(writes.length, 0);
+  });
+});
+
+test("loja sem Pix e cartão na Pagar.me continua criando itens avulsos", async () => {
+  await withFakeDb({ pagarmeActive: false }, async (writes) => {
+    await menuItemsService.create(base({ subscription_enabled: false }), { allowSubscriptions: true });
+    assert.equal(writtenColumns(writes[0]).subscription_enabled, false);
+  });
+});
+
+test("loja sem Pix e cartão na Pagar.me não transforma item avulso em assinatura", async () => {
+  await withFakeDb({ pagarmeActive: false, currentSubscription: false }, async (writes) => {
+    await assert.rejects(
+      menuItemsService.update(
+        base({ id: ITEM, subscription_enabled: true, subscription_interval: "month" }),
+        { allowSubscriptions: true },
+      ),
+      (e) => e.status === 409,
+    );
+    assert.equal(writes.length, 0);
+  });
+});
+
+test("item que já é assinatura segue editável sem nova checagem da Pagar.me", async () => {
+  await withFakeDb({ pagarmeActive: false, currentSubscription: true }, async (writes) => {
+    await menuItemsService.update(
+      base({ id: ITEM, name: "Novo nome", subscription_enabled: true, subscription_interval: "week" }),
+      { allowSubscriptions: true },
+    );
+    const cols = writtenColumns(writes[0]);
+    assert.equal(cols.name, "Novo nome");
+    assert.equal(cols.subscription_interval, "week");
+  });
+});
+
+test("loja sem Pix e cartão na Pagar.me não duplica item de assinatura", async () => {
+  await withFakeDb({ pagarmeActive: false, currentSubscription: true }, async (writes) => {
+    await assert.rejects(
+      menuItemsService.duplicate(ITEM, { allowSubscriptions: true }),
+      (e) => e.status === 409,
     );
     assert.equal(writes.length, 0);
   });
