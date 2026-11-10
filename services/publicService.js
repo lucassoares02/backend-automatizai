@@ -186,7 +186,32 @@ const _buildAddressLine = (row) => {
 // antigos `/order?company={id}`).
 const _COMPANY_SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
-const getCompanyPublicMenu = async (companyRef) => {
+const _activeIncludedItemIds = async (companyId, { customerUserId = null, phone = null, clientId = null } = {}) => {
+  if (!(await tableExists("customer_subscriptions")) ||
+      !(await tableExists("subscription_included_items")) ||
+      !(await columnExists("menu_items", "subscription_enabled"))) return [];
+  const normalizedPhone = normalizePhone(phone);
+  if (!customerUserId && !normalizedPhone && !clientId) return [];
+  const localPhone = normalizedPhone?.startsWith("55") ? normalizedPhone.slice(2) : null;
+  const result = await pool.query(
+    `SELECT DISTINCT sii.included_item_id
+       FROM customer_subscriptions cs
+       JOIN menu_items plan ON plan.id = cs.menu_item_id AND plan.company_id = cs.company_id
+       JOIN subscription_included_items sii ON sii.subscription_item_id = plan.id
+       JOIN menu_items included ON included.id = sii.included_item_id AND included.company_id = cs.company_id
+       LEFT JOIN clients c ON c.company_id = cs.company_id
+         AND (c.id = cs.client_id OR c.user_id = cs.user_id)
+      WHERE cs.company_id = $1 AND cs.status = 'active' AND plan.subscription_enabled = TRUE
+        AND included.available = TRUE AND included.deleted_at IS NULL
+        AND (($2::uuid IS NOT NULL AND cs.user_id = $2)
+          OR ($3::text IS NOT NULL AND regexp_replace(COALESCE(c.phone, ''), '\\D', '', 'g') IN ($3, $4))
+          OR ($5::int IS NOT NULL AND cs.client_id = $5))`,
+    [companyId, customerUserId || null, normalizedPhone, localPhone, clientId || null],
+  );
+  return result.rows.map((row) => Number(row.included_item_id));
+};
+
+const getCompanyPublicMenu = async (companyRef, customer = {}) => {
   const ref = String(companyRef).trim();
   const byUuid = _UUID_RE.test(ref);
   const byId = /^\d+$/.test(ref);
@@ -352,6 +377,9 @@ const getCompanyPublicMenu = async (companyRef) => {
     [companyId],
   );
 
+  const includedItemIds = await _activeIncludedItemIds(companyId, customer);
+  const includedSet = new Set(includedItemIds);
+
   // Desconto de campanha ativo: aplica o preço promocional (final_price) no menu
   // público para o cliente ver, mantendo o preço original para o "de/por".
   const activeCampaignPrices = await campaignsService.getActivePricesMap(companyId);
@@ -362,6 +390,11 @@ const getCompanyPublicMenu = async (companyRef) => {
       item.campaign_price = camp.final_price;
       item.campaign_discount_percent = camp.discount_percent;
       item.price = camp.final_price; // preço efetivo exibido/cobrado
+    }
+    if (includedSet.has(Number(item.id))) {
+      item.original_price ??= Number(item.price ?? 0);
+      item.price = 0;
+      item.subscription_included = true;
     }
   }
 
@@ -1036,6 +1069,11 @@ const createPublicOrder = async (data) => {
     const serviceFilter = (await columnExists("menu_items", "item_type")) ? "AND item_type <> 'service'" : "";
     // Item de assinatura só é vendido pelo checkout de assinaturas.
     const subFilter = await subscriptionFilter();
+    const includedItemIds = await _activeIncludedItemIds(company_id, {
+      customerUserId: data.authenticated_user_id || null,
+      clientId: client_id,
+    });
+    const includedSet = new Set(includedItemIds);
     const r = await pool.query(
       `SELECT id, price
        FROM menu_items
@@ -1051,7 +1089,10 @@ const createPublicOrder = async (data) => {
       const base = Number(row.price ?? 0);
       const camp = activeCampaignPrices.get(Number(row.id));
       rawMenuPriceById.set(Number(row.id), base);
-      menuPriceById.set(Number(row.id), camp ? Math.min(base, camp.final_price) : base);
+      menuPriceById.set(
+        Number(row.id),
+        includedSet.has(Number(row.id)) ? 0 : camp ? Math.min(base, camp.final_price) : base,
+      );
     }
   }
   // Combo: guarda final_price E original_price para ratear o desconto entre os

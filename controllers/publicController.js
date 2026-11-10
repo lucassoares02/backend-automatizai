@@ -20,7 +20,10 @@ const getCompanyMenu = async (req, res) => {
   // companyId pode ser o slug, UUID público ou id numérico (retrocompatível).
   if (!companyId || !String(companyId).trim()) return res.status(400).json({ error: "Invalid company reference" });
   try {
-    const data = await service.getCompanyPublicMenu(companyId);
+    const data = await service.getCompanyPublicMenu(companyId, {
+      customerUserId: req.customer?.id || null,
+      phone: req.query?.phone ? String(req.query.phone) : null,
+    });
     if (!data) return res.status(404).json({ error: "Company not found" });
     return res.status(200).json(data);
   } catch (error) {

@@ -467,7 +467,7 @@ router.post("/public/purchase-goals/suggest", publicLimiter, purchaseGoals.publi
 
 // public ordering (no auth) — FLUXO CRÍTICO DE PEDIDOS: mantido público.
 router.get("/public/restaurants", publicLimiter, publicCtrl.listRestaurants);
-router.get("/public/company/:companyId", publicLimiter, publicCtrl.getCompanyMenu);
+router.get("/public/company/:companyId", publicLimiter, optionalCustomerAuth, publicCtrl.getCompanyMenu);
 router.get("/public/delivery-fee", publicLimiter, publicCtrl.calculateDeliveryFee);
 
 // Conta do consumidor. JWT e escopo são separados do painel administrativo;

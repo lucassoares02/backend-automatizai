@@ -570,6 +570,8 @@ const createBookingOrder = async (data, options = {}) => {
     data.subscription_id == null || data.subscription_id === "" ? null : Number(data.subscription_id);
   const subscriptionMode = subscriptionId !== null;
   const subscriptionOwner = options.subscriptionOwner || {};
+  let includedByActivePlan = false;
+  let activeIncludedItemIds = new Set();
   if (subscriptionMode) {
     if (!(Number.isSafeInteger(subscriptionId) && subscriptionId > 0)) {
       throw _error(404, "Assinatura não encontrada.", "SUBSCRIPTION_NOT_FOUND");
@@ -617,13 +619,31 @@ const createBookingOrder = async (data, options = {}) => {
   if (!owner.rows[0]) {
     throw _error(403, "Atualize sua identificação antes de agendar.");
   }
-
+  if (!subscriptionMode &&
+      (await tableExists("customer_subscriptions")) &&
+      (await tableExists("subscription_included_items")) &&
+      (await columnExists("menu_items", "subscription_enabled"))) {
+    const included = await pool.query(
+      `SELECT DISTINCT sii.included_item_id
+         FROM customer_subscriptions cs
+         JOIN menu_items plan ON plan.id = cs.menu_item_id AND plan.company_id = cs.company_id
+         JOIN subscription_included_items sii ON sii.subscription_item_id = plan.id
+        WHERE cs.company_id = $1 AND (cs.client_id = $2 OR ($3::uuid IS NOT NULL AND cs.user_id = $3))
+          AND cs.status = 'active'
+          AND plan.subscription_enabled = TRUE`,
+      [companyId, clientId, data.authenticated_user_id || null],
+    );
+    activeIncludedItemIds = new Set(included.rows.map((row) => Number(row.included_item_id)));
+    includedByActivePlan = activeIncludedItemIds.has(serviceId);
+  }
   const paymentProvider =
-    !subscriptionMode && ONLINE_PROVIDERS.includes(data.payment_provider) ? data.payment_provider : null;
+    !subscriptionMode && !includedByActivePlan && ONLINE_PROVIDERS.includes(data.payment_provider)
+      ? data.payment_provider
+      : null;
   const onlineMethod =
     paymentProvider && ["pix", "card"].includes(data.online_payment_method) ? data.online_payment_method : null;
   let paymentMethodId = null;
-  if (!paymentProvider && !subscriptionMode) {
+  if (!paymentProvider && !subscriptionMode && !includedByActivePlan) {
     paymentMethodId = Number(data.payment_method_id);
     const method = Number.isInteger(paymentMethodId)
       ? await pool.query("SELECT 1 FROM payment_methods WHERE id = $1 AND company_id = $2 AND active = true", [
@@ -645,6 +665,16 @@ const createBookingOrder = async (data, options = {}) => {
     startsAt,
     campaignPrices: activeCampaignPrices,
   });
+  for (const item of addOns) {
+    if (!activeIncludedItemIds.has(Number(item.menu_item_id))) continue;
+    item.unit_price = Number(
+      item.options.reduce(
+        (sum, option) => sum + Number(option.additional_price ?? 0) * Number(option.quantity ?? 1),
+        0,
+      ).toFixed(2),
+    );
+    item.subtotal = Number((item.unit_price * item.quantity).toFixed(2));
+  }
   const addOnsSubtotal = Number(addOns.reduce((sum, item) => sum + item.subtotal, 0).toFixed(2));
   const stockRequirements = new Map();
   if (addOns.length && (await hasStockControlSchema())) {
@@ -688,7 +718,7 @@ const createBookingOrder = async (data, options = {}) => {
     const campaign = activeCampaignPrices.get(Number(service.id));
     if (professional.price_override == null && campaign) unitPrice = Math.min(unitPrice, campaign.final_price);
     // Pela assinatura o atendimento já está pago nas faturas: pedido de valor 0.
-    unitPrice = subscriptionMode ? 0 : Number(unitPrice.toFixed(2));
+    unitPrice = subscriptionMode || includedByActivePlan ? 0 : Number(unitPrice.toFixed(2));
 
     const serviceFeeAmount = Number(process.env.PUBLIC_SERVICE_FEE_AMOUNT ?? 1.49);
     const serviceFee = paymentProvider ? Number(serviceFeeAmount.toFixed(2)) : 0;
