@@ -75,7 +75,7 @@ PORT=
 ENVIROMENT=
 
 # N8N / Evolution
-URL_N8N=
+URL_N8N=https://n8n.arbian.com.br/api/v1/
 TOKEN_N8N=
 EVOLUTION_API_URL=
 TOKEN_EVOLUTION=
@@ -97,6 +97,13 @@ MINIO_ACCESS_KEY=
 MINIO_SECRET_KEY=
 MINIO_BUCKET=
 ```
+
+### Workflows do n8n
+
+- `URL_N8N` aponta para a API REST v1 e deve terminar em `/api/v1/`; `TOKEN_N8N` autentica operações de consulta, criação e ativação de workflows.
+- O endereço-base dos webhooks é derivado de `URL_N8N` em `services/evolutionService.js`, substituindo `/api/v1/` por `/webhook/`.
+- A criação automática de fluxos para conexões usa o workflow principal configurado em `services/n8nService.js`. Para um fluxo simples importável e exemplo de webhook, consulte `templates/lucas-teste-integracao.json`.
+- Ao configurar outro ambiente, atualize `URL_N8N` no ambiente da API e confira que o host aponta para a instância correta do n8n.
 
 ## Checklist para novas features
 

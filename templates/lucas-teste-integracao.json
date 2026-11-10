@@ -1,0 +1,46 @@
+{
+  "name": "Lucas teste integração",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lucas-teste-integracao",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "name": "Receber requisição",
+      "id": "e49d6398-5666-4a34-9ea2-4eacb84e8763",
+      "webhookId": "a7e80dd7-8897-4485-8c6d-d3ea3dd83b19"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const recebido = $json.body ?? $json;\n\nreturn [{\n  json: {\n    ok: true,\n    mensagem: 'Integração com n8n funcionando',\n    recebido,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 0],
+      "name": "Processar requisição",
+      "id": "78907161-335f-4cd6-9d72-d9effe261af7"
+    }
+  ],
+  "connections": {
+    "Receber requisição": {
+      "main": [
+        [
+          {
+            "node": "Processar requisição",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

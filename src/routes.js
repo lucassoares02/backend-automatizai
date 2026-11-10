@@ -389,6 +389,7 @@ router.delete("/promotions/:id", authMiddleware, authorizePromotion, promotions.
 
 // campaigns (marketing via IA/n8n)
 router.post("/campaigns/webhook/report", campaigns.webhookReport); // callback do n8n (Basic Auth no controller)
+router.post("/campaigns/company/:companyId/suggestion", authMiddleware, authorizeCompanyParam("companyId"), campaigns.suggest);
 router.get("/campaigns/company/:companyId", authMiddleware, authorizeCompanyParam("companyId"), campaigns.findByCompany);
 router.get("/campaigns/company/:companyId/audience-preview", authMiddleware, authorizeCompanyParam("companyId"), campaigns.audiencePreview);
 router.get("/campaigns/:id", authMiddleware, authorizeCampaign, campaigns.find);

@@ -1,4 +1,5 @@
 const service = require("../services/campaignsService");
+const suggestionService = require("../services/campaignSuggestionService");
 const { resolveCompanyId } = require("../src/middlewares/authorize");
 
 const findByCompany = async (req, res) => {
@@ -9,6 +10,17 @@ const findByCompany = async (req, res) => {
   } catch (error) {
     console.error("Campaigns list error:", error.message);
     return res.status(error.status || 500).json({ error: error.message || "Falha ao listar campanhas" });
+  }
+};
+
+const suggest = async (req, res) => {
+  try {
+    const companyId = Number(req.params.companyId);
+    const suggestion = await suggestionService.suggestCampaign(companyId);
+    return res.status(200).json(suggestion);
+  } catch (error) {
+    console.error("Campaign suggestion error:", error.message);
+    return res.status(error.status || 500).json({ error: error.message || "Falha ao sugerir campanha" });
   }
 };
 
@@ -106,4 +118,4 @@ const webhookReport = async (req, res) => {
   }
 };
 
-module.exports = { findByCompany, find, audiencePreview, create, update, dispatch, remove, webhookReport };
+module.exports = { findByCompany, suggest, find, audiencePreview, create, update, dispatch, remove, webhookReport };
