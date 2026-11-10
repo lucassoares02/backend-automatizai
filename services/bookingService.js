@@ -20,6 +20,7 @@ const { UUID_RE } = require("../helpers/companySlug");
 const slots = require("../helpers/bookingSlots");
 const { hasStockControlSchema, reserveStock } = require("../helpers/stockReservation");
 const { meetsInclusiveLeadDays } = require("../helpers/preorder");
+const { loadIncludedBenefits } = require("../helpers/subscriptionEntitlements");
 
 const DEFAULTS = { step: 15, notice: 60, maxDays: 30, cancelWindow: 24 };
 const MAX_DAYS_PER_REQUEST = 14;
@@ -543,6 +544,9 @@ const _resolveAddOnProducts = async ({ companyId, products, startsAt, campaignPr
       subtotal: Number((unitPrice * line.quantity).toFixed(2)),
       notes: [ADDON_PICKUP_NOTE, line.notes].filter(Boolean).join(" · "),
       options: selection.snapshot,
+      _regularUnitPrice: unitPrice,
+      _extraPerUnit: Number(selection.extraTotalPerUnit.toFixed(2)),
+      subscription_id: null,
     });
   }
   return resolved;
@@ -571,7 +575,6 @@ const createBookingOrder = async (data, options = {}) => {
   const subscriptionMode = subscriptionId !== null;
   const subscriptionOwner = options.subscriptionOwner || {};
   let includedByActivePlan = false;
-  let activeIncludedItemIds = new Set();
   if (subscriptionMode) {
     if (!(Number.isSafeInteger(subscriptionId) && subscriptionId > 0)) {
       throw _error(404, "Assinatura não encontrada.", "SUBSCRIPTION_NOT_FOUND");
@@ -619,22 +622,14 @@ const createBookingOrder = async (data, options = {}) => {
   if (!owner.rows[0]) {
     throw _error(403, "Atualize sua identificação antes de agendar.");
   }
-  if (!subscriptionMode &&
-      (await tableExists("customer_subscriptions")) &&
-      (await tableExists("subscription_included_items")) &&
-      (await columnExists("menu_items", "subscription_enabled"))) {
-    const included = await pool.query(
-      `SELECT DISTINCT sii.included_item_id
-         FROM customer_subscriptions cs
-         JOIN menu_items plan ON plan.id = cs.menu_item_id AND plan.company_id = cs.company_id
-         JOIN subscription_included_items sii ON sii.subscription_item_id = plan.id
-        WHERE cs.company_id = $1 AND (cs.client_id = $2 OR ($3::uuid IS NOT NULL AND cs.user_id = $3))
-          AND cs.status = 'active'
-          AND plan.subscription_enabled = TRUE`,
-      [companyId, clientId, data.authenticated_user_id || null],
-    );
-    activeIncludedItemIds = new Set(included.rows.map((row) => Number(row.included_item_id)));
-    includedByActivePlan = activeIncludedItemIds.has(serviceId);
+  if (!subscriptionMode) {
+    const benefits = await loadIncludedBenefits(pool, {
+      companyId,
+      clientId,
+      customerUserId: data.authenticated_user_id || null,
+      itemIds: [serviceId],
+    });
+    includedByActivePlan = (benefits.get(serviceId) || []).length > 0;
   }
   const paymentProvider =
     !subscriptionMode && !includedByActivePlan && ONLINE_PROVIDERS.includes(data.payment_provider)
@@ -659,34 +654,70 @@ const createBookingOrder = async (data, options = {}) => {
   const notes = data.notes ? String(data.notes).trim().slice(0, 500) || null : null;
   const couponCode = !subscriptionMode && data.coupon_code ? String(data.coupon_code).trim() : null;
   const activeCampaignPrices = await campaignsService.getActivePricesMap(companyId);
-  const addOns = await _resolveAddOnProducts({
+  let addOns = await _resolveAddOnProducts({
     companyId,
     products: subscriptionMode ? null : data.products,
     startsAt,
     campaignPrices: activeCampaignPrices,
   });
-  for (const item of addOns) {
-    if (!activeIncludedItemIds.has(Number(item.menu_item_id))) continue;
-    item.unit_price = Number(
-      item.options.reduce(
-        (sum, option) => sum + Number(option.additional_price ?? 0) * Number(option.quantity ?? 1),
-        0,
-      ).toFixed(2),
-    );
-    item.subtotal = Number((item.unit_price * item.quantity).toFixed(2));
-  }
-  const addOnsSubtotal = Number(addOns.reduce((sum, item) => sum + item.subtotal, 0).toFixed(2));
-  const stockRequirements = new Map();
-  if (addOns.length && (await hasStockControlSchema())) {
-    for (const item of addOns) {
-      stockRequirements.set(item.menu_item_id, (stockRequirements.get(item.menu_item_id) || 0) + item.quantity);
-    }
-  }
-
   const client = await pool.connect();
   let releasedOrders = [];
   try {
     await client.query("BEGIN");
+    const benefitItemIds = [serviceId, ...addOns.map((item) => item.menu_item_id)];
+    const benefitsByItem = subscriptionMode
+      ? new Map()
+      : await loadIncludedBenefits(client, {
+          companyId,
+          clientId,
+          customerUserId: data.authenticated_user_id || null,
+          itemIds: benefitItemIds,
+          lock: true,
+        });
+    const serviceBenefits = benefitsByItem.get(serviceId) || [];
+    if (!subscriptionMode && includedByActivePlan && !serviceBenefits.length) {
+      throw _error(409, "O limite gratuito deste serviço acabou. Atualize o agendamento e tente novamente.");
+    }
+    const includedSubscriptionId = !subscriptionMode && includedByActivePlan
+      ? serviceBenefits[0].subscriptionId : null;
+    const remainingByItem = new Map(
+      Array.from(benefitsByItem, ([id, benefits]) => [id, benefits.map((benefit) => ({ ...benefit }))]),
+    );
+    const allocatedAddOns = [];
+    for (const item of addOns) {
+      const benefits = remainingByItem.get(Number(item.menu_item_id)) || [];
+      let freeQuantity = 0;
+      for (const benefit of benefits) {
+        const quantity = Math.min(item.quantity - freeQuantity, benefit.remaining);
+        if (quantity <= 0) continue;
+        benefit.remaining -= quantity;
+        freeQuantity += quantity;
+        allocatedAddOns.push({
+          ...item,
+          quantity,
+          unit_price: item._extraPerUnit,
+          subtotal: Number((item._extraPerUnit * quantity).toFixed(2)),
+          subscription_id: benefit.subscriptionId,
+        });
+      }
+      if (item.quantity > freeQuantity) {
+        const quantity = item.quantity - freeQuantity;
+        allocatedAddOns.push({
+          ...item,
+          quantity,
+          subtotal: Number((item._regularUnitPrice * quantity).toFixed(2)),
+          subscription_id: null,
+        });
+      }
+    }
+    addOns = allocatedAddOns;
+    const addOnsSubtotal = Number(addOns.reduce((sum, item) => sum + item.subtotal, 0).toFixed(2));
+    const stockRequirements = new Map();
+    if (addOns.length && (await hasStockControlSchema())) {
+      for (const item of addOns) {
+        stockRequirements.set(item.menu_item_id, (stockRequirements.get(item.menu_item_id) || 0) + item.quantity);
+      }
+    }
     const service = await _loadService(client, companyId, serviceId, { includeSubscription: subscriptionMode });
     if (!service) throw _error(404, "Serviço indisponível.");
     if (subscriptionMode && service.subscription_enabled !== true) {
@@ -794,26 +825,29 @@ const createBookingOrder = async (data, options = {}) => {
       await couponsService.recordRedemption(client, { couponId, orderId: order.id, clientId, discount: couponDiscount });
     }
 
-    const itemRes = await client.query(
-      `INSERT INTO order_items (order_id, menu_item_id, item_name, quantity, item_price, subtotal, notes)
-       VALUES ($1, $2, $3, 1, $4, $4, $5) RETURNING id`,
+    const hasSubscriptionOrderItems = await columnExists("order_items", "subscription_id");
+    const serviceItemRes = await client.query(
+      `INSERT INTO order_items (order_id, menu_item_id, item_name, quantity, item_price, subtotal, notes${hasSubscriptionOrderItems ? ", subscription_id" : ""})
+       VALUES ($1, $2, $3, 1, $4, $4, $5${hasSubscriptionOrderItems ? ", $6" : ""}) RETURNING id`,
       [
         order.id,
         service.id,
         service.name,
         unitPrice,
         `Profissional: ${professional.name}${subscriptionMode ? " · Pela assinatura" : ""}`,
+        ...(hasSubscriptionOrderItems ? [includedSubscriptionId] : []),
       ],
     );
 
     for (const item of addOns) {
       const addOnRes = await client.query(
-        `INSERT INTO order_items (order_id, menu_item_id, item_name, quantity, item_price, subtotal, notes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-        [order.id, item.menu_item_id, item.name, item.quantity, item.unit_price, item.subtotal, item.notes],
+        `INSERT INTO order_items (order_id, menu_item_id, item_name, quantity, item_price, subtotal, notes${hasSubscriptionOrderItems ? ", subscription_id" : ""})
+         VALUES ($1, $2, $3, $4, $5, $6, $7${hasSubscriptionOrderItems ? ", $8" : ""}) RETURNING id`,
+        [order.id, item.menu_item_id, item.name, item.quantity, item.unit_price, item.subtotal, item.notes,
+          ...(hasSubscriptionOrderItems ? [item.subscription_id] : [])],
       );
       for (const opt of item.options) {
-        await client.query(
+      await client.query(
           `INSERT INTO order_item_options
              (order_item_id, menu_item_id, group_id, group_name, option_id, option_name, additional_price, quantity)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
@@ -842,7 +876,7 @@ const createBookingOrder = async (data, options = {}) => {
       [
         companyId,
         order.id,
-        itemRes.rows[0].id,
+        serviceItemRes.rows[0].id,
         service.id,
         professional.id,
         slot.startsAt,

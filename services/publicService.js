@@ -13,6 +13,7 @@ const identityService = require("./identityService");
 const reviewsService = require("./reviewsService");
 const bookingService = require("./bookingService");
 const { normalizePhone } = require("../helpers/phone");
+const { loadIncludedBenefits } = require("../helpers/subscriptionEntitlements");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 const { columnExists, tableExists } = require("../helpers/schema");
 const { subscriptionFilter } = require("../helpers/subscriptionFilter");
@@ -186,31 +187,6 @@ const _buildAddressLine = (row) => {
 // antigos `/order?company={id}`).
 const _COMPANY_SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
-const _activeIncludedItemIds = async (companyId, { customerUserId = null, phone = null, clientId = null } = {}) => {
-  if (!(await tableExists("customer_subscriptions")) ||
-      !(await tableExists("subscription_included_items")) ||
-      !(await columnExists("menu_items", "subscription_enabled"))) return [];
-  const normalizedPhone = normalizePhone(phone);
-  if (!customerUserId && !normalizedPhone && !clientId) return [];
-  const localPhone = normalizedPhone?.startsWith("55") ? normalizedPhone.slice(2) : null;
-  const result = await pool.query(
-    `SELECT DISTINCT sii.included_item_id
-       FROM customer_subscriptions cs
-       JOIN menu_items plan ON plan.id = cs.menu_item_id AND plan.company_id = cs.company_id
-       JOIN subscription_included_items sii ON sii.subscription_item_id = plan.id
-       JOIN menu_items included ON included.id = sii.included_item_id AND included.company_id = cs.company_id
-       LEFT JOIN clients c ON c.company_id = cs.company_id
-         AND (c.id = cs.client_id OR c.user_id = cs.user_id)
-      WHERE cs.company_id = $1 AND cs.status = 'active' AND plan.subscription_enabled = TRUE
-        AND included.available = TRUE AND included.deleted_at IS NULL
-        AND (($2::uuid IS NOT NULL AND cs.user_id = $2)
-          OR ($3::text IS NOT NULL AND regexp_replace(COALESCE(c.phone, ''), '\\D', '', 'g') IN ($3, $4))
-          OR ($5::int IS NOT NULL AND cs.client_id = $5))`,
-    [companyId, customerUserId || null, normalizedPhone, localPhone, clientId || null],
-  );
-  return result.rows.map((row) => Number(row.included_item_id));
-};
-
 const getCompanyPublicMenu = async (companyRef, customer = {}) => {
   const ref = String(companyRef).trim();
   const byUuid = _UUID_RE.test(ref);
@@ -377,8 +353,12 @@ const getCompanyPublicMenu = async (companyRef, customer = {}) => {
     [companyId],
   );
 
-  const includedItemIds = await _activeIncludedItemIds(companyId, customer);
-  const includedSet = new Set(includedItemIds);
+  const includedBenefits = await loadIncludedBenefits(pool, {
+    companyId,
+    customerUserId: customer.customerUserId,
+    clientId: customer.clientId,
+    phone: customer.phone,
+  });
 
   // Desconto de campanha ativo: aplica o preço promocional (final_price) no menu
   // público para o cliente ver, mantendo o preço original para o "de/por".
@@ -391,7 +371,11 @@ const getCompanyPublicMenu = async (companyRef, customer = {}) => {
       item.campaign_discount_percent = camp.discount_percent;
       item.price = camp.final_price; // preço efetivo exibido/cobrado
     }
-    if (includedSet.has(Number(item.id))) {
+    const availableBenefits = includedBenefits.get(Number(item.id)) || [];
+    const remaining = availableBenefits.reduce((sum, benefit) => sum + benefit.remaining, 0);
+    item.regular_price = Number(item.price ?? 0);
+    item.free_quantity_remaining = remaining;
+    if (remaining > 0) {
       item.original_price ??= Number(item.price ?? 0);
       item.price = 0;
       item.subscription_included = true;
@@ -1069,11 +1053,6 @@ const createPublicOrder = async (data) => {
     const serviceFilter = (await columnExists("menu_items", "item_type")) ? "AND item_type <> 'service'" : "";
     // Item de assinatura só é vendido pelo checkout de assinaturas.
     const subFilter = await subscriptionFilter();
-    const includedItemIds = await _activeIncludedItemIds(company_id, {
-      customerUserId: data.authenticated_user_id || null,
-      clientId: client_id,
-    });
-    const includedSet = new Set(includedItemIds);
     const r = await pool.query(
       `SELECT id, price
        FROM menu_items
@@ -1091,7 +1070,7 @@ const createPublicOrder = async (data) => {
       rawMenuPriceById.set(Number(row.id), base);
       menuPriceById.set(
         Number(row.id),
-        includedSet.has(Number(row.id)) ? 0 : camp ? Math.min(base, camp.final_price) : base,
+        camp ? Math.min(base, camp.final_price) : base,
       );
     }
   }
@@ -1213,8 +1192,65 @@ const createPublicOrder = async (data) => {
       _purchase_goal_id: goalId,
       _goal_discount_percentage: goalDiscountPct,
       _goal_discount_amount: goalDiscountAmount,
+      _extra_per_unit: extraPerUnit,
+      _goal_discount_per_unit: goalDiscountPerUnit,
+      subscription_id: null,
     });
   }
+
+  const couponCode = data.coupon_code ? String(data.coupon_code).trim() : null;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const benefitsByItem = await loadIncludedBenefits(client, {
+      companyId: company_id,
+      customerUserId: data.authenticated_user_id || null,
+      clientId: client_id,
+      itemIds: menuItemIds,
+      lock: true,
+    });
+    const remainingByItem = new Map(
+      Array.from(benefitsByItem, ([itemId, benefits]) => [
+        itemId,
+        benefits.map((benefit) => ({ ...benefit })),
+      ]),
+    );
+    const allocatedItems = [];
+    for (const item of enrichedItems) {
+      const itemId = Number(item.menu_item_id);
+      const benefits = !item.promotion_id ? remainingByItem.get(itemId) || [] : [];
+      let freeQuantity = 0;
+      for (const benefit of benefits) {
+        const quantity = Math.min(Number(item.quantity) - freeQuantity, benefit.remaining);
+        if (quantity <= 0) continue;
+        benefit.remaining -= quantity;
+        freeQuantity += quantity;
+        allocatedItems.push({
+          ...item,
+          quantity,
+          unit_price: Number(item._extra_per_unit.toFixed(2)),
+          subtotal: Number((item._extra_per_unit * quantity).toFixed(2)),
+          _purchase_goal_id: null,
+          _goal_discount_percentage: null,
+          _goal_discount_amount: null,
+          subscription_id: benefit.subscriptionId,
+        });
+        if (freeQuantity >= Number(item.quantity)) break;
+      }
+      const paidQuantity = Number(item.quantity) - freeQuantity;
+      if (paidQuantity > 0) {
+        allocatedItems.push({
+          ...item,
+          quantity: paidQuantity,
+          subtotal: Number((item.unit_price * paidQuantity).toFixed(2)),
+          _goal_discount_amount: item._goal_discount_per_unit > 0
+            ? Number((item._goal_discount_per_unit * paidQuantity).toFixed(2))
+            : null,
+          subscription_id: null,
+        });
+      }
+    }
+    enrichedItems.splice(0, enrichedItems.length, ...allocatedItems);
 
   const subtotalOrder = enrichedItems.reduce((sum, i) => sum + Number(i.subtotal), 0);
   // Desconto total: somatório dos descontos por item (goals) + desconto manual eventual
@@ -1238,11 +1274,6 @@ const createPublicOrder = async (data) => {
   const totalBeforeCoupon = Number(
     (subtotalOrder + delivery_fee - manualDiscount + service_fee).toFixed(2),
   );
-  const couponCode = data.coupon_code ? String(data.coupon_code).trim() : null;
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
     const tag = await generateUniqueOrderTag(client);
 
     const stockRequirements = hasStockControl
@@ -1376,10 +1407,15 @@ const createPublicOrder = async (data) => {
       });
     }
 
+    const hasSubscriptionOrderItems = await columnExists("order_items", "subscription_id");
     for (const item of enrichedItems) {
+      const columns = "order_id, menu_item_id, item_name, quantity, item_price, subtotal, notes, promotion_id, promotion_group_key, purchase_goal_id, goal_discount_percentage, goal_discount_amount";
+      const insertColumns = hasSubscriptionOrderItems ? `${columns}, subscription_id` : columns;
+      const placeholders = hasSubscriptionOrderItems
+        ? "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13"
+        : "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12";
       const itemRes = await client.query(
-        `INSERT INTO order_items (order_id, menu_item_id, item_name, quantity, item_price, subtotal, notes, promotion_id, promotion_group_key, purchase_goal_id, goal_discount_percentage, goal_discount_amount)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
+        `INSERT INTO order_items (${insertColumns}) VALUES (${placeholders}) RETURNING id`,
         [
           order.id,
           item.menu_item_id ?? null,
@@ -1393,6 +1429,7 @@ const createPublicOrder = async (data) => {
           item._purchase_goal_id ?? null,
           item._goal_discount_percentage ?? null,
           item._goal_discount_amount ?? null,
+          ...(hasSubscriptionOrderItems ? [item.subscription_id ?? null] : []),
         ],
       );
       const orderItemId = itemRes.rows[0].id;

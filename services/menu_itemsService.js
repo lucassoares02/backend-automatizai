@@ -128,6 +128,7 @@ const _extrasSelect = async (alias = "mi") => {
     tableExists("service_related_products"),
   ]);
   const hasSubscriptionItems = await tableExists("subscription_included_items");
+  const hasSubscriptionLimits = hasSubscriptionItems && await columnExists("subscription_included_items", "free_quantity_per_cycle");
   const images = hasImages
     ? `COALESCE((SELECT json_agg(json_build_object('id', img.id, 'url', img.url, 'position', img.position)
                                  ORDER BY img.position, img.id)
@@ -145,7 +146,11 @@ const _extrasSelect = async (alias = "mi") => {
     ? `COALESCE((SELECT array_agg(sii.included_item_id ORDER BY sii.included_item_id)
                  FROM subscription_included_items sii WHERE sii.subscription_item_id = ${alias}.id), '{}'::int[]) AS included_item_ids`
     : `'{}'::int[] AS included_item_ids`;
-  return `${images}, ${professionals}, ${related}, ${subscriptionItems}`;
+  const subscriptionLimits = hasSubscriptionLimits
+    ? `COALESCE((SELECT json_object_agg(sii.included_item_id::text, sii.free_quantity_per_cycle)
+                 FROM subscription_included_items sii WHERE sii.subscription_item_id = ${alias}.id), '{}'::json) AS included_item_limits`
+    : `'{}'::json AS included_item_limits`;
+  return `${images}, ${professionals}, ${related}, ${subscriptionItems}, ${subscriptionLimits}`;
 };
 
 // Substitui a galeria do item pela lista recebida (ordem = posição).
@@ -198,18 +203,30 @@ const _syncRelatedProducts = async (client, itemId, companyId, ids) => {
 
 // Itens gratuitos incluídos no plano recorrente. Os vínculos pertencem à mesma
 // empresa, não podem apontar para o próprio plano e são substituídos ao editar.
-const _syncSubscriptionItems = async (client, itemId, companyId, ids) => {
+const _syncSubscriptionItems = async (client, itemId, companyId, ids, rawLimits = {}) => {
   if (ids === null || !(await tableExists("subscription_included_items"))) return;
+  if (!(await columnExists("subscription_included_items", "free_quantity_per_cycle"))) {
+    throw Object.assign(new Error("O limite de itens da assinatura aguarda uma atualização do banco de dados."), { status: 409 });
+  }
   await client.query("DELETE FROM subscription_included_items WHERE subscription_item_id = $1", [itemId]);
   if (!ids.length) return;
+  const limits = new Map();
+  for (const id of ids) {
+    const value = Number(rawLimits?.[id] ?? rawLimits?.[String(id)] ?? 1);
+    if (!Number.isInteger(value) || value < 1 || value > 100) {
+      throw Object.assign(new Error("O limite gratuito deve ser um número inteiro entre 1 e 100 por item."), { status: 400 });
+    }
+    limits.set(Number(id), value);
+  }
   const inserted = await client.query(
-    `INSERT INTO subscription_included_items (subscription_item_id, included_item_id)
-     SELECT $1, mi.id FROM menu_items mi
-     WHERE mi.company_id = $2 AND mi.id = ANY($3::int[]) AND mi.id <> $1
+    `INSERT INTO subscription_included_items (subscription_item_id, included_item_id, free_quantity_per_cycle)
+     SELECT $1, mi.id, limits.free_quantity FROM menu_items mi
+     JOIN unnest($3::int[], $4::int[]) AS limits(item_id, free_quantity) ON limits.item_id = mi.id
+     WHERE mi.company_id = $2 AND mi.id <> $1
        AND mi.deleted_at IS NULL AND mi.available = TRUE
      ON CONFLICT (subscription_item_id, included_item_id) DO NOTHING
      RETURNING included_item_id`,
-    [itemId, companyId, ids],
+    [itemId, companyId, ids, ids.map((id) => limits.get(id))],
   );
   if (inserted.rowCount !== ids.length) {
     throw Object.assign(new Error("Um ou mais itens incluídos não estão disponíveis neste catálogo."), { status: 400 });
@@ -354,6 +371,8 @@ const create = async (data, { allowSubscriptions = false } = {}) => {
   const includedIds = Object.prototype.hasOwnProperty.call(data, "included_item_ids")
     ? normalizeIdList(data.included_item_ids)
     : null;
+  const includedLimits = data.included_item_limits && typeof data.included_item_limits === "object"
+    ? data.included_item_limits : {};
   if (subscription?.enabled && includedIds !== null && !(await tableExists("subscription_included_items"))) {
     throw Object.assign(new Error("Vínculos de itens da assinatura indisponíveis (atualização pendente)."), { status: 409 });
   }
@@ -373,7 +392,7 @@ const create = async (data, { allowSubscriptions = false } = {}) => {
     await _syncImages(client, row.id, imageUrls);
     await _syncProfessionals(client, row.id, row.company_id, professionalIds);
     await _syncRelatedProducts(client, row.id, row.company_id, relatedIds);
-    if (subscription?.enabled) await _syncSubscriptionItems(client, row.id, row.company_id, includedIds || []);
+    if (subscription?.enabled) await _syncSubscriptionItems(client, row.id, row.company_id, includedIds || [], includedLimits);
     return row;
   });
   return (await find(created.id)) || created;
@@ -457,6 +476,8 @@ const update = async (data, { allowSubscriptions = false } = {}) => {
   });
   const includesItemsPayload = Object.prototype.hasOwnProperty.call(data, "included_item_ids");
   const includedIds = includesItemsPayload ? normalizeIdList(data.included_item_ids) : null;
+  const includedLimits = data.included_item_limits && typeof data.included_item_limits === "object"
+    ? data.included_item_limits : {};
   const managesIncludedItems = allowSubscriptions && (subscription?.enabled || currentSubscription);
   if (includesItemsPayload && managesIncludedItems && !(await tableExists("subscription_included_items"))) {
     throw Object.assign(new Error("Vínculos de itens da assinatura indisponíveis (atualização pendente)."), { status: 409 });
@@ -484,6 +505,7 @@ const update = async (data, { allowSubscriptions = false } = {}) => {
       includesItemsPayload && managesIncludedItems
         ? (subscription?.enabled ? includedIds : [])
         : null,
+      includedLimits,
     );
     return row;
   });
