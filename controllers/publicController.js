@@ -321,6 +321,9 @@ const serviceAvailability = async (req, res) => {
       professionalId: req.query.professional_id ? String(req.query.professional_id) : null,
       date: req.query.date ? String(req.query.date) : null,
       days: req.query.days,
+      // Serviço de plano: o portal pede com ?subscription=true; a IA (rota /n8n)
+      // sempre enxerga — quem agenda passa pelas regras da assinatura.
+      subscription: String(req.query.subscription || "") === "true" || String(req.originalUrl || "").includes("/n8n/"),
     });
     return res.status(200).json(data);
   } catch (error) {
@@ -331,18 +334,22 @@ const serviceAvailability = async (req, res) => {
 // Cria o pedido do serviço + reserva do horário. Mesma resposta do POST
 // /public/orders (pedido + sessão de pagamento Pagar.me quando online).
 const createBooking = async (req, res) => {
-  const { company_id, client_id, booking } = req.body || {};
-  if (!company_id || !client_id || !booking || !booking.menu_item_id || !booking.starts_at) {
+  const { company_id, client_id, booking, subscription_id } = req.body || {};
+  // Pela assinatura o cliente vem da conta logada (client_id é opcional).
+  if (!company_id || (!client_id && !subscription_id) || !booking || !booking.menu_item_id || !booking.starts_at) {
     return res.status(400).json({ error: "company_id, client_id e booking (serviço e horário) são obrigatórios." });
   }
   if (req.body.payment_provider === "pagarme" && !(await pagarmeService.isPaymentInfrastructureReady())) {
     return res.status(503).json({ error: "Pagamento online indisponível no momento." });
   }
   try {
-    const order = await bookingService.createBookingOrder({
-      ...req.body,
-      authenticated_user_id: req.customer?.id || null,
-    });
+    const order = await bookingService.createBookingOrder(
+      {
+        ...req.body,
+        authenticated_user_id: req.customer?.id || null,
+      },
+      { subscriptionOwner: req.customer?.id ? { userId: req.customer.id } : {} },
+    );
     const paymentSession = order.payment_provider === "pagarme"
       ? pagarmeService.createPublicPaymentSession(order, { customerVerified: Boolean(req.customer?.id) })
       : {};

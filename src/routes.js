@@ -53,6 +53,8 @@ const n8n = require("../controllers/n8nController");
 const identity = require("../controllers/identityController");
 const customerAccount = require("../controllers/customerAccountController");
 const reviews = require("../controllers/reviewsController");
+const subscriptions = require("../controllers/subscriptionsController");
+const merchantNotifications = require("../controllers/merchantNotificationsController");
 const { customerAuth, optionalCustomerAuth } = require("./middlewares/customerAuth");
 
 // ─── Rate limiters ───────────────────────────────────────────────────────────
@@ -479,6 +481,13 @@ router.get("/public/customer-account/payment-methods", customerAuth, customerAcc
 router.post("/public/customer-account/payment-methods", paymentMethodsLimiter, customerAuth, customerAccount.createPaymentMethod);
 router.patch("/public/customer-account/payment-methods/:id/default", customerAuth, customerAccount.setDefaultPaymentMethod);
 router.delete("/public/customer-account/payment-methods/:id", customerAuth, customerAccount.deletePaymentMethod);
+// Assinaturas do cliente (conta autenticada e verificada por Google/e-mail).
+router.get("/public/customer-account/subscriptions", paymentMethodsLimiter, customerAuth, subscriptions.listMine);
+router.get("/public/customer-account/subscriptions/:id", paymentMethodsLimiter, customerAuth, subscriptions.getMine);
+router.post("/public/customer-account/subscriptions", paymentLimiter, customerAuth, subscriptions.subscribe);
+router.patch("/public/customer-account/subscriptions/:id/card", paymentLimiter, customerAuth, subscriptions.changeCard);
+router.post("/public/customer-account/subscriptions/:id/cancel", paymentMethodsLimiter, customerAuth, subscriptions.cancelMine);
+router.get("/public/customer-account/subscriptions/:id/booking-preview", paymentMethodsLimiter, customerAuth, subscriptions.bookingPreview);
 // Página pública do motoboy (link/QR): entregas + rota + link do Maps. Sem auth.
 router.get("/public/delivery-routes/:token/driver-routes", publicLimiter, deliveries.getPublicDriverRoutes);
 router.get("/public/delivery-routes/:token", publicLimiter, deliveries.getPublicRoute);
@@ -538,8 +547,17 @@ router.get("/pagarme/recipient/:companyId", authMiddleware, authorizeCompanyPara
 router.patch("/pagarme/transfer-settings", authMiddleware, authorizeCompanyBody(), pagarme.updateTransferSettings);
 router.get("/pagarme/payments/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.payments);
 router.get("/pagarme/financial-dashboard/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.financialDashboard);
+router.get("/pagarme/subscription-fee-profile", authMiddleware, pagarme.subscriptionFeeProfile);
 router.get("/pagarme/balance/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.balance);
 router.post("/pagarme/withdraw", authMiddleware, authorizeCompanyBody(), pagarme.withdraw);
+// Assinantes da loja (comerciante). Cancelar exige vínculo com a empresa dona.
+const authorizeSubscription = authorizeByLookup("SELECT company_id FROM customer_subscriptions WHERE id = $1", "id");
+const authorizeMerchantNotification = authorizeByLookup("SELECT company_id FROM merchant_notifications WHERE id = $1", "id");
+router.get("/merchant-notifications/company/:companyId", authMiddleware, authorizeCompanyParam("companyId"), merchantNotifications.list);
+router.patch("/merchant-notifications/:id/read", authMiddleware, authorizeMerchantNotification, merchantNotifications.markRead);
+router.get("/subscriptions/company/:companyId", authMiddleware, authorizeCompanyParam("companyId"), subscriptions.listForCompany);
+router.get("/subscriptions/:id", authMiddleware, authorizeSubscription, subscriptions.getForCompany);
+router.post("/subscriptions/:id/cancel", authMiddleware, authorizeSubscription, subscriptions.cancelForCompany);
 // Cliente (público, rate-limited): pagamento embutido (cartão via token / PIX).
 router.get("/public/pagarme/3ds-token", paymentMethodsLimiter, pagarme.threeDsToken);
 router.post("/public/pagarme/card", paymentLimiter, pagarme.payCard);

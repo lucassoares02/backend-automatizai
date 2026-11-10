@@ -1,5 +1,6 @@
 const service = require("../services/menu_itemsService");
 const { companyScopedBody } = require("../src/middlewares/authorize");
+const { canManageSubscriptions } = require("../helpers/subscriptionItem");
 const minio = require("./minioController");
 const multer = require("multer");
 
@@ -70,7 +71,9 @@ const create = async (req, res) => {
     return res.status(400).json({ error: "Invalid request body" });
   }
   try {
-    const newItem = await service.create(companyScopedBody(req));
+    const newItem = await service.create(companyScopedBody(req), {
+      allowSubscriptions: canManageSubscriptions(req),
+    });
     return res.status(201).json(newItem);
   } catch (error) {
     console.error("Error creating MenuItems:", error);
@@ -88,7 +91,10 @@ const update = async (req, res) => {
     return res.status(400).json({ error: "Invalid ID" });
   }
   try {
-    const updated = await service.update({ ...companyScopedBody(req), id: parseInt(id) });
+    const updated = await service.update(
+      { ...companyScopedBody(req), id: parseInt(id) },
+      { allowSubscriptions: canManageSubscriptions(req) },
+    );
     if (!updated) return res.status(404).json({ error: "MenuItems not found" });
     return res.status(200).json(updated);
   } catch (error) {
@@ -124,12 +130,12 @@ const duplicate = async (req, res) => {
     return res.status(400).json({ error: "Invalid ID" });
   }
   try {
-    const copy = await service.duplicate(id);
+    const copy = await service.duplicate(id, { allowSubscriptions: canManageSubscriptions(req) });
     if (!copy) return res.status(404).json({ error: "MenuItems not found" });
     return res.status(201).json(copy);
   } catch (error) {
     console.error("Error duplicating MenuItems:", error);
-    return res.status(500).json({ error: "Failed to duplicate MenuItems" });
+    return res.status(error.status || 500).json({ error: error.message || "Failed to duplicate MenuItems" });
   }
 };
 

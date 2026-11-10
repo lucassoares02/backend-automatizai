@@ -1,4 +1,5 @@
 const pool = require("../db");
+const { columnExists } = require("../helpers/schema");
 
 const _normalizePhone = (phone) => String(phone || "").replace(/\D/g, "");
 
@@ -70,7 +71,9 @@ const reorder = async ({ orderId, phone }) => {
   ];
   const menuRes = menuItemIds.length
     ? await pool.query(
-        `SELECT id, company_id, name, description, price, image_url, available
+        // Item que virou assinatura não pode voltar ao carrinho avulso.
+        `SELECT id, company_id, name, description, price, image_url,
+                available ${(await columnExists("menu_items", "subscription_enabled")) ? "AND COALESCE(subscription_enabled, false) = false" : ""} AS available
          FROM menu_items
          WHERE id = ANY($1::int[])`,
         [menuItemIds],

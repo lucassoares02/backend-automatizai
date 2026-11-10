@@ -15,6 +15,8 @@ const bookingService = require("./bookingService");
 const { normalizePhone } = require("../helpers/phone");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 const { columnExists, tableExists } = require("../helpers/schema");
+const { subscriptionFilter } = require("../helpers/subscriptionFilter");
+const { subscriptionsReleased, publicSubscriptionPlan } = require("../helpers/subscriptionItem");
 const { assertIdsBelongToCompany } = require("../helpers/tenantOwnership");
 const { UUID_RE: _UUID_RE } = require("../helpers/companySlug");
 const {
@@ -58,6 +60,31 @@ const _hasServiceSchema = async () => {
 const _hasProfessionalsSchema = async () => {
   const [professionals, links] = await Promise.all([tableExists("professionals"), tableExists("professional_services")]);
   return professionals && links;
+};
+
+// Vitrine de assinaturas (Fase 3). Só aparece com a liberação geral
+// (SUBSCRIPTIONS_RELEASED=true), a migration aplicada e o recebedor da loja
+// ativo — sem ele a contratação seria recusada.
+const _listPublicSubscriptions = async (companyId, { pagarmeEnabled, hasImages }) => {
+  if (!pagarmeEnabled || !subscriptionsReleased()) return [];
+  if (!(await columnExists("menu_items", "subscription_enabled"))) return [];
+  const itemType = await columnExists("menu_items", "item_type");
+  const r = await pool.query(
+    `SELECT mi.id, mi.name, mi.description, mi.price, mi.image_url,
+            ${itemType ? "mi.item_type" : "'product'::text AS item_type"},
+            ${hasImages
+    ? `COALESCE((SELECT json_agg(img.url ORDER BY img.position, img.id)
+                 FROM menu_item_images img WHERE img.menu_item_id = mi.id), '[]'::json) AS images,`
+    : "'[]'::json AS images,"}
+            mi.subscription_interval, mi.subscription_duration_cycles, mi.subscription_usage_limit,
+            EXISTS(SELECT 1 FROM product_option_groups pog WHERE pog.product_id = mi.id) AS has_options
+       FROM menu_items mi
+      WHERE mi.company_id = $1 AND mi.available = true AND mi.deleted_at IS NULL
+        AND mi.subscription_enabled = true
+      ORDER BY COALESCE(mi.display_order, mi.id)`,
+    [companyId],
+  );
+  return r.rows.map(publicSubscriptionPlan).filter(Boolean);
 };
 
 const _getPreorderRequirement = async (companyId, menuItemIds, promotionIds) => {
@@ -319,6 +346,7 @@ const getCompanyPublicMenu = async (companyRef) => {
      FROM menu_items mi
      LEFT JOIN menu_categories mc ON mc.id = mi.category_id
      WHERE mi.company_id = $1 AND mi.available = true AND mi.deleted_at IS NULL
+       ${await subscriptionFilter("mi")}
      ORDER BY COALESCE(mc.sort_order, 9999), mc.id NULLS LAST, COALESCE(mi.display_order, mi.id)`,
     [companyId],
   );
@@ -374,6 +402,8 @@ const getCompanyPublicMenu = async (companyRef) => {
   } else {
     for (const item of services) item.related_product_ids = [];
   }
+
+  const subscriptions = await _listPublicSubscriptions(companyId, { pagarmeEnabled, hasImages });
 
   const categoriesMap = new Map();
   const uncategorized = [];
@@ -479,6 +509,8 @@ const getCompanyPublicMenu = async (companyRef) => {
     categories: Array.from(categoriesMap.values()),
     uncategorized,
     services,
+    // Assinaturas (Fase 3): vendidas só como assinatura, fora do carrinho.
+    subscriptions,
     booking,
     promotions: promotionsRes.rows,
     payment_methods: paymentMethodsRes.rows,
@@ -1001,6 +1033,8 @@ const createPublicOrder = async (data) => {
     const activeCampaignPrices = await campaignsService.getActivePricesMap(company_id);
     // Serviços não entram no carrinho (agendamento é outro fluxo).
     const serviceFilter = (await columnExists("menu_items", "item_type")) ? "AND item_type <> 'service'" : "";
+    // Item de assinatura só é vendido pelo checkout de assinaturas.
+    const subFilter = await subscriptionFilter();
     const r = await pool.query(
       `SELECT id, price
        FROM menu_items
@@ -1008,7 +1042,8 @@ const createPublicOrder = async (data) => {
          AND id = ANY($2::int[])
          AND available = true
          AND deleted_at IS NULL
-         ${serviceFilter}`,
+         ${serviceFilter}
+         ${subFilter}`,
       [company_id, menuItemIds],
     );
     for (const row of r.rows) {

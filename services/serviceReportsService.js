@@ -7,10 +7,12 @@
 // - Ocupação = minutos agendados (ativos + concluídos + no-show, que também
 //   seguraram a agenda) ÷ minutos de jornada aberta (jornada ∩ loja − folgas).
 // - No-show = não compareceu ÷ (concluídos + não compareceu).
+// - Agendamento pela assinatura (Fase 4): pedido de valor 0 — a receita vem
+//   das faturas, então não soma receita nem entra no ticket médio.
 
 const pool = require("../db");
 const bookingService = require("./bookingService");
-const { tableExists } = require("../helpers/schema");
+const { columnExists, tableExists } = require("../helpers/schema");
 const slots = require("../helpers/bookingSlots");
 const { availableMinutes, rate } = require("../helpers/appointmentMetrics");
 
@@ -24,12 +26,14 @@ const getServicesReport = async (companyId, from, to) => {
   const rangeStart = slots.zonedTimeToUtc(from, 0, tz);
   const rangeEnd = slots.zonedTimeToUtc(slots.addDays(to, 1), 0, tz);
   const hasTimeOff = await tableExists("professional_time_off");
+  const hasSubscription = await columnExists("orders", "subscription_id");
 
   const [apptRes, profRes, hoursRes, offRes, openingRes] = await Promise.all([
     pool.query(
       `SELECT a.id, a.status, a.professional_id, a.menu_item_id, a.starts_at, a.ends_at,
               mi.name AS service_name,
-              GREATEST(COALESCE(o.total, 0) - COALESCE(o.service_fee, 0), 0)::float AS revenue
+              GREATEST(COALESCE(o.total, 0) - COALESCE(o.service_fee, 0), 0)::float AS revenue,
+              ${hasSubscription ? "o.subscription_id IS NOT NULL" : "FALSE"} AS by_subscription
        FROM appointments a
        JOIN orders o ON o.id = a.order_id
        LEFT JOIN menu_items mi ON mi.id = a.menu_item_id
@@ -128,6 +132,7 @@ const getServicesReport = async (companyId, from, to) => {
     .slice(0, 10);
 
   const done = appts.filter((a) => a.status === "done").length;
+  const paidDone = appts.filter((a) => a.status === "done" && a.by_subscription !== true).length;
   const noShow = appts.filter((a) => a.status === "no_show").length;
   const booked = byProfessional.reduce((sum, p) => sum + p.booked_minutes, 0);
   const available = byProfessional.reduce((sum, p) => sum + p.available_minutes, 0);
@@ -142,7 +147,10 @@ const getServicesReport = async (companyId, from, to) => {
       cancelled: appts.filter((a) => a.status === "cancelled").length,
       upcoming: appts.filter((a) => ["hold", "pending", "confirmed", "in_progress"].includes(a.status)).length,
       revenue: Number(byProfessional.reduce((sum, p) => sum + p.revenue, 0).toFixed(2)),
-      avg_ticket: done ? Number((byProfessional.reduce((sum, p) => sum + p.revenue, 0) / done).toFixed(2)) : 0,
+      avg_ticket: paidDone
+        ? Number((byProfessional.reduce((sum, p) => sum + p.revenue, 0) / paidDone).toFixed(2))
+        : 0,
+      by_subscription: appts.filter((a) => a.status !== "cancelled" && a.by_subscription === true).length,
       booked_minutes: booked,
       available_minutes: available,
       occupancy_rate: rate(Math.min(booked, available || booked), available),

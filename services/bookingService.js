@@ -13,6 +13,8 @@ const productOptionsService = require("./productOptionsService");
 const orderWebhookService = require("./orderWebhookService");
 const orderAutoAcceptService = require("./orderAutoAcceptService");
 const { columnExists, tableExists } = require("../helpers/schema");
+const { subscriptionFilter } = require("../helpers/subscriptionFilter");
+const subscriptionBookingService = require("./subscriptionBookingService");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 const { UUID_RE } = require("../helpers/companySlug");
 const slots = require("../helpers/bookingSlots");
@@ -126,12 +128,18 @@ const publicBookingInfo = async (companyId) => {
   };
 };
 
-const _loadService = async (db, companyId, serviceId) => {
+// `includeSubscription`: remarcação de um agendamento que já existe continua
+// valendo mesmo que o serviço tenha virado assinatura depois; o agendamento
+// pela assinatura (Fase 4) também enxerga o serviço do plano.
+const _loadService = async (db, companyId, serviceId, { includeSubscription = false } = {}) => {
+  const hasSubscription = await columnExists("menu_items", "subscription_enabled");
   const result = await db.query(
-    `SELECT id, name, price, duration_minutes, buffer_minutes, price_type
+    `SELECT id, name, price, duration_minutes, buffer_minutes, price_type,
+            ${hasSubscription ? "COALESCE(subscription_enabled, false)" : "false"} AS subscription_enabled
      FROM menu_items
      WHERE id = $1 AND company_id = $2 AND item_type = 'service'
-       AND available = true AND deleted_at IS NULL`,
+       AND available = true AND deleted_at IS NULL
+       ${includeSubscription ? "" : await subscriptionFilter()}`,
     [serviceId, companyId],
   );
   return result.rows[0] || null;
@@ -295,11 +303,12 @@ const _rangeFor = (company, firstDate, lastDate) => ({
  * por `days` dias (1–14). `professionalId` vazio/"any" agrega todos os
  * profissionais que executam o serviço ("Sem preferência").
  */
-const getAvailability = async ({ companyRef, serviceId, professionalId, date, days }) => {
+const getAvailability = async ({ companyRef, serviceId, professionalId, date, days, subscription = false }) => {
   await _ensureSchema();
   const company = await loadCompanySettings(companyRef);
   if (!company) throw _error(404, "Empresa não encontrada.");
-  const service = await _loadService(pool, company.id, serviceId);
+  // `subscription`: horários do serviço de um plano (agendamento pela assinatura).
+  const service = await _loadService(pool, company.id, serviceId, { includeSubscription: subscription === true });
   if (!service) throw _error(404, "Serviço não encontrado.");
 
   const onlyId = professionalId && professionalId !== "any" ? Number(professionalId) : null;
@@ -329,6 +338,7 @@ const getAvailability = async ({ companyRef, serviceId, professionalId, date, da
       duration_minutes: Number(service.duration_minutes) || null,
       price: Number(service.price ?? 0),
       price_type: service.price_type || "fixed",
+      subscription: service.subscription_enabled === true,
     },
     professional_id: onlyId,
     professionals: professionals.map((p) => ({
@@ -491,7 +501,8 @@ const _resolveAddOnProducts = async ({ companyId, products, startsAt, campaignPr
      FROM menu_items
      WHERE company_id = $1 AND id = ANY($2::int[])
        AND available = true AND deleted_at IS NULL
-       ${hasItemType ? "AND item_type <> 'service'" : ""}`,
+       ${hasItemType ? "AND item_type <> 'service'" : ""}
+       ${await subscriptionFilter()}`,
     [companyId, ids],
   );
   const byId = new Map(rows.rows.map((r) => [Number(r.id), r]));
@@ -543,13 +554,46 @@ const _resolveAddOnProducts = async ({ companyId, products, startsAt, campaignPr
  * expiração. Pagamento no local: pedido em Aguardando (1) + 'confirmed', ou
  * 'pending' quando a loja aprova manualmente. Sem aprovação manual o aceite
  * automático (orderAutoAcceptService) leva o pedido a Confirmado (2).
+ *
+ * Pela assinatura (`subscription_id`, Fase 4): pedido de valor 0, sem cobrança
+ * (a receita vem das faturas), vinculado em orders.subscription_id; limite do
+ * ciclo, "1 futuro por vez" e pausa validados na transação, com a assinatura
+ * travada. `options.subscriptionOwner` diz quem pode usar a assinatura — vem
+ * do servidor (cliente logado ou IA), nunca do corpo da requisição.
  */
-const createBookingOrder = async (data) => {
+const createBookingOrder = async (data, options = {}) => {
   await _ensureSchema();
   const companyId = Number(data.company_id);
-  const clientId = Number(data.client_id);
   const booking = data.booking || {};
   const serviceId = Number(booking.menu_item_id);
+  const subscriptionId =
+    data.subscription_id == null || data.subscription_id === "" ? null : Number(data.subscription_id);
+  const subscriptionMode = subscriptionId !== null;
+  const subscriptionOwner = options.subscriptionOwner || {};
+  if (subscriptionMode) {
+    if (!(Number.isSafeInteger(subscriptionId) && subscriptionId > 0)) {
+      throw _error(404, "Assinatura não encontrada.", "SUBSCRIPTION_NOT_FOUND");
+    }
+    if (!subscriptionOwner.userId && !subscriptionOwner.clientId) {
+      throw _error(401, "Entre na sua conta para agendar pela assinatura.", "SUBSCRIPTION_LOGIN_REQUIRED");
+    }
+    if (!(await subscriptionBookingService.ready())) {
+      throw _error(503, "O agendamento pela assinatura ainda não está disponível.", "SUBSCRIPTION_BOOKING_UNAVAILABLE");
+    }
+    if (Array.isArray(data.products) && data.products.length) {
+      throw _error(400, "Produtos para levar junto não entram no agendamento pela assinatura. Peça na loja.");
+    }
+  }
+  let clientId = Number(data.client_id);
+  if (subscriptionMode && subscriptionOwner.userId && Number.isInteger(companyId)) {
+    clientId = await subscriptionBookingService.resolveClientId(pool, {
+      subscriptionId,
+      userId: subscriptionOwner.userId,
+      companyId,
+      clientId: data.client_id,
+    });
+    if (!clientId) throw _error(403, "Atualize sua identificação antes de agendar.");
+  }
   if (!Number.isInteger(companyId) || !Number.isInteger(clientId) || !Number.isInteger(serviceId)) {
     throw _error(400, "Dados do agendamento incompletos.");
   }
@@ -574,11 +618,12 @@ const createBookingOrder = async (data) => {
     throw _error(403, "Atualize sua identificação antes de agendar.");
   }
 
-  const paymentProvider = ONLINE_PROVIDERS.includes(data.payment_provider) ? data.payment_provider : null;
+  const paymentProvider =
+    !subscriptionMode && ONLINE_PROVIDERS.includes(data.payment_provider) ? data.payment_provider : null;
   const onlineMethod =
     paymentProvider && ["pix", "card"].includes(data.online_payment_method) ? data.online_payment_method : null;
   let paymentMethodId = null;
-  if (!paymentProvider) {
+  if (!paymentProvider && !subscriptionMode) {
     paymentMethodId = Number(data.payment_method_id);
     const method = Number.isInteger(paymentMethodId)
       ? await pool.query("SELECT 1 FROM payment_methods WHERE id = $1 AND company_id = $2 AND active = true", [
@@ -592,11 +637,11 @@ const createBookingOrder = async (data) => {
   const company = await loadCompanySettings(companyId);
   if (!company) throw _error(404, "Empresa não encontrada.");
   const notes = data.notes ? String(data.notes).trim().slice(0, 500) || null : null;
-  const couponCode = data.coupon_code ? String(data.coupon_code).trim() : null;
+  const couponCode = !subscriptionMode && data.coupon_code ? String(data.coupon_code).trim() : null;
   const activeCampaignPrices = await campaignsService.getActivePricesMap(companyId);
   const addOns = await _resolveAddOnProducts({
     companyId,
-    products: data.products,
+    products: subscriptionMode ? null : data.products,
     startsAt,
     campaignPrices: activeCampaignPrices,
   });
@@ -612,14 +657,27 @@ const createBookingOrder = async (data) => {
   let releasedOrders = [];
   try {
     await client.query("BEGIN");
-    const service = await _loadService(client, companyId, serviceId);
+    const service = await _loadService(client, companyId, serviceId, { includeSubscription: subscriptionMode });
     if (!service) throw _error(404, "Serviço indisponível.");
+    if (subscriptionMode && service.subscription_enabled !== true) {
+      throw _error(400, "Este serviço não é de assinatura.", "SUBSCRIPTION_OTHER_SERVICE");
+    }
     const professionals = await _loadProfessionals(client, companyId, serviceId, {
       lock: true,
       onlyId: requestedProfessional,
     });
     if (!professionals.length) {
       throw _error(409, "Esse profissional não atende mais este serviço. Escolha outro.");
+    }
+    // Profissionais travados antes da assinatura (mesma ordem da remarcação).
+    if (subscriptionMode) {
+      await subscriptionBookingService.lockAndValidate(client, {
+        subscriptionId,
+        owner: subscriptionOwner,
+        companyId,
+        serviceId,
+        startsAt,
+      });
     }
     releasedOrders = await _releaseHolds(client, professionals.map((p) => Number(p.id)));
     const chosen = await _resolveSlot(client, { company, service, professionals, startsAt });
@@ -629,7 +687,8 @@ const createBookingOrder = async (data) => {
     let unitPrice = _priceFor(service, professional);
     const campaign = activeCampaignPrices.get(Number(service.id));
     if (professional.price_override == null && campaign) unitPrice = Math.min(unitPrice, campaign.final_price);
-    unitPrice = Number(unitPrice.toFixed(2));
+    // Pela assinatura o atendimento já está pago nas faturas: pedido de valor 0.
+    unitPrice = subscriptionMode ? 0 : Number(unitPrice.toFixed(2));
 
     const serviceFeeAmount = Number(process.env.PUBLIC_SERVICE_FEE_AMOUNT ?? 1.49);
     const serviceFee = paymentProvider ? Number(serviceFeeAmount.toFixed(2)) : 0;
@@ -684,6 +743,11 @@ const createBookingOrder = async (data) => {
       extraCols += ", stock_reserved, stock_reservation_items";
       extraValues += `, $${params.length - 1}, $${params.length}`;
     }
+    if (subscriptionMode) {
+      params.push(subscriptionId);
+      extraCols += ", subscription_id";
+      extraValues += `, $${params.length}`;
+    }
     // delivery_type FALSE = atendimento no estabelecimento (sem entrega).
     const orderRes = await client.query(
       `INSERT INTO orders (
@@ -703,7 +767,13 @@ const createBookingOrder = async (data) => {
     const itemRes = await client.query(
       `INSERT INTO order_items (order_id, menu_item_id, item_name, quantity, item_price, subtotal, notes)
        VALUES ($1, $2, $3, 1, $4, $4, $5) RETURNING id`,
-      [order.id, service.id, service.name, unitPrice, `Profissional: ${professional.name}`],
+      [
+        order.id,
+        service.id,
+        service.name,
+        unitPrice,
+        `Profissional: ${professional.name}${subscriptionMode ? " · Pela assinatura" : ""}`,
+      ],
     );
 
     for (const item of addOns) {
@@ -776,6 +846,7 @@ const createBookingOrder = async (data) => {
         professional_id: Number(professional.id),
         professional_name: professional.name,
         service_name: service.name,
+        subscription_id: subscriptionMode ? subscriptionId : null,
       },
     };
   } catch (err) {
@@ -957,6 +1028,7 @@ const getForOrder = async (orderId, orderStatus) => {
     const row = result.rows[0];
     if (!row) return null;
     const company = await loadCompanySettings(row.company_id);
+    const subscriptionId = await subscriptionIdForOrder(pool, row.order_id);
     const addressRes = await pool.query(
       `SELECT street, number, neighborhood, city, state FROM company_addresses
        WHERE company_id = $1 ORDER BY id DESC LIMIT 1`,
@@ -981,6 +1053,7 @@ const getForOrder = async (orderId, orderStatus) => {
       professional_name: row.professional_name,
       professional_photo_url: row.professional_photo_url,
       rescheduled_count: row.rescheduled_count,
+      subscription_id: subscriptionId,
       timezone: company?.timezone || slots.DEFAULT_TIMEZONE,
       company_name: company?.name || null,
       address,
@@ -1001,6 +1074,32 @@ const customerCancelBlock = async (orderId, orderStatus) => {
   if (!appointment || !["hold", "pending", "confirmed"].includes(appointment.status)) return null;
   if (appointment.can_cancel) return null;
   return `O cancelamento pelo site vai até ${appointment.cancel_window_hours}h antes do horário. Fale com o estabelecimento.`;
+};
+
+/** Assinatura do pedido (null sem a coluna ou em pedido avulso). */
+const subscriptionIdForOrder = async (db, orderId) => {
+  if (!(await columnExists("orders", "subscription_id"))) return null;
+  const r = await db.query("SELECT subscription_id FROM orders WHERE id = $1", [orderId]);
+  return r.rows[0]?.subscription_id != null ? Number(r.rows[0].subscription_id) : null;
+};
+
+/**
+ * Remarcação de um agendamento feito pela assinatura: revalida limite do ciclo
+ * da NOVA data, "1 futuro por vez" e pausa, ignorando o próprio agendamento.
+ * Roda na transação, depois de travar os profissionais. A assinatura vem do
+ * pedido (já vinculado), por isso o dono é confiável.
+ */
+const _revalidateSubscription = async (db, { orderId, current, startsAt }) => {
+  const subscriptionId = await subscriptionIdForOrder(db, orderId);
+  if (!subscriptionId) return null;
+  return subscriptionBookingService.lockAndValidate(db, {
+    subscriptionId,
+    owner: { trusted: true },
+    companyId: current.company_id,
+    serviceId: null,
+    startsAt,
+    excludeAppointmentId: current.id,
+  });
 };
 
 /** Remarcação pelo cliente (dono do link do pedido), dentro da janela de cancelamento. */
@@ -1027,7 +1126,7 @@ const rescheduleByCustomer = async ({ orderRef, phone, startsAt: rawStartsAt, pr
         `A remarcação pelo site vai até ${company.cancelWindow}h antes do horário. Fale com o estabelecimento.`,
       );
     }
-    const service = await _loadService(client, company.id, current.menu_item_id);
+    const service = await _loadService(client, company.id, current.menu_item_id, { includeSubscription: true });
     if (!service) throw _error(409, "Este serviço não está mais disponível para remarcação.");
 
     const wanted =
@@ -1042,6 +1141,8 @@ const rescheduleByCustomer = async ({ orderRef, phone, startsAt: rawStartsAt, pr
       startsAt,
       excludeAppointmentId: current.id,
     });
+    // Pela assinatura: o uso passa para o ciclo da nova data (mesmas travas).
+    await _revalidateSubscription(client, { orderId: order.id, current, startsAt: chosen.slot.startsAt });
 
     // O preço do pedido não muda na remarcação (troca de profissional mantém o valor pago).
     await client.query(
@@ -1099,6 +1200,7 @@ module.exports = {
     parseStartsAt: _parseStartsAt,
     durationFor: _durationFor,
     priceFor: _priceFor,
+    revalidateSubscription: _revalidateSubscription,
     ACTIVE_STATUSES,
     MAX_DAYS_PER_REQUEST,
   },
@@ -1117,4 +1219,5 @@ module.exports = {
   customerCancelBlock,
   rescheduleByCustomer,
   professionalHasAppointments,
+  subscriptionIdForOrder,
 };

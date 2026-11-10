@@ -9,9 +9,11 @@
 
 const pool = require("../db");
 const bookingService = require("./bookingService");
+const subscriptionBookingService = require("./subscriptionBookingService");
 const identityService = require("./identityService");
 const orderWebhookService = require("./orderWebhookService");
 const { columnExists, tableExists } = require("../helpers/schema");
+const { subscriptionFilter } = require("../helpers/subscriptionFilter");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 const { normalizePhone } = require("../helpers/phone");
 const slots = require("../helpers/bookingSlots");
@@ -30,6 +32,7 @@ const {
   parseStartsAt: _parseStartsAt,
   durationFor: _durationFor,
   priceFor: _priceFor,
+  revalidateSubscription: _revalidateSubscription,
   ACTIVE_STATUSES,
   MAX_DAYS_PER_REQUEST,
 } = bookingService._internal;
@@ -163,7 +166,10 @@ const _dateRange = (company, from, to) => {
 };
 
 const _agendaAppointmentSelect = async () => {
-  const hasCoupon = await columnExists("orders", "coupon_discount");
+  const [hasCoupon, hasSubscription] = await Promise.all([
+    columnExists("orders", "coupon_discount"),
+    columnExists("orders", "subscription_id"),
+  ]);
   return `
     SELECT a.id, a.order_id, a.status, a.starts_at, a.ends_at, a.blocked_until, a.hold_expires_at,
            a.professional_id, a.menu_item_id, a.rescheduled_count, a.cancel_reason,
@@ -171,6 +177,7 @@ const _agendaAppointmentSelect = async () => {
            o.tag AS order_tag, o.uuid AS order_uuid, o.status AS order_status, o.total, o.service_fee,
            o.payment_provider, o.payment_status, o.online_payment_method, o.notes,
            ${hasCoupon ? "o.coupon_discount" : "0 AS coupon_discount"},
+           ${hasSubscription ? "o.subscription_id" : "NULL::bigint AS subscription_id"},
            pm.label AS payment_method_label,
            c.id AS client_id, c.name AS client_name, c.phone AS client_phone
     FROM appointments a
@@ -296,6 +303,8 @@ const _agendaRow = (r) => ({
   online_payment_method: r.online_payment_method,
   payment_method_label: r.payment_method_label,
   notes: r.notes,
+  // Agendamento pela assinatura (pedido de valor 0; selo "Assinatura").
+  subscription_id: r.subscription_id != null ? Number(r.subscription_id) : null,
 });
 
 // ─── Horários livres para a loja ─────────────────────────────────────────────
@@ -416,6 +425,8 @@ const rescheduleByStore = async (appointmentId, { startsAt: rawStartsAt, profess
     }
 
     moved = new Date(current.starts_at).getTime() !== chosen.slot.startsAt.getTime();
+    // Pela assinatura: a nova data cai num ciclo que precisa ter uso livre.
+    if (moved) await _revalidateSubscription(client, { orderId: current.order_id, current, startsAt: chosen.slot.startsAt });
     await client.query(
       `UPDATE appointments
        SET professional_id = $2, starts_at = $3, ends_at = $4, blocked_until = $5,
@@ -680,6 +691,7 @@ const getOrderAppointment = async (orderId) => {
   ).rows[0];
   if (!row) return null;
   const company = await bookingService.loadCompanySettings(row.company_id);
+  const subscriptionId = await bookingService.subscriptionIdForOrder(pool, orderId);
 
   const [images, professionals, stats, history] = await Promise.all([
     (async () => {
@@ -733,6 +745,7 @@ const getOrderAppointment = async (orderId) => {
     rescheduled_count: row.rescheduled_count,
     cancel_reason: row.cancel_reason,
     cancelled_at: row.cancelled_at,
+    subscription_id: subscriptionId,
     timezone: company?.timezone || slots.DEFAULT_TIMEZONE,
     service: row.menu_item_id
       ? {
@@ -762,17 +775,48 @@ const getOrderAppointment = async (orderId) => {
 
 // ─── IA de atendimento (n8n via x-api-key) ───────────────────────────────────
 
-/** Catálogo de serviços com profissionais, preço e duração (para a IA ofertar). */
-const listServicesForAi = async (companyId) => {
+/**
+ * Catálogo de serviços com profissionais, preço e duração (para a IA ofertar).
+ * Serviços de assinatura ficam de fora, exceto — com `phone` — os que o
+ * cliente assina: entram com `subscription` (uso no ciclo, se pode agendar).
+ */
+const listServicesForAi = async (companyId, { phone = null } = {}) => {
   await _ensureSchema();
   const company = await _company(companyId);
+  let subscriptions = [];
+  if (phone) {
+    const clientIds = await _clientIdsByPhone(company.id, phone);
+    subscriptions = await subscriptionBookingService.listForClients(company.id, clientIds);
+  }
+  const subscribedIds = [...new Set(subscriptions.map((s) => Number(s.menu_item_id)))];
+  const filter = await subscriptionFilter();
   const services = await pool.query(
     `SELECT id, name, description, price, price_type, duration_minutes
      FROM menu_items
      WHERE company_id = $1 AND item_type = 'service' AND available = TRUE AND deleted_at IS NULL
+       AND (TRUE ${filter} OR id = ANY($2::int[]))
      ORDER BY name`,
-    [company.id],
+    [company.id, subscribedIds],
   );
+  const subscriptionInfo = new Map();
+  for (const sub of subscriptions) {
+    const key = Number(sub.menu_item_id);
+    if (subscriptionInfo.has(key)) continue;
+    const summary = await subscriptionBookingService.summaryFor(sub);
+    subscriptionInfo.set(key, {
+      id: Number(sub.id),
+      status: sub.status,
+      interval: sub.interval,
+      usage_limit: summary?.usage_limit ?? null,
+      used_in_cycle: summary?.used_in_cycle ?? 0,
+      cycle_start: summary?.cycle_start ?? null,
+      cycle_end: summary?.cycle_end ?? null,
+      bookable_until: summary?.bookable_until ?? null,
+      upcoming_starts_at: summary?.upcoming?.starts_at ?? null,
+      can_book: summary?.can_book ?? false,
+      blocked_message: summary?.blocked_message ?? null,
+    });
+  }
   const links = await pool.query(
     `SELECT ps.menu_item_id, p.id, p.name, ps.price_override, ps.duration_override
      FROM professional_services ps JOIN professionals p ON p.id = ps.professional_id
@@ -800,6 +844,8 @@ const listServicesForAi = async (companyId) => {
           price: _priceFor(s, l),
           duration_minutes: _durationFor(s, l),
         })),
+      // Assinante: agendar não cobra (pedido de valor 0); a API aplica o limite.
+      ...(subscriptionInfo.has(Number(s.id)) ? { subscription: subscriptionInfo.get(Number(s.id)) } : {}),
     })),
   };
 };
@@ -848,6 +894,35 @@ const createBookingForAi = async (data) => {
     const name = data.name ? String(data.name).trim() : null;
     const { client } = await identityService.resolveClientByPhone({ companyId, phone, name });
     clientId = Number(client.id);
+  }
+  // Serviço de assinatura: só para quem assina, sem forma de pagamento.
+  const serviceId = _positiveInt(data.menu_item_id);
+  const subscriptionService = serviceId && (await columnExists("menu_items", "subscription_enabled"))
+    ? (await pool.query(
+      "SELECT 1 FROM menu_items WHERE id = $1 AND company_id = $2 AND subscription_enabled = TRUE",
+      [serviceId, companyId],
+    )).rows[0]
+    : null;
+  if (subscriptionService) {
+    const sub = await subscriptionBookingService.findForClient({ companyId, serviceId, clientId });
+    if (!sub) {
+      throw _error(409, "Este serviço é só para assinantes e o cliente não tem assinatura ativa dele.", "SUBSCRIPTION_REQUIRED");
+    }
+    return bookingService.createBookingOrder(
+      {
+        company_id: companyId,
+        client_id: clientId,
+        subscription_id: sub.id,
+        notes: data.notes,
+        booking: {
+          menu_item_id: serviceId,
+          professional_id: data.professional_id ?? "any",
+          starts_at: data.starts_at,
+        },
+      },
+      // A assinatura foi achada pelo próprio cadastro do cliente (não vem do corpo).
+      { subscriptionOwner: { clientId, trusted: true } },
+    );
   }
   let paymentMethodId = _positiveInt(data.payment_method_id);
   if (!paymentMethodId) {

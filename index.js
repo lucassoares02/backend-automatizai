@@ -20,6 +20,7 @@ const storeScheduleService = require("./services/storeScheduleService");
 const campaignSchedulerService = require("./services/campaignSchedulerService");
 const messageQueueService = require("./services/messageQueueService");
 const pagarmeReconciliationService = require("./services/pagarmeReconciliationService");
+const subscriptionReconciliationService = require("./services/subscriptionReconciliationService");
 const bookingHoldService = require("./services/bookingHoldService");
 const appointmentReminderService = require("./services/appointmentReminderService");
 
@@ -116,6 +117,7 @@ app
     campaignSchedulerService.start();
     messageQueueService.start();
     pagarmeReconciliationService.start();
+    subscriptionReconciliationService.start();
     bookingHoldService.start();
     appointmentReminderService.start();
     storeScheduleService.start();

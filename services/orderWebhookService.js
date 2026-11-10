@@ -6,6 +6,7 @@ const slots = require("../helpers/bookingSlots");
 
 const WEBHOOK_PATH = "automatic-update-order";
 const NEW_ORDER_WEBHOOK_PATH = "arbian-avisos";
+const SUBSCRIPTION_NOTIFICATION_WEBHOOK_PATH = "subscription-notification";
 const FETCH_TIMEOUT_MS = 15000;
 const STATUS_AWAITING = 1;
 
@@ -259,6 +260,108 @@ const _postStatusWebhook = async (payload) => {
   }
 };
 
+const _cancelledAppointmentsSuffix = (n) => (n
+  ? `; ${n} agendamento${n === 1 ? " marcado depois do período pago foi cancelado" : "s marcados depois do período pago foram cancelados"}`
+  : "");
+
+const SUBSCRIPTION_CUSTOMER_MESSAGES = {
+  payment_declined: ({ itemName, failedAttempts }) =>
+    `Não conseguimos aprovar a cobrança da sua assinatura de ${itemName}. Confira os dados do cartão para evitar a pausa do serviço${failedAttempts ? ` (tentativa ${failedAttempts})` : ""}.`,
+  paused: ({ itemName, cancelledAppointments }) =>
+    `Sua assinatura de ${itemName} foi pausada após cobranças recusadas. Atualize o cartão para retomar${cancelledAppointments ? `; ${cancelledAppointments} agendamento${cancelledAppointments === 1 ? " foi" : "s foram"} cancelado${cancelledAppointments === 1 ? "" : "s"} automaticamente` : ""}.`,
+  payment_declined_paused: ({ itemName }) =>
+    `Não conseguimos aprovar a cobrança pendente da sua assinatura de ${itemName}, que continua pausada. Confira os dados do cartão ou cadastre outro para retomar.`,
+  first_payment_failed: ({ itemName }) =>
+    `Não conseguimos aprovar a primeira cobrança da sua assinatura de ${itemName}, então a contratação não foi concluída e nada foi cobrado. Você pode assinar de novo com outro cartão.`,
+  resumed: ({ itemName }) => `Sua assinatura de ${itemName} foi retomada após a confirmação da cobrança.`,
+  canceled: ({ itemName, canceledBy, cancelledAppointments }) =>
+    `Sua assinatura de ${itemName} foi cancelada${canceledBy === "chargeback" ? " após a contestação do pagamento" : ""}${_cancelledAppointmentsSuffix(cancelledAppointments)}.`,
+  ended: ({ itemName, cancelledAppointments }) =>
+    `Sua assinatura de ${itemName} foi encerrada ao fim do prazo contratado${_cancelledAppointmentsSuffix(cancelledAppointments)}.`,
+};
+
+/**
+ * Envia avisos de cobrança/estado da assinatura para o cliente pelo webhook
+ * dedicado do n8n. Chamar após o commit; erros são registrados e não propagados.
+ */
+const notifySubscriptionCustomer = async (subscriptionId, notificationId, details = {}) => {
+  try {
+    if (!Number.isInteger(Number(subscriptionId)) || Number(subscriptionId) <= 0) return false;
+    const messageBuilder = SUBSCRIPTION_CUSTOMER_MESSAGES[notificationId];
+    if (!messageBuilder) return false;
+
+    const result = await pool.query(
+      `SELECT cs.id, cs.company_id, cs.menu_item_id, cs.user_id, cs.client_id, cs.status,
+              cs.amount_cents, cs.interval, cs.current_cycle_end, cs.items,
+              comp.name AS company_name, cli.name AS client_name, cli.phone AS client_phone,
+              (SELECT ui.value_norm FROM user_identifiers ui
+                WHERE ui.user_id = cs.user_id AND ui.type = 'phone' AND ui.revoked_at IS NULL
+                ORDER BY ui.verified_at DESC NULLS LAST, ui.id DESC LIMIT 1) AS account_phone,
+              pu.name AS account_name,
+              COALESCE(latest_invoice.failed_attempts, 0) AS failed_attempts
+         FROM customer_subscriptions cs
+         JOIN companies comp ON comp.id = cs.company_id
+         LEFT JOIN clients cli ON cli.id = cs.client_id AND cli.company_id = cs.company_id
+         LEFT JOIN platform_users pu ON pu.id = cs.user_id
+         LEFT JOIN LATERAL (
+           SELECT failed_attempts FROM subscription_invoices
+            WHERE subscription_id = cs.id ORDER BY created_at DESC, id DESC LIMIT 1
+         ) latest_invoice ON true
+        WHERE cs.id = $1`,
+      [Number(subscriptionId)],
+    );
+    const sub = result.rows[0];
+    const customerPhone = String(sub?.client_phone || sub?.account_phone || "").trim();
+    if (!sub || !customerPhone) return false;
+
+    const itemName = sub.items?.[0]?.name || "assinatura";
+    const message = messageBuilder({
+      itemName,
+      failedAttempts: Number(details.failedAttempts ?? sub.failed_attempts) || 0,
+      cancelledAppointments: Number(details.cancelledAppointments) || 0,
+      canceledBy: details.canceledBy,
+    });
+    const payload = {
+      event: "subscription_notification",
+      notification_id: notificationId,
+      company: { id: sub.company_id, name: sub.company_name },
+      customer: {
+        id: sub.client_id,
+        user_id: sub.user_id,
+        name: sub.client_name || sub.account_name,
+        phone: customerPhone,
+      },
+      subscription: {
+        id: Number(sub.id),
+        status: sub.status,
+        menu_item_id: sub.menu_item_id,
+        item_name: itemName,
+        amount: Number(sub.amount_cents) / 100,
+        interval: sub.interval,
+        next_due_at: sub.current_cycle_end,
+        failed_attempts: Number(details.failedAttempts ?? sub.failed_attempts) || 0,
+      },
+      message,
+      notified_at: new Date().toISOString(),
+    };
+    const response = await fetch(`${n8nUrlWebhook}${SUBSCRIPTION_NOTIFICATION_WEBHOOK_PATH}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: WEBHOOK_AUTH_HEADER },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`HTTP ${response.status}: ${text}`);
+    }
+    console.log(`Webhook subscription-notification enviado. subscription=${sub.id} evento=${notificationId}`);
+    return true;
+  } catch (err) {
+    console.error(`Erro ao avisar cliente sobre assinatura. subscription=${subscriptionId} evento=${notificationId} erro=${err.message}`);
+    return false;
+  }
+};
+
 /**
  * Envia a notificação de um evento de serviço (confirmação, remarcação,
  * lembrete, pós-atendimento…) pelo mesmo webhook de status. Retorna true se
@@ -405,7 +508,80 @@ const notifyStatusChange = async (order, status, { noShow = false } = {}) => {
   }
 };
 
+/**
+ * Aviso à LOJA (fluxo "arbian-avisos", evento próprio): a assinatura do
+ * cliente pausou por pagamento recusado e os agendamentos do ciclo não pago
+ * foram cancelados. O fluxo do n8n só trata `new_order` hoje — este evento
+ * precisa de um ramo novo lá (ignorado com segurança até existir).
+ * Fire-and-forget: nunca lança.
+ */
+const notifySubscriptionAppointmentsCancelled = async (subscription, appointments, { reason = "paused" } = {}) => {
+  try {
+    if (!subscription?.company_id || !appointments?.length) return;
+    const infoRes = await pool.query(
+      `SELECT to_jsonb(comp) AS company, mi.name AS service_name, pu.name AS customer_name
+         FROM companies comp
+         LEFT JOIN menu_items mi ON mi.id = $2
+         LEFT JOIN platform_users pu ON pu.id = $3
+        WHERE comp.id = $1`,
+      [subscription.company_id, subscription.menu_item_id, subscription.user_id],
+    );
+    const info = infoRes.rows[0];
+    if (!info) return;
+    const connectionsResult = await pool.query(
+      `SELECT id, instance_name AS "instanceName", status
+         FROM connections
+        WHERE company_id = $1 AND LOWER(TRIM(COALESCE(status, ''))) = 'open'
+        ORDER BY id`,
+      [subscription.company_id],
+    );
+    const timezone = info.company?.timezone;
+    const when = appointments.map((a) => {
+      const f = formatAppointmentDate(a.starts_at, timezone);
+      return `${f.date} às ${f.time}`;
+    });
+    const serviceName = info.service_name || "Assinatura";
+    const customerName = info.customer_name || "um cliente";
+    const head = reason === "closed"
+      ? `⚠️ *Assinatura encerrada*\n\n` +
+        `A assinatura *${serviceName}* de ${customerName} foi ${subscription.status === "ended" ? "encerrada" : "cancelada"}. `
+      : `⚠️ *Assinatura pausada*\n\n` +
+        `O pagamento da assinatura *${serviceName}* de ${customerName} foi recusado. `;
+    const text = head +
+      `${appointments.length === 1 ? "O agendamento" : "Os agendamentos"} de ${when.join(", ")} ` +
+      `${appointments.length === 1 ? "foi cancelado" : "foram cancelados"} e o cliente foi avisado.`;
+    const res = await fetch(`${n8nUrlWebhook}${NEW_ORDER_WEBHOOK_PATH}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: WEBHOOK_AUTH_HEADER },
+      body: JSON.stringify({
+        event: "subscription_appointments_cancelled",
+        reason,
+        company: info.company,
+        subscription: {
+          id: Number(subscription.id),
+          status: subscription.status,
+          service_name: info.service_name,
+          customer_name: info.customer_name,
+        },
+        appointments: appointments.map((a) => ({ id: a.id, order_id: a.order_id, starts_at: a.starts_at })),
+        text,
+        connections: connectionsResult.rows,
+        notified_at: new Date().toISOString(),
+      }),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status}: ${body}`);
+    }
+  } catch (err) {
+    console.error(`Erro ao avisar a loja sobre agendamentos cancelados da assinatura. subscription=${subscription?.id} erro=${err.message}`);
+  }
+};
+
 module.exports = {
+  notifySubscriptionCustomer,
+  notifySubscriptionAppointmentsCancelled,
   notifyStatusChange,
   notifyAwaitingOrder,
   notifyAppointmentEvent,

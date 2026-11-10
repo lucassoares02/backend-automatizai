@@ -4,6 +4,7 @@ const { normalizePreorder } = require("../helpers/preorder");
 const technicalSheetService = require("./technicalSheetService");
 const { assertIdsBelongToCompany } = require("../helpers/tenantOwnership");
 const { normalizeServiceFields, normalizeImageUrls, normalizeIdList } = require("../helpers/serviceItem");
+const { SUBSCRIPTION_COLUMNS, hasSubscriptionPayload, normalizeSubscriptionFields } = require("../helpers/subscriptionItem");
 
 // Normaliza a lista de selos (restrições alimentares) do produto: só strings,
 // trim, sem vazios nem duplicatas (case-insensitive). Retorna null quando vazia
@@ -64,6 +65,43 @@ const _hasServicePayload = (data) =>
   ["item_type", "duration_minutes", "buffer_minutes", "price_type"].some((k) =>
     Object.prototype.hasOwnProperty.call(data, k),
   );
+
+// Assinaturas (Fase 1) — migration "Assinaturas (Fase 1)" em
+// DB_CHANGES_NEEDED.md. Até ela rodar, os campos são ignorados e ligar a
+// assinatura é recusado (409) para não perder a configuração em silêncio.
+const _hasSubscriptionColumns = async () =>
+  (await Promise.all(SUBSCRIPTION_COLUMNS.map((c) => columnExists("menu_items", c)))).every(Boolean);
+
+const _forbidden = (message) => Object.assign(new Error(message), { status: 403 });
+
+// Valida o acesso e devolve a configuração a gravar, ou null para não mexer
+// nas colunas. Sem permissão (hoje: só admin do sistema), os campos recebidos
+// são ignorados — exceto a tentativa de ligar uma assinatura nova.
+const _resolveSubscription = async (data, { allowSubscriptions, isService, currentEnabled = false }) => {
+  const wantsEnabled = data.subscription_enabled === true;
+  if (!allowSubscriptions) {
+    if (wantsEnabled && !currentEnabled) {
+      throw _forbidden("Assinaturas estão disponíveis só para administradores no momento.");
+    }
+    return null;
+  }
+  const hasColumns = await _hasSubscriptionColumns();
+  if (!hasColumns) {
+    if (wantsEnabled) {
+      throw Object.assign(new Error("Assinaturas aguardam a migração do banco de dados."), { status: 409 });
+    }
+    return null;
+  }
+  if (!hasSubscriptionPayload(data)) return null;
+  return normalizeSubscriptionFields(data, { isService });
+};
+
+const _subscriptionEntries = (sub) => [
+  ["subscription_enabled", sub.enabled],
+  ["subscription_interval", sub.interval],
+  ["subscription_duration_cycles", sub.durationCycles],
+  ["subscription_usage_limit", sub.usageLimit],
+];
 
 // Seleciona galeria e profissionais junto do item (subqueries), quando as
 // tabelas existem. Usado pelas listagens do painel.
@@ -230,7 +268,7 @@ const findByCompany = async (id) => {
 const _assertCategoryBelongsToCompany = (categoryId, companyId) =>
   assertIdsBelongToCompany("menu_categories", [categoryId], companyId, "Categoria não pertence a esta empresa.");
 
-const create = async (data) => {
+const create = async (data, { allowSubscriptions = false } = {}) => {
   const { company_id, category_id, name, description, price, available, image_url, featured, display_order, prep_time_minutes, sku, dietary_restrictions } = data;
   await _assertCategoryBelongsToCompany(category_id, company_id);
   // Só grava os selos se a coluna já existir (migration em DB_CHANGES_NEEDED.md).
@@ -271,6 +309,13 @@ const create = async (data) => {
     cols.push("item_type", "duration_minutes", "buffer_minutes", "price_type");
     vals.push(service.itemType, service.durationMinutes, service.bufferMinutes, service.priceType);
   }
+  const subscription = await _resolveSubscription(data, { allowSubscriptions, isService });
+  if (subscription) {
+    for (const [col, value] of _subscriptionEntries(subscription)) {
+      cols.push(col);
+      vals.push(value);
+    }
+  }
   const placeholders = vals.map((_, i) => `$${i + 1}`).join(", ");
   const created = await _withTransaction(async (client) => {
     const result = await client.query(
@@ -286,7 +331,7 @@ const create = async (data) => {
   return (await find(created.id)) || created;
 };
 
-const update = async (data) => {
+const update = async (data, { allowSubscriptions = false } = {}) => {
   const { id, company_id, category_id, name, description, price, available, image_url, featured, display_order, prep_time_minutes, sku, dietary_restrictions } = data;
   await _assertCategoryBelongsToCompany(category_id, company_id);
   const [hasSelos, hasStock, hasPreorder, hasService] = await Promise.all([
@@ -352,6 +397,22 @@ const update = async (data) => {
       vals.push(value);
     }
   }
+  let currentSubscription = false;
+  if (!allowSubscriptions && data.subscription_enabled === true && (await _hasSubscriptionColumns())) {
+    const cur = await pool.query("SELECT subscription_enabled FROM menu_items WHERE id = $1", [id]);
+    currentSubscription = cur.rows[0]?.subscription_enabled === true;
+  }
+  const subscription = await _resolveSubscription(data, {
+    allowSubscriptions,
+    isService,
+    currentEnabled: currentSubscription,
+  });
+  if (subscription) {
+    for (const [col, value] of _subscriptionEntries(subscription)) {
+      sets.push(`${col} = $${vals.length + 1}`);
+      vals.push(value);
+    }
+  }
   const updated = await _withTransaction(async (client) => {
     const result = await client.query(
       `UPDATE menu_items SET ${sets.join(", ")} WHERE id = $1 RETURNING *`,
@@ -386,7 +447,7 @@ const _DUPLICATE_SKIP = new Set(["id", "deleted_at", "sku", "name", "available"]
 // Duplica o item com galeria, adicionais (grupos + opções) e profissionais.
 // A cópia nasce desativada e com " (cópia)" no nome, para ser revisada antes
 // de aparecer no cardápio público. Retorna null se o item não existir.
-const duplicate = async (id) => {
+const duplicate = async (id, { allowSubscriptions = false } = {}) => {
   const created = await _withTransaction(async (client) => {
     const src = await client.query(
       "SELECT * FROM menu_items WHERE id = $1 AND deleted_at IS NULL",
@@ -404,6 +465,17 @@ const duplicate = async (id) => {
       [id],
     );
     const row = result.rows[0];
+
+    // Quem não pode cadastrar assinaturas recebe a cópia como item avulso.
+    if (!allowSubscriptions && row.subscription_enabled === true) {
+      await client.query(
+        `UPDATE menu_items
+         SET subscription_enabled = false, subscription_interval = NULL,
+             subscription_duration_cycles = NULL, subscription_usage_limit = NULL
+         WHERE id = $1`,
+        [row.id],
+      );
+    }
 
     if (await tableExists("menu_item_images")) {
       await client.query(

@@ -120,7 +120,10 @@ const aiServices = async (req, res) => {
   const { companyId } = req.params;
   if (!_validId(companyId)) return res.status(400).json({ error: "Invalid company ID" });
   try {
-    return res.status(200).json(await service.listServicesForAi(companyId));
+    // ?phone= inclui os serviços que o cliente assina (agendamento pela assinatura).
+    return res.status(200).json(
+      await service.listServicesForAi(companyId, { phone: req.query.phone ? String(req.query.phone) : null }),
+    );
   } catch (error) {
     return _fail(res, error, "Failed to fetch services");
   }

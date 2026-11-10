@@ -180,6 +180,9 @@ const financialDashboard = async (req, res) => {
   }
 };
 
+const subscriptionFeeProfile = async (_req, res) =>
+  res.status(200).json(service.getSubscriptionFeeProfile());
+
 /**
  * Saldo do recebedor (disponível / a liberar / transferido). Param: :companyId
  */
@@ -363,4 +366,4 @@ const webhook = async (req, res) => {
   }
 };
 
-module.exports = { connect, kyc, status, recipient, updateTransferSettings, payments, financialDashboard, balance, withdraw, threeDsToken, payCard, payPix, listCards, deleteCard, webhook };
+module.exports = { connect, kyc, status, recipient, updateTransferSettings, payments, financialDashboard, subscriptionFeeProfile, balance, withdraw, threeDsToken, payCard, payPix, listCards, deleteCard, webhook };

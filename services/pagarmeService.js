@@ -8,6 +8,7 @@ const orderAutoAcceptService = require("./orderAutoAcceptService");
 const bookingService = require("./bookingService");
 const { columnExists, tableExists } = require("../helpers/schema");
 const { createPaymentSession } = require("../helpers/publicPaymentSession");
+const { subscriptionPlatformSplitCents } = require("../helpers/subscriptionBilling");
 
 // ─── Cliente Pagar.me (API v5 — "Core API") ────────────────────────────────────
 // Modelo marketplace: cada empresa é um RECEBEDOR (recipient) no Pagar.me; o
@@ -2433,7 +2434,13 @@ const handleWebhookEvent = async (event) => {
   }
 
   try {
-    switch (type) {
+    // Assinaturas: eventos de assinatura/fatura e cobranças que pertencem a uma
+    // fatura (essas não têm payment_attempt e seriam ignoradas abaixo).
+    // require tardio: subscriptionsService depende deste módulo.
+    const subscriptions = require("./subscriptionsService");
+    if (await subscriptions.isSubscriptionEvent(type, data)) {
+      await subscriptions.handleProviderEvent(type, data);
+    } else switch (type) {
     case "order.paid":
     case "charge.paid": {
       const refs = _providerRefsFromPayload(data);
@@ -2666,6 +2673,29 @@ const _platformSplitCents = (order) => {
   );
 };
 
+// Cobrança de assinatura: só o percentual da Arbian, sem taxa fixa (5% padrão;
+// vale o percentual gravado na assinatura no momento da contratação).
+const _subscriptionPlatformSplitCents = (invoice) =>
+  subscriptionPlatformSplitCents(invoice?.amount_cents, invoice?.platform_split_percent ?? undefined);
+
+const _subscriptionInvoicesForDashboard = async (companyId, periodDays) => {
+  if (!(await tableExists("subscription_invoices")) || !(await tableExists("customer_subscriptions"))) return [];
+  const r = await pool.query(
+    `SELECT si.subscription_id, si.pagarme_charge_id, si.amount_cents, si.created_at,
+            cs.platform_split_percent, mi.name AS item_name, pu.name AS client_name
+       FROM subscription_invoices si
+       JOIN customer_subscriptions cs ON cs.id = si.subscription_id
+       LEFT JOIN menu_items mi ON mi.id = cs.menu_item_id
+       LEFT JOIN platform_users pu ON pu.id = cs.user_id
+      WHERE cs.company_id = $1 AND si.pagarme_charge_id IS NOT NULL
+        AND ($2::int <= 0 OR si.created_at >= NOW() - ($2::int * INTERVAL '1 day'))
+      ORDER BY si.created_at DESC
+      LIMIT 1000`,
+    [companyId, Number(periodDays) || 0],
+  );
+  return r.rows;
+};
+
 const _safeBankAccount = (bank) => {
   if (!bank || typeof bank !== "object") return null;
   const account = String(bank.account_number || bank.conta || "").replace(/\D/g, "");
@@ -2822,7 +2852,7 @@ const getFinancialDashboard = async (companyId, { days = 30 } = {}) => {
 
   const createdSince = _periodStart(periodDays);
   const periodSql = "AND o.created_at >= NOW() - ($2::int * INTERVAL '1 day')";
-  const [balanceResult, payablesResult, transfersResult, anticipationsResult, ordersResult] = await Promise.allSettled([
+  const [balanceResult, payablesResult, transfersResult, anticipationsResult, ordersResult, subscriptionInvoicesResult] = await Promise.allSettled([
     http.get(`/recipients/${recipientId}/balance`),
     _fetchPayables(http, recipientId, createdSince),
     _fetchTransfers(http, recipientId),
@@ -2838,6 +2868,7 @@ const getFinancialDashboard = async (companyId, { days = 30 } = {}) => {
         LIMIT 1000`,
       [Number(companyId), periodDays],
     ),
+    _subscriptionInvoicesForDashboard(Number(companyId), periodDays),
   ]);
 
   const availability = {
@@ -2874,6 +2905,11 @@ const getFinancialDashboard = async (companyId, { days = 30 } = {}) => {
   const orderRows = ordersResult.status === "fulfilled" ? ordersResult.value.rows : [];
   const ordersByCharge = new Map(
     orderRows.filter((row) => row.pagarme_charge_id).map((row) => [String(row.pagarme_charge_id), row]),
+  );
+  // Cobranças de assinatura não são pedidos: regra própria (split percentual).
+  const subscriptionInvoicesByCharge = new Map(
+    (subscriptionInvoicesResult.status === "fulfilled" ? subscriptionInvoicesResult.value : [])
+      .map((row) => [String(row.pagarme_charge_id), row]),
   );
   const payablesPayload = payablesResult.status === "fulfilled" ? payablesResult.value : { items: [], truncated: false };
   const payables = payablesPayload.items.map(_publicPayable);
@@ -2917,24 +2953,31 @@ const getFinancialDashboard = async (companyId, { days = 30 } = {}) => {
   const calculations = [];
   for (const group of chargeGroups.values()) {
     const order = group.charge_id ? ordersByCharge.get(group.charge_id) : null;
-    const arbianFeeCents = order ? _platformSplitCents(order) : null;
-    const arbianServiceFeeCents = order ? Math.max(0, _toCents(order.service_fee)) : null;
+    const subscriptionInvoice = !order && group.charge_id ? subscriptionInvoicesByCharge.get(group.charge_id) : null;
+    let arbianFeeCents = order ? _platformSplitCents(order) : null;
+    let arbianServiceFeeCents = order ? Math.max(0, _toCents(order.service_fee)) : null;
+    let chargedCents = order ? _toCents(order.total) : group.merchant_gross_cents;
+    if (subscriptionInvoice) {
+      arbianFeeCents = _subscriptionPlatformSplitCents(subscriptionInvoice);
+      arbianServiceFeeCents = 0;
+      chargedCents = Number(subscriptionInvoice.amount_cents) || chargedCents;
+    }
     const arbianPercentageFeeCents = arbianFeeCents == null
       ? null
       : Math.max(0, arbianFeeCents - arbianServiceFeeCents);
-    const chargedCents = order ? _toCents(order.total) : group.merchant_gross_cents;
     const knownDeductions = (arbianFeeCents || 0) + group.provider_fee_cents + group.anticipation_fee_cents + group.fraud_fee_cents;
     const otherAdjustmentsCents = chargedCents - knownDeductions - group.net_cents;
     const waiting = group.statuses.some((status) => status === "waiting_funds");
     const paid = group.statuses.length > 0 && group.statuses.every((status) => ["paid", "prepaid"].includes(status));
     calculations.push({
       charge_id: group.charge_id,
-      reference: order?.tag || group.reference,
+      reference: order?.tag || (subscriptionInvoice ? `Assinatura: ${subscriptionInvoice.item_name}` : group.reference),
       order_id: order?.id || null,
-      client_name: order?.client_name || null,
+      subscription_id: subscriptionInvoice?.subscription_id || null,
+      client_name: order?.client_name || subscriptionInvoice?.client_name || null,
       method: group.method,
       installments: group.installments || null,
-      created_at: order?.created_at || group.created_at,
+      created_at: order?.created_at || subscriptionInvoice?.created_at || group.created_at,
       next_payment_date: group.payment_dates.sort()[0] || null,
       last_payment_date: group.payment_dates.sort().at(-1) || null,
       status: waiting ? "waiting_funds" : (paid ? "paid" : (group.statuses[0] || null)),
@@ -3252,6 +3295,117 @@ const getPaymentsSummary = async (companyId, { days = 0 } = {}) => {
   };
 };
 
+// ─── Assinaturas (recorrência) ────────────────────────────────────────────────
+// Só as chamadas HTTP da Pagar.me; o domínio (estados, faturas, retentativas)
+// fica em subscriptionsService. Assinatura AVULSA (sem plan_id), cartão de
+// crédito à vista, split percentual (helpers/subscriptionBilling.js).
+//
+// A doc pública não confirma cancelar / trocar cartão / listar faturas /
+// recobrar: usamos os endpoints da API v5 conhecidos pelo SDK oficial e
+// validamos no sandbox antes de liberar a todos os comerciantes.
+
+const _subscriptionHttpError = (error, fallback) => (error?.response ? _wrap(error, fallback) : error);
+
+/** Recebedor da loja apto a receber (sincroniza com a Pagar.me se preciso). */
+const assertCompanyRecipientActive = async (companyId) => {
+  const company = await _getCompany(companyId);
+  if (!company) throw Object.assign(new Error("Empresa não encontrada."), { status: 404 });
+  let enabled = Boolean(company.pagarme_recipient_id) && company.pagarme_charges_enabled === true;
+  if (company.pagarme_recipient_id && !enabled) {
+    try {
+      enabled = (await refreshRecipientStatus(companyId)).charges_enabled === true;
+    } catch (_) {
+      enabled = false;
+    }
+  }
+  if (!enabled) {
+    throw Object.assign(new Error("Este estabelecimento ainda não habilitou pagamentos online."), { status: 409 });
+  }
+  return { ...company, statementDescriptor: _buildStatementDescriptor(company.name) };
+};
+
+const platformRecipientId = () => PLATFORM_RECIPIENT_ID;
+
+/** Cartão salvo do usuário → { id, card_id, brand, last4 } (card_id nunca sai da API). */
+const resolveSavedCardForUser = async (userId, tokenRowId) => {
+  const r = await pool.query(
+    `SELECT id, token, brand, last4 FROM user_payment_tokens
+     WHERE user_id = $1 AND id = $2 AND provider = 'pagarme' AND revoked_at IS NULL
+     LIMIT 1`,
+    [userId, tokenRowId],
+  );
+  const row = r.rows[0];
+  if (!row?.token) throw Object.assign(new Error("Cartão salvo inválido."), { status: 400 });
+  return { id: row.id, card_id: row.token, brand: row.brand, last4: row.last4 };
+};
+
+const getUserPagarmeCustomerId = (userId) => _getUserPagarmeCustomerId(userId);
+
+const createSubscription = async (body, idempotencyKey) => {
+  try {
+    const { data } = await getHttp().post("/subscriptions", _pruneEmpty(body), {
+      headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {},
+    });
+    _paymentLog("subscription_created", { subscription_id: data?.id, status: data?.status });
+    return data || {};
+  } catch (error) {
+    throw _subscriptionHttpError(error, "Não foi possível criar a assinatura");
+  }
+};
+
+const getSubscription = async (subscriptionId) => {
+  try {
+    const { data } = await getHttp().get(`/subscriptions/${subscriptionId}`);
+    return data || {};
+  } catch (error) {
+    throw _subscriptionHttpError(error, "Não foi possível consultar a assinatura");
+  }
+};
+
+/** Cancela na Pagar.me. Já cancelada/inexistente (404/412/422) conta como feito. */
+const cancelSubscription = async (subscriptionId) => {
+  try {
+    const { data } = await getHttp().delete(`/subscriptions/${subscriptionId}`, {
+      data: { cancel_pending_invoices: true },
+    });
+    return data || {};
+  } catch (error) {
+    const status = error?.response?.status;
+    if ([404, 412, 422].includes(status)) return { status: "canceled", already: true };
+    throw _subscriptionHttpError(error, "Não foi possível cancelar a assinatura");
+  }
+};
+
+const updateSubscriptionCard = async (subscriptionId, cardId) => {
+  try {
+    const { data } = await getHttp().patch(`/subscriptions/${subscriptionId}/card`, { card_id: cardId });
+    return data || {};
+  } catch (error) {
+    throw _subscriptionHttpError(error, "Não foi possível trocar o cartão da assinatura");
+  }
+};
+
+const listSubscriptionInvoices = async (subscriptionId, { size = 30 } = {}) => {
+  try {
+    const { data } = await getHttp().get("/invoices", {
+      params: { subscription_id: subscriptionId, page: 1, size },
+    });
+    return _providerList(data);
+  } catch (error) {
+    throw _subscriptionHttpError(error, "Não foi possível consultar as faturas da assinatura");
+  }
+};
+
+/** Recobra uma cobrança recusada (fatura pendente da assinatura). */
+const retryCharge = async (chargeId) => {
+  try {
+    const { data } = await getHttp().post(`/charges/${chargeId}/retry`);
+    return data || {};
+  } catch (error) {
+    throw _subscriptionHttpError(error, "Não foi possível cobrar a fatura pendente");
+  }
+};
+
 module.exports = {
   createOrUpdateRecipient,
   createKycLink,
@@ -3262,6 +3416,7 @@ module.exports = {
   requestWithdrawal,
   getPaymentsSummary,
   getFinancialDashboard,
+  getSubscriptionFeeProfile: _feeProfile,
   createCardCharge,
   createPixCharge,
   refundCharge,
@@ -3282,6 +3437,17 @@ module.exports = {
   verifyBasicAuth,
   handleWebhookEvent,
   reconcileOpenPaymentAttempts,
+  // Assinaturas (chamadas HTTP; o domínio fica em subscriptionsService).
+  assertCompanyRecipientActive,
+  platformRecipientId,
+  resolveSavedCardForUser,
+  getUserPagarmeCustomerId,
+  createSubscription,
+  getSubscription,
+  cancelSubscription,
+  updateSubscriptionCard,
+  listSubscriptionInvoices,
+  retryCharge,
   // Funções puras expostas apenas para testes de contratos do provedor.
   _testing: {
     isAntifraudDecline: _isAntifraudDecline,
@@ -3296,6 +3462,7 @@ module.exports = {
     publicPayable: _publicPayable,
     publicAnticipation: _publicAnticipation,
     platformSplitCents: _platformSplitCents,
+    subscriptionPlatformSplitCents: _subscriptionPlatformSplitCents,
     nextTransferDate: _nextTransferDate,
     financialPeriodDays: _financialPeriodDays,
   },

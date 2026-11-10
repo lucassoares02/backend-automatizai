@@ -1,4 +1,5 @@
 const pool = require("../db");
+const { columnExists } = require("../helpers/schema");
 
 // Reaproveita a mesma normalização de status do dashboard (esquemas mistos:
 // texto legado, string numérica ou inteiro). Resolvido a partir do último
@@ -63,6 +64,9 @@ const _topLimit = (n) => {
 const getReport = async (companyId, from, to, { top } = {}) => {
   const id = parseInt(companyId);
   const topLimit = _topLimit(top);
+  // Agendamento pela assinatura (valor 0; a receita vem das faturas) não puxa
+  // o ticket médio para baixo. Receita já não duplica: o pedido soma 0.
+  const paidOnly = (await columnExists("orders", "subscription_id")) ? "AND o.subscription_id IS NULL" : "";
 
   const [
     companyResult,
@@ -81,7 +85,7 @@ const getReport = async (companyId, from, to, { top } = {}) => {
       `SELECT
          COUNT(*) FILTER (WHERE ${STATUS_EXPR} NOT IN (6,7))::int        AS orders,
          COALESCE(SUM(o.total) FILTER (WHERE ${STATUS_EXPR} NOT IN (6,7)), 0)::float AS revenue,
-         COALESCE(AVG(o.total) FILTER (WHERE ${STATUS_EXPR} NOT IN (6,7)), 0)::float AS avg_ticket,
+         COALESCE(AVG(o.total) FILTER (WHERE ${STATUS_EXPR} NOT IN (6,7) ${paidOnly}), 0)::float AS avg_ticket,
          COUNT(*) FILTER (WHERE ${STATUS_EXPR} IN (5,9))::int            AS completed,
          COUNT(*) FILTER (WHERE ${STATUS_EXPR} IN (6,7))::int            AS cancelled,
          COUNT(*)::int                                                   AS total_all,
