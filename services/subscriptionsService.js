@@ -3,7 +3,7 @@ const pagarmeService = require("./pagarmeService");
 const productOptionsService = require("./productOptionsService");
 const { tableExists } = require("../helpers/schema");
 const billing = require("../helpers/subscriptionBilling");
-const { INTERVALS } = require("../helpers/subscriptionItem");
+const { INTERVALS, subscriptionsReleasedFor } = require("../helpers/subscriptionItem");
 const subscriptionBookingService = require("./subscriptionBookingService");
 const merchantNotifications = require("./merchantNotificationsService");
 const orderWebhookService = require("./orderWebhookService");
@@ -629,6 +629,8 @@ const subscribe = async (userId, input = {}) => {
   );
   const item = itemResult.rows[0];
   if (!item || !INTERVALS.includes(item.subscription_interval)) throw _httpError("Assinatura não encontrada.", 404);
+  // Mesma regra da vitrine: sem liberação (geral ou da loja), não contrata.
+  if (!subscriptionsReleasedFor(item.company_id)) throw _httpError("Assinatura não encontrada.", 404);
 
   const company = await pagarmeService.assertCompanyRecipientActive(item.company_id);
   const split = billing.buildSubscriptionSplit({

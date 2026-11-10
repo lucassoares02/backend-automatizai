@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { publicSubscriptionPlan, subscriptionsReleased } = require("../helpers/subscriptionItem");
+const { publicSubscriptionPlan, subscriptionsReleased, subscriptionsReleasedFor } = require("../helpers/subscriptionItem");
 
 const row = (extra = {}) => ({
   id: "12",
@@ -65,5 +65,28 @@ test("vitrine: só aparece com SUBSCRIPTIONS_RELEASED=true", () => {
   } finally {
     if (previous === undefined) delete process.env.SUBSCRIPTIONS_RELEASED;
     else process.env.SUBSCRIPTIONS_RELEASED = previous;
+  }
+});
+
+test("vitrine: SUBSCRIPTIONS_PREVIEW_COMPANY_IDS libera só as lojas listadas", () => {
+  const prevReleased = process.env.SUBSCRIPTIONS_RELEASED;
+  const prevPreview = process.env.SUBSCRIPTIONS_PREVIEW_COMPANY_IDS;
+  try {
+    delete process.env.SUBSCRIPTIONS_RELEASED;
+    delete process.env.SUBSCRIPTIONS_PREVIEW_COMPANY_IDS;
+    assert.equal(subscriptionsReleasedFor(25), false);
+    process.env.SUBSCRIPTIONS_PREVIEW_COMPANY_IDS = " 25, abc,31 ";
+    assert.equal(subscriptionsReleasedFor(25), true);
+    assert.equal(subscriptionsReleasedFor("31"), true);
+    assert.equal(subscriptionsReleasedFor(26), false);
+    assert.equal(subscriptionsReleasedFor(null), false);
+    process.env.SUBSCRIPTIONS_PREVIEW_COMPANY_IDS = "";
+    process.env.SUBSCRIPTIONS_RELEASED = "true";
+    assert.equal(subscriptionsReleasedFor(26), true);
+  } finally {
+    if (prevReleased === undefined) delete process.env.SUBSCRIPTIONS_RELEASED;
+    else process.env.SUBSCRIPTIONS_RELEASED = prevReleased;
+    if (prevPreview === undefined) delete process.env.SUBSCRIPTIONS_PREVIEW_COMPANY_IDS;
+    else process.env.SUBSCRIPTIONS_PREVIEW_COMPANY_IDS = prevPreview;
   }
 });

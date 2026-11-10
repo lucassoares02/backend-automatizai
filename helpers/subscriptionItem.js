@@ -9,7 +9,8 @@
 //
 // Itens de assinatura ficam fora das vendas avulsas (cardápio, carrinho,
 // agendamento, catálogo da IA). Na vitrine pública aparecem só numa seção
-// própria (`subscriptions`), com o plano, quando SUBSCRIPTIONS_RELEASED=true.
+// própria (`subscriptions`), com o plano, quando SUBSCRIPTIONS_RELEASED=true
+// ou quando a loja está em SUBSCRIPTIONS_PREVIEW_COMPANY_IDS (teste por loja).
 
 const INTERVALS = ["week", "month", "year"];
 const MAX_DURATION_CYCLES = 120;
@@ -32,6 +33,17 @@ const _optionalInt = (value) => {
 
 /** Flag de liberação geral (comerciantes e vitrine pública). */
 const subscriptionsReleased = () => String(process.env.SUBSCRIPTIONS_RELEASED || "").toLowerCase() === "true";
+
+/** Lojas liberadas antes da liberação geral (ex.: SUBSCRIPTIONS_PREVIEW_COMPANY_IDS=25,31). */
+const subscriptionPreviewCompanyIds = () =>
+  String(process.env.SUBSCRIPTIONS_PREVIEW_COMPANY_IDS || "")
+    .split(",")
+    .map((v) => Number(v.trim()))
+    .filter((n) => Number.isSafeInteger(n) && n > 0);
+
+/** Vitrine e contratação: liberação geral ou loja em teste. */
+const subscriptionsReleasedFor = (companyId) =>
+  subscriptionsReleased() || subscriptionPreviewCompanyIds().includes(Number(companyId));
 
 /**
  * Por enquanto só admins do sistema cadastram assinaturas. Para liberar a todos
@@ -113,6 +125,8 @@ module.exports = {
   INTERVALS,
   SUBSCRIPTION_COLUMNS,
   subscriptionsReleased,
+  subscriptionPreviewCompanyIds,
+  subscriptionsReleasedFor,
   canManageSubscriptions,
   hasSubscriptionPayload,
   publicSubscriptionPlan,

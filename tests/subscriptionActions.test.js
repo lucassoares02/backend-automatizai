@@ -42,10 +42,15 @@ const withFakes = async (route, stubs, fn) => {
   ];
   const originals = targets.map(([obj, key]) => [obj, key, obj[key]]);
   for (const [obj, key, value] of targets) obj[key] = value;
+  // Contratar exige a loja liberada (geral ou em teste); a loja simulada é a 5.
+  const previewIds = process.env.SUBSCRIPTIONS_PREVIEW_COMPANY_IDS;
+  process.env.SUBSCRIPTIONS_PREVIEW_COMPANY_IDS = "5";
   try {
     await fn(log);
   } finally {
     for (const [obj, key, value] of originals) obj[key] = value;
+    if (previewIds === undefined) delete process.env.SUBSCRIPTIONS_PREVIEW_COMPANY_IDS;
+    else process.env.SUBSCRIPTIONS_PREVIEW_COMPANY_IDS = previewIds;
   }
 };
 
@@ -72,6 +77,17 @@ const subscribeRoute = (insert) => async (q, params) => {
 };
 
 const input = { clientRequestId: "req_1234567890abcdef", menuItemId: 9, paymentMethodId: 4 };
+
+test("contratar: loja fora da liberação (geral ou de teste) responde 404 sem chamar a Pagar.me", async () => {
+  let calls = 0;
+  const create = async () => { calls += 1; return { id: "sub_x" }; };
+  await withFakes(subscribeRoute(() => ({ rows: [{ id: 50 }] })), subscribeStubs(create), async (log) => {
+    process.env.SUBSCRIPTIONS_PREVIEW_COMPANY_IDS = "25";
+    await assert.rejects(subscriptionsService.subscribe("user-1", input), (err) => err.status === 404);
+    assert.equal(calls, 0);
+    assert.ok(!log.some((q) => q.startsWith("INSERT INTO customer_subscriptions")));
+  });
+});
 
 test("contratar: timeout na Pagar.me repete com a mesma chave e aproveita a assinatura criada", async () => {
   const calls = [];

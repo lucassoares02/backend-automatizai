@@ -16,7 +16,7 @@ const { normalizePhone } = require("../helpers/phone");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 const { columnExists, tableExists } = require("../helpers/schema");
 const { subscriptionFilter } = require("../helpers/subscriptionFilter");
-const { subscriptionsReleased, publicSubscriptionPlan } = require("../helpers/subscriptionItem");
+const { subscriptionsReleasedFor, publicSubscriptionPlan } = require("../helpers/subscriptionItem");
 const { assertIdsBelongToCompany } = require("../helpers/tenantOwnership");
 const { UUID_RE: _UUID_RE } = require("../helpers/companySlug");
 const {
@@ -63,10 +63,11 @@ const _hasProfessionalsSchema = async () => {
 };
 
 // Vitrine de assinaturas (Fase 3). Só aparece com a liberação geral
-// (SUBSCRIPTIONS_RELEASED=true), a migration aplicada e o recebedor da loja
-// ativo — sem ele a contratação seria recusada.
+// (SUBSCRIPTIONS_RELEASED=true) ou com a loja em SUBSCRIPTIONS_PREVIEW_COMPANY_IDS,
+// a migration aplicada e o recebedor da loja ativo — sem ele a contratação
+// seria recusada.
 const _listPublicSubscriptions = async (companyId, { pagarmeEnabled, hasImages }) => {
-  if (!pagarmeEnabled || !subscriptionsReleased()) return [];
+  if (!pagarmeEnabled || !subscriptionsReleasedFor(companyId)) return [];
   if (!(await columnExists("menu_items", "subscription_enabled"))) return [];
   const itemType = await columnExists("menu_items", "item_type");
   const r = await pool.query(
