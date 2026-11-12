@@ -3,7 +3,7 @@
 // Sem banco e sem HTTP, para ficar testável (api/tests/subscriptionBilling.test.js).
 //
 // Decisões do negócio:
-// - só cartão de crédito, à vista; split 95% loja / 5% Arbian, sem taxa fixa;
+// - só cartão de crédito, à vista; split 98% loja / 2% Arbian, sem taxa fixa;
 // - recusa: 1 tentativa + 2 retentativas; esgotadas, a assinatura fica PAUSADA
 //   (estado nosso: a Pagar.me só tem active/canceled/future);
 // - prazo (N cobranças) e pausa são controlados do nosso lado: a doc pública não
@@ -26,8 +26,8 @@ const _int = (value, fallback) => {
 };
 
 const platformFeePercent = () => {
-  const n = _int(process.env.SUBSCRIPTION_PLATFORM_FEE_PERCENT, 5);
-  return n >= 1 && n <= 99 ? n : 5;
+  const n = _int(process.env.SUBSCRIPTION_PLATFORM_FEE_PERCENT, 2);
+  return n >= 1 && n <= 99 ? n : 2;
 };
 
 const retryIntervalHours = () => {

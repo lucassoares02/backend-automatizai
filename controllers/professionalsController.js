@@ -64,6 +64,18 @@ const remove = async (req, res) => {
   }
 };
 
+const regeneratePublicToken = async (req, res) => {
+  const { id } = req.params;
+  if (!_validId(id)) return res.status(400).json({ error: "Invalid ID" });
+  try {
+    const item = await service.regeneratePublicToken(id);
+    if (!item) return res.status(404).json({ error: "Professional not found" });
+    return res.status(200).json(item);
+  } catch (error) {
+    return _fail(res, error, "Failed to regenerate professional link");
+  }
+};
+
 const updateServiceOverride = async (req, res) => {
   const { id, menuItemId } = req.params;
   if (!_validId(id) || !_validId(menuItemId)) return res.status(400).json({ error: "Invalid ID" });
@@ -115,6 +127,7 @@ module.exports = {
   create,
   update,
   remove,
+  regeneratePublicToken,
   updateServiceOverride,
   listTimeOff,
   addTimeOff,

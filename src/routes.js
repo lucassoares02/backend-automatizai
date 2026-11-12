@@ -47,6 +47,7 @@ const deliveries = require("../controllers/deliveriesController");
 const deliveryDrivers = require("../controllers/deliveryDriversController");
 const professionals = require("../controllers/professionalsController");
 const appointments = require("../controllers/appointmentsController");
+const professionalPortal = require("../controllers/professionalPortalController");
 const stripe = require("../controllers/stripeController");
 const pagarme = require("../controllers/pagarmeController");
 const n8n = require("../controllers/n8nController");
@@ -122,8 +123,11 @@ router.post("/auth/google", authLimiter, googleAuth.googleSignIn);
 router.get("/users", authMiddleware, requireSystemAdmin, user.getAllUsers);
 router.post("/users", authMiddleware, requireSystemAdminUser, user.createUser);
 
-// SEND EMAIL — rate-limited para evitar abuso como relay de spam.
+// SENHA POR E-MAIL — as duas rotas geram uma senha nova e enviam por e-mail.
+// "Esqueci a senha": pública, só por e-mail, resposta genérica; template montado no servidor.
 router.post("/send-email", authLimiter, mailer.sendEmail);
+// "Enviar acesso": só admin; admin de conta só alcança usuários das empresas dele.
+router.post("/users/:id/send-access", authMiddleware, requireAdminUser, mailer.sendAccess);
 
 // Fluxo de cadastro (pré-login): permanece público, apenas rate-limited.
 router.post("/register", authLimiter, register.create);
@@ -356,6 +360,7 @@ router.post("/professionals", authMiddleware, authorizeCompanyBody(), profession
 router.get("/professionals/:id", authMiddleware, authorizeProfessional, professionals.find);
 router.patch("/professionals/:id", authMiddleware, authorizeProfessional, professionals.update);
 router.delete("/professionals/:id", authMiddleware, authorizeProfessional, professionals.remove);
+router.post("/professionals/:id/public-token", authMiddleware, authorizeProfessional, professionals.regeneratePublicToken);
 router.patch("/professionals/:id/services/:menuItemId", authMiddleware, authorizeProfessional, professionals.updateServiceOverride);
 router.get("/professionals/:id/time-off", authMiddleware, authorizeProfessional, professionals.listTimeOff);
 router.post("/professionals/:id/time-off", authMiddleware, authorizeProfessional, professionals.addTimeOff);
@@ -494,6 +499,14 @@ router.get("/public/delivery-routes/:token/driver-routes", publicLimiter, delive
 router.get("/public/delivery-routes/:token", publicLimiter, deliveries.getPublicRoute);
 router.patch("/public/delivery-routes/:token/orders/:orderId/delivered", publicLimiter, deliveries.confirmPublicStopDelivery);
 router.patch("/public/delivery-routes/:token/orders/:orderId/return-to-route", publicLimiter, deliveries.returnPublicStopToRoute);
+// Página pública do profissional (link/QR): só os próprios clientes + ações e fotos. Sem auth.
+router.get("/public/professionals/:token/appointments", publicLimiter, professionalPortal.listAppointments);
+router.patch("/public/professionals/:token/appointments/:appointmentId/start", publicLimiter, professionalPortal.start);
+router.patch("/public/professionals/:token/appointments/:appointmentId/complete", publicLimiter, professionalPortal.complete);
+router.patch("/public/professionals/:token/appointments/:appointmentId/no-show", publicLimiter, professionalPortal.noShow);
+router.patch("/public/professionals/:token/appointments/:appointmentId/reopen", publicLimiter, professionalPortal.reopen);
+router.post("/public/professionals/:token/appointments/:appointmentId/photos", publicLimiter, professionalPortal.upload.single("image"), professionalPortal.addPhoto);
+router.delete("/public/professionals/:token/appointments/:appointmentId/photos/:photoId", publicLimiter, professionalPortal.removePhoto);
 router.get("/public/client", publicLimiter, publicCtrl.findClientByPhone);
 router.post("/public/clients", publicLimiter, optionalCustomerAuth, publicCtrl.createClient);
 router.patch("/public/clients/:id", publicLimiter, publicCtrl.updateClient);

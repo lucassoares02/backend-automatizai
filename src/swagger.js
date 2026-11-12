@@ -126,8 +126,11 @@ const OVERRIDES = {
     requestBody: body({ name: T.str, email: T.str, link: T.str, active: T.bool }, { name: "Maria", email: "maria@exemplo.com", link: "https://portal.exemplo.com/ativar", active: true }, ["name", "email"]),
   },
   "POST /api/send-email": {
-    summary: "Enviar e-mail",
-    requestBody: body({ email: T.str, subject: T.str, html: T.str, text: T.str, link: T.str }, { email: "destino@exemplo.com", subject: "Bem-vindo", html: "<h1>Olá</h1>", text: "Olá", link: "https://portal.exemplo.com" }, ["email", "subject"]),
+    summary: "Esqueci a senha: gera uma senha nova e envia ao e-mail cadastrado (resposta sempre genérica)",
+    requestBody: body({ email: T.str }, { email: "usuario@exemplo.com" }, ["email"]),
+  },
+  "POST /api/users/{id}/send-access": {
+    summary: "Gera uma senha nova e envia o acesso ao usuário (admin; admin de conta só nas empresas dele)",
   },
   "PATCH /api/account": {
     summary: "Atualizar conta do usuário logado",

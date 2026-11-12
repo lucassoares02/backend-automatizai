@@ -8,7 +8,10 @@ const orderAutoAcceptService = require("./orderAutoAcceptService");
 const bookingService = require("./bookingService");
 const { columnExists, tableExists } = require("../helpers/schema");
 const { createPaymentSession } = require("../helpers/publicPaymentSession");
-const { subscriptionPlatformSplitCents } = require("../helpers/subscriptionBilling");
+const {
+  subscriptionPlatformSplitCents,
+  platformFeePercent: subscriptionPlatformFeePercent,
+} = require("../helpers/subscriptionBilling");
 
 // ─── Cliente Pagar.me (API v5 — "Core API") ────────────────────────────────────
 // Modelo marketplace: cada empresa é um RECEBEDOR (recipient) no Pagar.me; o
@@ -2678,7 +2681,7 @@ const _platformSplitCents = (order) => {
   );
 };
 
-// Cobrança de assinatura: só o percentual da Arbian, sem taxa fixa (5% padrão;
+// Cobrança de assinatura: só o percentual da Arbian, sem taxa fixa (2% padrão;
 // vale o percentual gravado na assinatura no momento da contratação).
 const _subscriptionPlatformSplitCents = (invoice) =>
   subscriptionPlatformSplitCents(invoice?.amount_cents, invoice?.platform_split_percent ?? undefined);
@@ -2808,6 +2811,15 @@ const _feeProfile = () => ({
     percentage: PLATFORM_FEE_PERCENT,
     rule: "Percentual sobre itens e entrega; a taxa de serviço do pedido também é destinada à plataforma.",
     actual_value_source: "Split registrado em cada venda",
+  },
+});
+
+const _subscriptionFeeProfile = () => ({
+  ...PAGARME_CONTRACT_FEE_PROFILE,
+  arbian: {
+    percentage: subscriptionPlatformFeePercent(),
+    rule: "Percentual inteiro sobre cada cobrança recorrente, sem taxa fixa.",
+    actual_value_source: "Split registrado em cada assinatura",
   },
 });
 
@@ -3437,7 +3449,7 @@ module.exports = {
   requestWithdrawal,
   getPaymentsSummary,
   getFinancialDashboard,
-  getSubscriptionFeeProfile: _feeProfile,
+  getSubscriptionFeeProfile: _subscriptionFeeProfile,
   createCardCharge,
   createPixCharge,
   refundCharge,

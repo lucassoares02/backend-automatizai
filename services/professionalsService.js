@@ -1,5 +1,5 @@
 const pool = require("../db");
-const { tableExists } = require("../helpers/schema");
+const { tableExists, columnExists } = require("../helpers/schema");
 const bookingService = require("./bookingService");
 const { normalizeIdList, normalizeWorkingHours, normalizeTimeOff } = require("../helpers/serviceItem");
 
@@ -32,6 +32,8 @@ const _cleanText = (value) => {
 const _SELECT = `
   SELECT p.id, p.company_id, p.name, p.photo_url, p.bio, p.phone, p.active, p.user_id,
          p.created_at, p.updated_at,
+         -- Link público do profissional (migração pendente tolerada: vem null).
+         to_jsonb(p)->>'public_token' AS public_token,
          COALESCE((
            SELECT json_agg(json_build_object(
                     'menu_item_id', ps.menu_item_id,
@@ -252,8 +254,25 @@ const removeTimeOff = async (professionalId, timeOffId) => {
   return result.rows[0] || null;
 };
 
+// Gera um novo link público (o anterior deixa de funcionar na hora).
+const regeneratePublicToken = async (id) => {
+  await ensureSchema();
+  if (!(await columnExists("professionals", "public_token"))) {
+    throw Object.assign(new Error("Link do profissional ainda não habilitado: a migração do banco está pendente."), {
+      status: 503,
+    });
+  }
+  const result = await pool.query(
+    "UPDATE professionals SET public_token = gen_random_uuid(), updated_at = NOW() WHERE id = $1 RETURNING id",
+    [id],
+  );
+  if (!result.rows[0]) return null;
+  return find(id);
+};
+
 module.exports = {
   findByCompany,
+  regeneratePublicToken,
   find,
   create,
   update,

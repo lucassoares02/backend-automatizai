@@ -1,49 +1,48 @@
-const dotenv = require("dotenv");
-const pool = require("../db");
-const { hashPassword } = require("../helpers/hash");
-const { sendEmailSmtp } = require("../services/mailerService");
+const service = require("../services/passwordEmailService");
 
-dotenv.config(); // carrega variáveis de .env
+const GENERIC_FORGOT_MESSAGE = "Se o e-mail estiver cadastrado, você receberá uma nova senha em instantes.";
 
 /**
- * Envia um e-mail.
- *
- * @param {string|string[]} to     Destinatário(s). Pode ser string ou array de strings.
- * @param {string}          subject Assunto do e-mail.
- * @param {string}          html    Conteúdo HTML do e-mail.
- * @param {string}          [text]  Conteúdo em texto puro (fallback).
+ * POST /send-email — "Esqueci a senha" (público, rate-limited).
+ * Body: { email }. Gera uma senha nova e envia para o e-mail cadastrado.
+ * Responde sempre a mesma mensagem, exista o e-mail ou não, e faz o envio
+ * depois da resposta (o tempo de resposta também não revela nada).
  */
 exports.sendEmail = async (req, res) => {
-  const { id, subject, html, text, link, email } = req.body;
-
-  user = null;
-
-  if (id != null && id != "null") {
-    const result = await pool.query("SELECT * FROM users WHERE id = $1", [id]);
-    user = result.rows[0];
-  } else if (email != null && email != "null") {
-    const result = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
-    user = result.rows[0];
+  const email = service.normalizeEmail(req.body?.email);
+  if (!email || !email.includes("@")) {
+    return res.status(400).json({ error: "Informe um e-mail válido" });
   }
 
-  if (!user) {
-    return res.status(404).json({ error: "Usuário não encontrado" });
+  res.status(200).json({ message: GENERIC_FORGOT_MESSAGE });
+
+  try {
+    await service.requestForgotPassword(email);
+  } catch (err) {
+    console.error("Erro ao enviar e-mail de recuperação:", err.message);
   }
+};
 
-  const randomPassword = Math.random().toString(36).slice(-8);
-  const decodedPassword = await hashPassword(randomPassword);
-  await pool.query("UPDATE users SET password = $1 WHERE id = $2 RETURNING *", [decodedPassword, id]);
+/**
+ * POST /users/:id/send-access — gera senha nova e envia o acesso ao usuário.
+ * Exige admin; admin de conta só alcança usuários das empresas dele.
+ */
+exports.sendAccess = async (req, res) => {
+  const id = /^\d+$/.test(String(req.params.id)) ? Number(req.params.id) : null;
+  if (!id) return res.status(400).json({ error: "Usuário inválido" });
 
-  console.log("Senha atualizada para o usuário:", user.id, "Nova senha:", randomPassword);
+  try {
+    const user = await service.findUserById(id);
+    if (!user) return res.status(404).json({ error: "Usuário não encontrado" });
 
-  const replaceHtml = html
-    .replaceAll("@name", user.name)
-    .replaceAll("@email", user.email)
-    .replaceAll("@password", randomPassword)
-    .replaceAll("@link", link);
+    if (!req.isSystemAdmin && !(await service.sharesCompany(id, req.userCompanies))) {
+      return res.status(403).json({ error: "Acesso negado a este usuário" });
+    }
 
-  const info = await sendEmailSmtp(`"Portal Associados" <${process.env.MAIL_FROM}>`, user.email, subject, text, replaceHtml);
-
-  console.log("E-mail enviado:", info.messageId);
-  return res.status(200).json({ message: "E-mail enviado com sucesso", messageId: info.messageId });
+    const info = await service.resetAndSend(user, "access");
+    return res.status(200).json({ message: "E-mail enviado com sucesso", messageId: info?.messageId });
+  } catch (err) {
+    console.error("Erro ao enviar e-mail de acesso:", err.message);
+    return res.status(500).json({ error: "Erro ao enviar e-mail" });
+  }
 };

@@ -12,17 +12,17 @@ test.after(() => pool.end());
 
 // ─── Split percentual e itens ────────────────────────────────────────────────
 
-test("split da recorrência: objeto enabled/rules, 95% loja e 5% Arbian, só percentual inteiro", () => {
+test("split da recorrência: objeto enabled/rules, 98% loja e 2% Arbian, só percentual inteiro", () => {
   const { split, merchantPercent, platformPercent } = billing.buildSubscriptionSplit({
     merchantRecipientId: "rp_loja",
     platformRecipientId: "rp_arbian",
   });
-  assert.equal(merchantPercent, 95);
-  assert.equal(platformPercent, 5);
+  assert.equal(merchantPercent, 98);
+  assert.equal(platformPercent, 2);
   assert.equal(split.enabled, true);
   assert.deepEqual(split.rules.map((r) => [r.recipient_id, r.amount, r.type]), [
-    ["rp_loja", 95, "percentage"],
-    ["rp_arbian", 5, "percentage"],
+    ["rp_loja", 98, "percentage"],
+    ["rp_arbian", 2, "percentage"],
   ]);
   assert.ok(split.rules.every((r) => Number.isInteger(r.amount)));
   assert.equal(split.rules.reduce((s, r) => s + r.amount, 0), 100);
@@ -36,8 +36,8 @@ test("split recusa loja sem recebedor (409) e plataforma sem recebedor (503)", (
   assert.throws(() => billing.buildSubscriptionSplit({ merchantRecipientId: "rp_l" }), { status: 503 });
 });
 
-test("parte da Arbian na assinatura: 5% sem taxa fixa", () => {
-  assert.equal(billing.subscriptionPlatformSplitCents(4990), 250);
+test("parte da Arbian na assinatura: 2% sem taxa fixa", () => {
+  assert.equal(billing.subscriptionPlatformSplitCents(4990), 100);
   assert.equal(billing.subscriptionPlatformSplitCents(10000, 5), 500);
   assert.equal(pagarmeService._testing.subscriptionPlatformSplitCents({ amount_cents: 2000, platform_split_percent: 5 }), 100);
 });

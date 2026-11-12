@@ -3,7 +3,7 @@
 // DB_CHANGES_NEEDED.md. Normalizadores puros + regra de acesso; sem banco.
 //
 // Regras do produto (decididas com o negócio):
-// - cobrança só no cartão de crédito, split 95% loja / 5% Arbian, sem taxa fixa;
+// - cobrança só no cartão de crédito, split 98% loja / 2% Arbian, sem taxa fixa;
 // - sem prazo (perpétua) ou com N cobranças (ex.: 12 mensais = 1 ano);
 // - serviço: limite de usos por ciclo de cobrança (null = ilimitado).
 //

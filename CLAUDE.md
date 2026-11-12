@@ -39,7 +39,7 @@ api/
 - Health: `GET /`
 - Auth: `POST /signin`
 - Users: `GET /users` (admin do sistema ou serviço), `POST /users` (admin do sistema por JWT)
-- Mail: `POST /send-email`
+- Mail: `POST /send-email` (público: "esqueci a senha", só `{ email }`, resposta genérica) e `POST /users/:id/send-access` (admin; envia senha nova). Template em `templates/access_email.html`, link de `PORTAL_APP_URL`
 - Register/Companies:
   `POST /register`, `POST /companies/withoutid` (auth), `POST /companies`, `GET /cnpj/:cnpj`
 - Companies:

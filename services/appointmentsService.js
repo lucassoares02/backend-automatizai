@@ -693,7 +693,7 @@ const getOrderAppointment = async (orderId) => {
   const company = await bookingService.loadCompanySettings(row.company_id);
   const subscriptionId = await bookingService.subscriptionIdForOrder(pool, orderId);
 
-  const [images, professionals, stats, history] = await Promise.all([
+  const [images, professionals, stats, history, photos] = await Promise.all([
     (async () => {
       if (!row.menu_item_id || !(await tableExists("menu_item_images"))) return [];
       const res = await pool.query(
@@ -730,6 +730,8 @@ const getOrderAppointment = async (orderId) => {
        ORDER BY a.starts_at DESC LIMIT 6`,
       [row.client_id, row.company_id, orderId],
     ),
+    // Fotos tiradas pelo profissional na tela pública (/profissional/{token}).
+    require("./professionalPortalService").photosForAppointment(row.id),
   ]);
 
   const coverUrl = row.service_image_url;
@@ -770,6 +772,7 @@ const getOrderAppointment = async (orderId) => {
     })),
     client_stats: stats.rows[0] || { total: 0, done: 0, no_show: 0, cancelled: 0, last_visit_at: null },
     client_history: history.rows,
+    photos,
   };
 };
 
