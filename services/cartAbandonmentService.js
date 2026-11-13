@@ -1,7 +1,6 @@
 const cron = require("node-cron");
 const pool = require("./../db");
 const {
-  VISIT_IDLE_MINUTES,
   ONLINE_SECONDS,
   ARCHIVE_SEPARATOR,
 } = require("./customerTrackingService");
@@ -56,8 +55,8 @@ const _buildPayload = (row) => ({
 // Busca os carrinhos abandonados: com itens, sem pedido criado, inativos há mais
 // de INACTIVITY_MINUTES e ainda não notificados (dedup via abandonment_notified_at).
 // Também exige que:
-//   • a aba não esteja aberta agora (sem heartbeat recente) — exceto quando a
-//     visita está parada há mais de VISIT_IDLE_MINUTES (aba esquecida);
+//   • o cardápio não esteja aberto agora (sem heartbeat recente) — quem ainda
+//     está na página aparece como "Navegando agora" no painel;
 //   • não exista visita MAIS NOVA da mesma pessoa/dispositivo (ela voltou a
 //     navegar ou já comprou) — evita avisar sobre um carrinho já superado.
 const _findAbandoned = async () => {
@@ -75,14 +74,11 @@ const _findAbandoned = async () => {
         AND s.abandonment_notified_at IS NULL
         AND s.last_activity_at < NOW() - ($1 || ' minutes')::interval
         AND s.last_activity_at > NOW() - ($2 || ' hours')::interval
-        AND (
-              s.last_activity_at < NOW() - ($4 || ' minutes')::interval
-           OR NOT EXISTS (
-                SELECT 1 FROM tracking_events e
-                 WHERE e.session_id = s.session_id
-                   AND e.company_id = s.company_id
-                   AND e.created_at >= NOW() - ($5 || ' seconds')::interval
-              )
+        AND NOT EXISTS (
+              SELECT 1 FROM tracking_events e
+               WHERE e.session_id = s.session_id
+                 AND e.company_id = s.company_id
+                 AND e.created_at >= NOW() - ($4 || ' seconds')::interval
         )
         AND NOT EXISTS (
               SELECT 1 FROM customer_tracking_sessions n
@@ -102,7 +98,6 @@ const _findAbandoned = async () => {
       String(INACTIVITY_MINUTES),
       String(LOOKBACK_HOURS),
       BATCH_LIMIT,
-      String(VISIT_IDLE_MINUTES),
       String(ONLINE_SECONDS),
     ],
   );

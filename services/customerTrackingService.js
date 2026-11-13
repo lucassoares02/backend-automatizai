@@ -65,11 +65,14 @@ const _jsonArray = (v, maxLen = 20000) => {
 // todas as visitas; por isso o backend "arquiva" a linha anterior (renomeia o
 // session_id com o sufixo ~xxxx) e abre uma nova quando:
 //   • a visita anterior terminou em pedido e o cliente voltou a comprar; ou
-//   • a visita anterior está inativa há mais de VISIT_IDLE_MINUTES.
+//   • a visita anterior está sem sinal (interação ou heartbeat) há mais de
+//     VISIT_IDLE_MINUTES — a pessoa fechou o cardápio e voltou depois.
 // Assim um pedido antigo nunca marca como "comprado" um carrinho novo.
 const VISIT_IDLE_MINUTES = 30;
-// O cardápio manda heartbeat a cada 45 s enquanto a aba está aberta.
-const ONLINE_SECONDS = 120;
+// O cardápio manda heartbeat a cada 45 s enquanto a aba está aberta; com a aba
+// em segundo plano o navegador espaça os timers (intervalos de 2–3 min), por
+// isso a tolerância de 5 min.
+const ONLINE_SECONDS = 300;
 // Janela dos carrinhos abandonados exibidos no painel.
 const ABANDONED_LOOKBACK_HOURS = 24;
 // Etapas em que o cliente está montando um carrinho NOVO (não pagando o pedido
@@ -79,7 +82,10 @@ const ARCHIVE_SEPARATOR = "~";
 
 const _rotationReason = (row, incoming, now = new Date()) => {
   if (!row) return null;
-  const last = row.last_activity_at ? new Date(row.last_activity_at) : null;
+  // last_seen_at = última interação OU heartbeat: aba aberta parada não é
+  // visita nova.
+  const lastRaw = row.last_seen_at || row.last_activity_at;
+  const last = lastRaw ? new Date(lastRaw) : null;
   if (last && now.getTime() - last.getTime() > VISIT_IDLE_MINUTES * 60 * 1000) {
     return "new_visit";
   }
@@ -134,13 +140,19 @@ const upsertSession = async (payload) => {
   try {
     await client.query("BEGIN");
     const existing = await client.query(
-      `SELECT id, session_id, status, order_id, last_activity_at,
-              customer_id, customer_name, customer_phone,
-              abandonment_notified_at,
-              (cart_items IS NOT DISTINCT FROM $3::jsonb) AS same_cart
-         FROM customer_tracking_sessions
-        WHERE company_id = $1 AND session_id = $2
-        FOR UPDATE`,
+      `SELECT s.id, s.session_id, s.status, s.order_id, s.last_activity_at,
+              GREATEST(s.last_activity_at,
+                       COALESCE((SELECT MAX(e.created_at) FROM tracking_events e
+                                  WHERE e.session_id = s.session_id
+                                    AND e.company_id = s.company_id
+                                    AND e.created_at >= s.last_activity_at),
+                                s.last_activity_at)) AS last_seen_at,
+              s.customer_id, s.customer_name, s.customer_phone,
+              s.abandonment_notified_at,
+              (s.cart_items IS NOT DISTINCT FROM $3::jsonb) AS same_cart
+         FROM customer_tracking_sessions s
+        WHERE s.company_id = $1 AND s.session_id = $2
+        FOR UPDATE OF s`,
       [companyId, sessionId, cartItems],
     );
     let row = existing.rows[0] || null;
@@ -369,9 +381,9 @@ const trackEvent = async (payload) => {
   );
 };
 
-// Marca como inativas as visitas paradas há mais de VISIT_IDLE_MINUTES. Só
-// vira "abandoned" quem tinha carrinho e não comprou — visitante que só olhou o
-// cardápio não é carrinho abandonado.
+// Marca como inativas as visitas paradas há mais de VISIT_IDLE_MINUTES e sem a
+// aba aberta (sem heartbeat recente). Só vira "abandoned" quem tinha carrinho e
+// não comprou — visitante que só olhou o cardápio não é carrinho abandonado.
 const _expireStale = async (companyId) => {
   await pool.query(
     `UPDATE customer_tracking_sessions
@@ -382,14 +394,20 @@ const _expireStale = async (companyId) => {
             updated_at = NOW()
       WHERE company_id = $1
         AND is_active = TRUE
-        AND last_activity_at < NOW() - ($2 || ' minutes')::interval`,
-    [companyId, String(VISIT_IDLE_MINUTES)],
+        AND last_activity_at < NOW() - ($2 || ' minutes')::interval
+        AND NOT EXISTS (
+              SELECT 1 FROM tracking_events e
+               WHERE e.session_id = customer_tracking_sessions.session_id
+                 AND e.company_id = customer_tracking_sessions.company_id
+                 AND e.created_at >= NOW() - ($3 || ' seconds')::interval
+        )`,
+    [companyId, String(VISIT_IDLE_MINUTES), String(ONLINE_SECONDS)],
   );
 };
 
 // Linhas do painel "Carrinhos abertos": UMA por pessoa, classificada em
-//   • online    → aba aberta (heartbeat/atividade nos últimos ONLINE_SECONDS)
-//                 e com interação real nos últimos VISIT_IDLE_MINUTES;
+//   • online    → cardápio aberto agora (heartbeat/atividade nos últimos
+//                 ONLINE_SECONDS), mesmo que a pessoa esteja só olhando;
 //   • abandoned → saiu com itens no carrinho e sem pedido (últimas 24h).
 // A deduplicação é em dois níveis: primeiro por dispositivo (token sem o
 // sufixo de arquivamento), depois por pessoa (cliente → telefone → dispositivo),
@@ -420,7 +438,7 @@ const _panelRows = async (cid) => {
               AND e.created_at >= NOW() - ($2 || ' seconds')::interval
          ) hb ON TRUE
         WHERE s.company_id = $1
-          AND s.last_activity_at >= NOW() - ($4 || ' hours')::interval
+          AND s.last_activity_at >= NOW() - ($3 || ' hours')::interval
      ),
      per_device AS (
        SELECT DISTINCT ON (device_key) *
@@ -437,7 +455,6 @@ const _panelRows = async (cid) => {
        SELECT *,
               CASE
                 WHEN last_seen_at >= NOW() - ($2 || ' seconds')::interval
-                 AND last_activity_at >= NOW() - ($3 || ' minutes')::interval
                 THEN 'online'
                 WHEN cart_items_count > 0 AND order_id IS NULL
                  AND status <> 'order_created'
@@ -449,7 +466,7 @@ const _panelRows = async (cid) => {
       WHERE presence IS NOT NULL
       ORDER BY (presence = 'online') DESC, last_seen_at DESC
       LIMIT 300`,
-    [cid, String(ONLINE_SECONDS), String(VISIT_IDLE_MINUTES), String(ABANDONED_LOOKBACK_HOURS)],
+    [cid, String(ONLINE_SECONDS), String(ABANDONED_LOOKBACK_HOURS)],
   );
   return res.rows.map(({ device_key, ...row }) => row);
 };

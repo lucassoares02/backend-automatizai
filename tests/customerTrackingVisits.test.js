@@ -23,6 +23,11 @@ test("visita parada há mais de 30 min abre uma nova visita", () => {
   );
 });
 
+test("aba aberta parada (só heartbeat) continua na mesma visita", () => {
+  const row = { order_id: null, last_activity_at: minutesAgo(45), last_seen_at: minutesAgo(1) };
+  assert.equal(rotationReason(row, { status: "cart", current_step: "cart" }, now), null);
+});
+
 test("cliente que comprou e voltou ao cardápio ganha visita nova", () => {
   const row = { order_id: 236, status: "order_created", last_activity_at: minutesAgo(2) };
   assert.equal(
