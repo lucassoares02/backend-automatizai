@@ -44,10 +44,7 @@ const trackEvent = async (req, res) => {
 // ─── Admin (com auth) ────────────────────────────────────────────────────────
 const listSessions = async (req, res) => {
   try {
-    const data = await tracking.listSessions(req.params.companyId, {
-      include_finished: req.query.include_finished !== "false",
-      since_minutes: req.query.since_minutes,
-    });
+    const data = await tracking.listSessions(req.params.companyId);
     res.json(data);
   } catch (err) {
     console.error("tracking.listSessions error:", err.message);

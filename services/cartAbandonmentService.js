@@ -1,5 +1,10 @@
 const cron = require("node-cron");
 const pool = require("./../db");
+const {
+  VISIT_IDLE_MINUTES,
+  ONLINE_SECONDS,
+  ARCHIVE_SEPARATOR,
+} = require("./customerTrackingService");
 const { n8nUrlWebhook } = require("./evolutionService");
 
 const WEBHOOK_PATH = "abandono-carrinho";
@@ -50,6 +55,11 @@ const _buildPayload = (row) => ({
 
 // Busca os carrinhos abandonados: com itens, sem pedido criado, inativos há mais
 // de INACTIVITY_MINUTES e ainda não notificados (dedup via abandonment_notified_at).
+// Também exige que:
+//   • a aba não esteja aberta agora (sem heartbeat recente) — exceto quando a
+//     visita está parada há mais de VISIT_IDLE_MINUTES (aba esquecida);
+//   • não exista visita MAIS NOVA da mesma pessoa/dispositivo (ela voltou a
+//     navegar ou já comprou) — evita avisar sobre um carrinho já superado.
 const _findAbandoned = async () => {
   const res = await pool.query(
     `SELECT s.id, s.session_id, s.company_id,
@@ -65,9 +75,36 @@ const _findAbandoned = async () => {
         AND s.abandonment_notified_at IS NULL
         AND s.last_activity_at < NOW() - ($1 || ' minutes')::interval
         AND s.last_activity_at > NOW() - ($2 || ' hours')::interval
+        AND (
+              s.last_activity_at < NOW() - ($4 || ' minutes')::interval
+           OR NOT EXISTS (
+                SELECT 1 FROM tracking_events e
+                 WHERE e.session_id = s.session_id
+                   AND e.company_id = s.company_id
+                   AND e.created_at >= NOW() - ($5 || ' seconds')::interval
+              )
+        )
+        AND NOT EXISTS (
+              SELECT 1 FROM customer_tracking_sessions n
+               WHERE n.company_id = s.company_id
+                 AND n.id <> s.id
+                 AND n.last_activity_at > s.last_activity_at
+                 AND (
+                       split_part(n.session_id, '${ARCHIVE_SEPARATOR}', 1)
+                         = split_part(s.session_id, '${ARCHIVE_SEPARATOR}', 1)
+                    OR (s.customer_id IS NOT NULL AND n.customer_id = s.customer_id)
+                    OR (NULLIF(s.customer_phone, '') IS NOT NULL AND n.customer_phone = s.customer_phone)
+                 )
+        )
       ORDER BY s.last_activity_at ASC
       LIMIT $3`,
-    [String(INACTIVITY_MINUTES), String(LOOKBACK_HOURS), BATCH_LIMIT],
+    [
+      String(INACTIVITY_MINUTES),
+      String(LOOKBACK_HOURS),
+      BATCH_LIMIT,
+      String(VISIT_IDLE_MINUTES),
+      String(ONLINE_SECONDS),
+    ],
   );
   return res.rows;
 };
