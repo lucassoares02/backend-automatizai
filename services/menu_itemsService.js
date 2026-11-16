@@ -127,6 +127,7 @@ const _extrasSelect = async (alias = "mi") => {
     tableExists("professional_services"),
     tableExists("service_related_products"),
   ]);
+  const hasRelatedDiscounts = hasRelated && await columnExists("service_related_products", "discount_percent");
   const hasSubscriptionItems = await tableExists("subscription_included_items");
   const hasSubscriptionLimits = hasSubscriptionItems && await columnExists("subscription_included_items", "free_quantity_per_cycle");
   const images = hasImages
@@ -142,6 +143,10 @@ const _extrasSelect = async (alias = "mi") => {
     ? `COALESCE((SELECT array_agg(srp.product_id ORDER BY srp.position, srp.product_id)
                  FROM service_related_products srp WHERE srp.service_id = ${alias}.id), '{}'::int[]) AS related_product_ids`
     : `'{}'::int[] AS related_product_ids`;
+  const relatedDiscounts = hasRelatedDiscounts
+    ? `COALESCE((SELECT json_object_agg(srp.product_id::text, COALESCE(srp.discount_percent, 0))
+                 FROM service_related_products srp WHERE srp.service_id = ${alias}.id), '{}'::json) AS related_product_discounts`
+    : `'{}'::json AS related_product_discounts`;
   const subscriptionItems = hasSubscriptionItems
     ? `COALESCE((SELECT array_agg(sii.included_item_id ORDER BY sii.included_item_id)
                  FROM subscription_included_items sii WHERE sii.subscription_item_id = ${alias}.id), '{}'::int[]) AS included_item_ids`
@@ -150,7 +155,7 @@ const _extrasSelect = async (alias = "mi") => {
     ? `COALESCE((SELECT json_object_agg(sii.included_item_id::text, sii.free_quantity_per_cycle)
                  FROM subscription_included_items sii WHERE sii.subscription_item_id = ${alias}.id), '{}'::json) AS included_item_limits`
     : `'{}'::json AS included_item_limits`;
-  return `${images}, ${professionals}, ${related}, ${subscriptionItems}, ${subscriptionLimits}`;
+  return `${images}, ${professionals}, ${related}, ${relatedDiscounts}, ${subscriptionItems}, ${subscriptionLimits}`;
 };
 
 // Substitui a galeria do item pela lista recebida (ordem = posição).
@@ -183,21 +188,51 @@ const _syncProfessionals = async (client, itemId, companyId, ids) => {
   );
 };
 
+// Valida o desconto (%) de cada produto sugerido: ausente = 0 (sem desconto);
+// aceita de 0 até menos de 100. Lança 400 antes de abrir a transação. Devolve
+// null quando o payload não traz o mapa (clientes antigos preservam o atual).
+const normalizeRelatedDiscounts = (ids, raw) => {
+  if (ids === null || raw == null) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw Object.assign(new Error("Descontos dos produtos sugeridos inválidos."), { status: 400 });
+  }
+  const map = raw;
+  const discounts = new Map();
+  for (const id of ids || []) {
+    const value = map[id] ?? map[String(id)];
+    const percent = value == null || value === "" ? 0 : Number(value);
+    if (!Number.isFinite(percent) || percent < 0 || percent >= 100) {
+      throw Object.assign(new Error("O desconto de cada produto sugerido deve ficar entre 0% e 99%."), { status: 400 });
+    }
+    discounts.set(Number(id), Number(percent.toFixed(2)));
+  }
+  return discounts;
+};
+
 // Substitui os produtos sugeridos do serviço ("Leve junto"), na ordem recebida.
-// Só aceita produtos (não serviços) ativos da mesma empresa.
-const _syncRelatedProducts = async (client, itemId, companyId, ids) => {
+// Só aceita produtos (não serviços) ativos da mesma empresa. O desconto só é
+// gravado quando a coluna já existe (DB_CHANGES_NEEDED.md #30).
+const _syncRelatedProducts = async (client, itemId, companyId, ids, discounts = null) => {
   if (ids === null || !(await tableExists("service_related_products"))) return;
+  const hasDiscount = await columnExists("service_related_products", "discount_percent");
+  if (hasDiscount && discounts === null) {
+    const current = await client.query(
+      "SELECT product_id, discount_percent FROM service_related_products WHERE service_id = $1",
+      [itemId],
+    );
+    discounts = new Map(current.rows.map((r) => [Number(r.product_id), Number(r.discount_percent ?? 0)]));
+  }
   await client.query("DELETE FROM service_related_products WHERE service_id = $1", [itemId]);
   if (!ids.length) return;
   await client.query(
-    `INSERT INTO service_related_products (service_id, product_id, position)
-     SELECT $1, mi.id, u.ord - 1
-     FROM unnest($3::int[]) WITH ORDINALITY AS u(id, ord)
+    `INSERT INTO service_related_products (service_id, product_id, position${hasDiscount ? ", discount_percent" : ""})
+     SELECT $1, mi.id, u.ord - 1${hasDiscount ? ", u.discount" : ""}
+     FROM unnest($3::int[], $4::numeric[]) WITH ORDINALITY AS u(id, discount, ord)
      JOIN menu_items mi ON mi.id = u.id
      WHERE mi.company_id = $2 AND mi.id <> $1 AND mi.deleted_at IS NULL
        AND COALESCE(mi.item_type, 'product') <> 'service'
      ON CONFLICT (service_id, product_id) DO NOTHING`,
-    [itemId, companyId, ids],
+    [itemId, companyId, ids, ids.map((id) => discounts?.get(Number(id)) ?? 0)],
   );
 };
 
@@ -341,6 +376,7 @@ const create = async (data, { allowSubscriptions = false } = {}) => {
   const imageUrls = normalizeImageUrls(data.images);
   const professionalIds = isService ? normalizeIdList(data.professional_ids) : null;
   const relatedIds = isService ? normalizeIdList(data.related_product_ids) : null;
+  const relatedDiscounts = normalizeRelatedDiscounts(relatedIds, data.related_product_discounts);
   // Serviço não tem preparo, SKU, estoque nem encomenda.
   const cols = ["company_id", "category_id", "name", "description", "price", "available", "image_url", "featured", "display_order", "prep_time_minutes", "sku"];
   const vals = [
@@ -391,7 +427,7 @@ const create = async (data, { allowSubscriptions = false } = {}) => {
     const row = result.rows[0];
     await _syncImages(client, row.id, imageUrls);
     await _syncProfessionals(client, row.id, row.company_id, professionalIds);
-    await _syncRelatedProducts(client, row.id, row.company_id, relatedIds);
+    await _syncRelatedProducts(client, row.id, row.company_id, relatedIds, relatedDiscounts);
     if (subscription?.enabled) await _syncSubscriptionItems(client, row.id, row.company_id, includedIds || [], includedLimits);
     return row;
   });
@@ -421,6 +457,7 @@ const update = async (data, { allowSubscriptions = false } = {}) => {
   const professionalIds = isService ? normalizeIdList(data.professional_ids) : updatesService ? [] : null;
   // Idem para os produtos sugeridos; clientes que não enviam a lista a preservam.
   const relatedIds = isService ? normalizeIdList(data.related_product_ids) : updatesService ? [] : null;
+  const relatedDiscounts = normalizeRelatedDiscounts(relatedIds, data.related_product_discounts);
 
   const sets = ["company_id = $2", "category_id = $3", "name = $4", "description = $5", "price = $6", "available = $7", "image_url = $8", "featured = $9", "display_order = $10", "prep_time_minutes = $11", "sku = $12"];
   const vals = [
@@ -497,7 +534,7 @@ const update = async (data, { allowSubscriptions = false } = {}) => {
     if (!row) return null;
     await _syncImages(client, row.id, imageUrls);
     await _syncProfessionals(client, row.id, row.company_id, professionalIds);
-    await _syncRelatedProducts(client, row.id, row.company_id, relatedIds);
+    await _syncRelatedProducts(client, row.id, row.company_id, relatedIds, relatedDiscounts);
     await _syncSubscriptionItems(
       client,
       row.id,
@@ -586,9 +623,10 @@ const duplicate = async (id, { allowSubscriptions = false } = {}) => {
       );
     }
     if (await tableExists("service_related_products")) {
+      const discountCol = (await columnExists("service_related_products", "discount_percent")) ? ", discount_percent" : "";
       await client.query(
-        `INSERT INTO service_related_products (service_id, product_id, position)
-         SELECT $2, product_id, position FROM service_related_products WHERE service_id = $1`,
+        `INSERT INTO service_related_products (service_id, product_id, position${discountCol})
+         SELECT $2, product_id, position${discountCol} FROM service_related_products WHERE service_id = $1`,
         [id, row.id],
       );
     }
@@ -619,4 +657,4 @@ const duplicate = async (id, { allowSubscriptions = false } = {}) => {
   return (await find(created.id)) || created;
 };
 
-module.exports = { findAll, find, findByCompany, create, update, remove, duplicate };
+module.exports = { findAll, find, findByCompany, create, update, remove, duplicate, normalizeRelatedDiscounts };

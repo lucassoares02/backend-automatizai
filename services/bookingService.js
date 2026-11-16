@@ -472,7 +472,37 @@ const _parseStartsAt = (value) => {
  * e encomenda (antecedência até o dia do atendimento) resolvidos no servidor —
  * o payload só informa produto, quantidade, opções e observação.
  */
-const _resolveAddOnProducts = async ({ companyId, products, startsAt, campaignPrices }) => {
+/**
+ * Desconto (%) dos produtos sugeridos do serviço ("Leve junto"), por produto.
+ * Vazio enquanto a coluna não existe (DB_CHANGES_NEEDED.md #30).
+ */
+const _loadRelatedDiscounts = async (serviceId) => {
+  if (!Number.isInteger(serviceId) || serviceId <= 0) return new Map();
+  const [hasTable, hasColumn] = await Promise.all([
+    tableExists("service_related_products"),
+    columnExists("service_related_products", "discount_percent"),
+  ]);
+  if (!hasTable || !hasColumn) return new Map();
+  const r = await pool.query(
+    `SELECT product_id, discount_percent FROM service_related_products
+     WHERE service_id = $1 AND discount_percent > 0 AND discount_percent < 100`,
+    [serviceId],
+  );
+  return new Map(r.rows.map((row) => [Number(row.product_id), Number(row.discount_percent)]));
+};
+
+/**
+ * Preço unitário base do produto levado junto. Campanha e desconto do "Leve
+ * junto" não se somam: vale o menor preço entre os dois.
+ */
+const _addOnBaseUnit = (price, campaign, discountPercent) => {
+  const base = Number(price ?? 0);
+  let unit = campaign ? Math.min(base, campaign.final_price) : base;
+  if (discountPercent > 0) unit = Math.min(unit, base * (1 - discountPercent / 100));
+  return Number(unit.toFixed(2));
+};
+
+const _resolveAddOnProducts = async ({ companyId, products, startsAt, campaignPrices, relatedDiscounts = new Map() }) => {
   if (products == null) return [];
   if (!Array.isArray(products)) throw _error(400, "Lista de produtos inválida.");
   if (products.length > MAX_ADDON_LINES) throw _error(400, "Produtos demais para um agendamento.");
@@ -532,9 +562,11 @@ const _resolveAddOnProducts = async ({ companyId, products, startsAt, campaignPr
     } catch (err) {
       throw _error(400, `${product.name}: ${err.message}`);
     }
-    const base = Number(product.price ?? 0);
-    const campaign = campaignPrices.get(line.menuItemId);
-    const baseUnit = campaign ? Math.min(base, campaign.final_price) : base;
+    const baseUnit = _addOnBaseUnit(
+      product.price,
+      campaignPrices.get(line.menuItemId),
+      relatedDiscounts.get(line.menuItemId) || 0,
+    );
     const unitPrice = Number((baseUnit + selection.extraTotalPerUnit).toFixed(2));
     resolved.push({
       menu_item_id: line.menuItemId,
@@ -659,6 +691,7 @@ const createBookingOrder = async (data, options = {}) => {
     products: subscriptionMode ? null : data.products,
     startsAt,
     campaignPrices: activeCampaignPrices,
+    relatedDiscounts: subscriptionMode ? new Map() : await _loadRelatedDiscounts(serviceId),
   });
   const client = await pool.connect();
   let releasedOrders = [];
@@ -1264,6 +1297,7 @@ module.exports = {
     parseStartsAt: _parseStartsAt,
     durationFor: _durationFor,
     priceFor: _priceFor,
+    addOnBaseUnit: _addOnBaseUnit,
     revalidateSubscription: _revalidateSubscription,
     ACTIVE_STATUSES,
     MAX_DAYS_PER_REQUEST,

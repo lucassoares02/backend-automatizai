@@ -406,19 +406,35 @@ const getCompanyPublicMenu = async (companyRef, customer = {}) => {
   } else {
     for (const item of services) item.professionals = [];
   }
-  // Produtos sugeridos por serviço ("Leve junto"), na ordem definida no painel.
+  // Produtos sugeridos por serviço ("Leve junto"), na ordem definida no painel,
+  // com o desconto (%) de cada um — só exibição; o agendamento recalcula.
   if (services.length && (await tableExists("service_related_products"))) {
+    const hasDiscount = await columnExists("service_related_products", "discount_percent");
     const relRes = await pool.query(
-      `SELECT service_id, array_agg(product_id ORDER BY position, product_id) AS ids
+      `SELECT service_id, array_agg(product_id ORDER BY position, product_id) AS ids,
+              ${hasDiscount
+                ? "json_object_agg(product_id::text, COALESCE(discount_percent, 0))"
+                : "'{}'::json"} AS discounts
        FROM service_related_products
        WHERE service_id = ANY($1::int[])
        GROUP BY service_id`,
       [services.map((item) => item.id)],
     );
-    const byService = new Map(relRes.rows.map((r) => [r.service_id, r.ids]));
-    for (const item of services) item.related_product_ids = byService.get(item.id) || [];
+    const byService = new Map(relRes.rows.map((r) => [r.service_id, r]));
+    for (const item of services) {
+      const rel = byService.get(item.id);
+      item.related_product_ids = rel?.ids || [];
+      item.related_product_discounts = Object.fromEntries(
+        Object.entries(rel?.discounts || {})
+          .map(([id, pct]) => [id, Number(pct)])
+          .filter(([, pct]) => pct > 0),
+      );
+    }
   } else {
-    for (const item of services) item.related_product_ids = [];
+    for (const item of services) {
+      item.related_product_ids = [];
+      item.related_product_discounts = {};
+    }
   }
 
   const subscriptions = await _listPublicSubscriptions(companyId, { pagarmeEnabled, hasImages });
