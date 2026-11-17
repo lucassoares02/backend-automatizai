@@ -187,10 +187,73 @@ const _agendaAppointmentSelect = async () => {
     LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id`;
 };
 
+// Pedidos só com produtos (sem agendamento): o negócio de serviços não tem a
+// tela de Pedidos, então eles entram na agenda pelo horário agendado ou, sem
+// agendamento, pelo horário em que foram feitos. `orders.created_at` é
+// timestamp sem fuso guardando o relógio em UTC (ver ordersService).
+const _productOrdersInRange = async (companyId, rangeStart, rangeEnd, includeCancelled, db = pool) => {
+  const hasItemSubscription = await columnExists("order_items", "subscription_id");
+  const refTime = "COALESCE(o.scheduled_for, o.created_at AT TIME ZONE 'UTC')";
+  const res = await db.query(
+    `SELECT o.id, o.tag, o.uuid, o.status, o.delivery_type, o.scheduled_for,
+            (o.created_at AT TIME ZONE 'UTC') AS created_at,
+            o.total, o.notes, o.delivery_address, o.payment_provider, o.payment_status,
+            o.online_payment_method, pm.label AS payment_method_label,
+            c.id AS client_id, c.name AS client_name, c.phone AS client_phone,
+            COALESCE((
+              SELECT json_agg(json_build_object(
+                       'item_name', oi.item_name, 'menu_item_id', oi.menu_item_id,
+                       'quantity', oi.quantity, 'item_price', oi.item_price,
+                       'subtotal', oi.subtotal, 'notes', oi.notes, 'image_url', mi.image_url,
+                       'options', COALESCE((
+                         SELECT json_agg(json_build_object('option_name', oo.option_name, 'quantity', oo.quantity) ORDER BY oo.id)
+                         FROM order_item_options oo WHERE oo.order_item_id = oi.id), '[]'::json)
+                     ) ORDER BY oi.id)
+              FROM order_items oi
+              LEFT JOIN menu_items mi ON mi.id = oi.menu_item_id
+              WHERE oi.order_id = o.id), '[]'::json) AS items
+     FROM orders o
+     LEFT JOIN clients c ON c.id = o.client_id
+     LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id
+     WHERE o.company_id = $1
+       AND ${refTime} >= $2 AND ${refTime} < $3
+       AND NOT EXISTS (SELECT 1 FROM appointments a WHERE a.order_id = o.id)
+       AND EXISTS (SELECT 1 FROM order_items oi WHERE oi.order_id = o.id)
+       ${hasItemSubscription ? "AND NOT EXISTS (SELECT 1 FROM order_items oi WHERE oi.order_id = o.id AND oi.subscription_id IS NOT NULL)" : ""}
+       ${includeCancelled ? "" : "AND o.status NOT IN (6, 7)"}
+     ORDER BY ${refTime}, o.id`,
+    [companyId, rangeStart, rangeEnd],
+  );
+  return res.rows.map(_productOrderRow);
+};
+
+const _productOrderRow = (r) => ({
+  id: r.id,
+  tag: r.tag,
+  uuid: r.uuid,
+  status: Number(r.status),
+  // delivery_type é BOOLEAN no banco: TRUE = entrega, FALSE = retirada.
+  delivery_type: r.delivery_type === true ? "delivery" : "pickup",
+  scheduled_for: r.scheduled_for,
+  created_at: r.created_at,
+  total: r.total != null ? Number(r.total) : null,
+  notes: r.notes,
+  delivery_address: r.delivery_address,
+  payment_provider: r.payment_provider,
+  payment_status: r.payment_status,
+  online_payment_method: r.online_payment_method,
+  payment_method_label: r.payment_method_label,
+  client_id: r.client_id,
+  client_name: r.client_name,
+  client_phone: r.client_phone,
+  items: Array.isArray(r.items) ? r.items : [],
+});
+
 /**
  * GET /appointments/company/:companyId?from&to — agenda do período (datas
- * locais inclusivas, até 31 dias): profissionais com jornada/folgas e os
- * agendamentos. Cancelados só com `include_cancelled=true`.
+ * locais inclusivas, até 31 dias): profissionais com jornada/folgas, os
+ * agendamentos e os pedidos só com produtos (`product_orders`). Cancelados
+ * só com `include_cancelled=true`.
  */
 const listAgenda = async (companyId, { from, to, includeCancelled = false } = {}) => {
   await _ensureSchema();
@@ -246,6 +309,7 @@ const listAgenda = async (companyId, { from, to, includeCancelled = false } = {}
   };
   const hours = byProf(hoursRes.rows);
   const off = byProf(offRes.rows);
+  const productOrders = await _productOrdersInRange(company.id, rangeStart, rangeEnd, includeCancelled);
 
   return {
     timezone: company.timezone,
@@ -272,6 +336,8 @@ const listAgenda = async (companyId, { from, to, includeCancelled = false } = {}
       })),
     })),
     appointments: appointmentsRes.rows.map(_agendaRow),
+    // Pedidos sem nenhum serviço (só produtos) do período.
+    product_orders: productOrders,
   };
 };
 
@@ -953,6 +1019,7 @@ const createBookingForAi = async (data) => {
 module.exports = {
   NO_SHOW_REASON,
   listAgenda,
+  _productOrdersInRange,
   adminAvailability,
   rescheduleByStore,
   professionalOptions,
