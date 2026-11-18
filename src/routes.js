@@ -18,6 +18,7 @@ const company = require("../controllers/company_address_Controller");
 const payment_methods = require("../controllers/payment_methodsController");
 const connections = require("../controllers/connectionsController");
 const adminFlows = require("../controllers/adminFlowsController");
+const adminStores = require("../controllers/adminStoresController");
 const aiIgnoredPhoneNumbers = require("../controllers/aiIgnoredPhoneNumbersController");
 const additional_info = require("../controllers/additional_infoController");
 const orders = require("../controllers/ordersController");
@@ -254,6 +255,12 @@ router.delete("/connections/:id/:instance", authMiddleware, authorizeConnection,
 // Somente admin do sistema (usuário, não API Key): recria o fluxo de TODAS as
 // conexões a partir do fluxo principal (template do n8n).
 router.post("/admin/flows/update-all", authMiddleware, requireSystemAdminUser, adminFlows.updateAll);
+// Somente admin do sistema (usuário, não API Key): lista todas as lojas e gerencia
+// quais usuários já cadastrados gerenciam cada uma (tabela user_companies).
+router.get("/admin/stores", authMiddleware, requireSystemAdminUser, adminStores.listStores);
+router.get("/admin/stores/:companyId/users", authMiddleware, requireSystemAdminUser, adminStores.listStoreUsers);
+router.post("/admin/stores/:companyId/users", authMiddleware, requireSystemAdminUser, adminStores.linkUser);
+router.delete("/admin/stores/:companyId/users/:userId", authMiddleware, requireSystemAdminUser, adminStores.unlinkUser);
 router.post("/search-address", authMiddleware, connections.searchAddress);
 
 //additional_info

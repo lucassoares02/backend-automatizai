@@ -45,6 +45,7 @@ api/
 - Companies:
   `GET /companies` (auth), `PATCH /companies` (auth), `GET /companies/:company` (auth), `GET /providers/city/:company` (auth)
 - Account: `GET /account` (auth), `PATCH /account` (auth)
+- Admin lojas (só admin do sistema por JWT, `requireSystemAdminUser`): `GET /admin/stores`, `GET|POST /admin/stores/:companyId/users` (POST `{ email }` vincula usuário já cadastrado em `user_companies`, relation_type 0; 404 e-mail inexistente, 409 já vinculado), `DELETE /admin/stores/:companyId/users/:userId`
 - Company opening hours (CRUD)
 - Menu categories (CRUD)
 - Menu items (CRUD + `GET /menu_items/company/:id`)
