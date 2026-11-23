@@ -116,20 +116,23 @@ const _sameWeekday = (rowWeekday, weekday) => {
 /**
  * Faixas de abertura da loja no dia (minutos). `null` quando a empresa não
  * cadastrou horário nenhum (a jornada do profissional manda sozinha).
- * Fechamento <= abertura (vira a madrugada) é tratado como até 24:00.
+ * Fechamento <= abertura vira a madrugada: o dia vai até 24:00 e a sobra
+ * (00:00 → fechamento) entra no dia seguinte.
  */
 const companyDayIntervals = (openingHours, weekday) => {
   if (!Array.isArray(openingHours) || openingHours.length === 0) return null;
+  const previous = (weekday + 6) % 7;
   const out = [];
   for (const row of openingHours) {
-    if (!_sameWeekday(row.weekday, weekday) || row.is_closed === true) continue;
+    if (row.is_closed === true) continue;
     const start = _toMinutes(row.opens_at);
-    let end = _toMinutes(row.closes_at);
+    const end = _toMinutes(row.closes_at);
     if (start === null || end === null) continue;
-    if (end <= start) end = DAY_MINUTES;
-    out.push({ start, end });
+    const overnight = end <= start;
+    if (_sameWeekday(row.weekday, weekday)) out.push({ start, end: overnight ? DAY_MINUTES : end });
+    if (overnight && end > 0 && _sameWeekday(row.weekday, previous)) out.push({ start: 0, end });
   }
-  return out;
+  return out.sort((a, b) => a.start - b.start);
 };
 
 /** Turnos do profissional no dia (weekday 0=domingo … 6=sábado). */

@@ -384,8 +384,8 @@ const applyPackage = async (companyId, pack, { applyCompany = true } = {}) => {
       // 3) Produtos, fotos e opções.
       for (let ii = 0; ii < cat.items.length; ii++) {
         const item = cat.items[ii];
-        const preorderLead = _int(item.preorder_lead_days, { min: 1, max: 365 });
-        const preorderOnly = item.preorder_only === true && preorderLead != null;
+        // Antecedência da encomenda vem da loja; o produto só marca o tipo.
+        const preorderOnly = item.preorder_only === true;
         const itemSelos = [
           ...new Set((Array.isArray(item.dietary_restrictions) ? item.dietary_restrictions : []).map(resolveSelo).filter(Boolean)),
         ];
@@ -410,7 +410,7 @@ const applyPackage = async (companyId, pack, { applyCompany = true } = {}) => {
             item.featured === true,
             _int(item.prep_time_minutes, { min: 1, max: 1440 }),
             preorderOnly,
-            preorderOnly ? preorderLead : null,
+            null,
             itemSelos.length ? itemSelos : null,
           ],
         );

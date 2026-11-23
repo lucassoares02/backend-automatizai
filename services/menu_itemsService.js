@@ -1,6 +1,11 @@
 const pool = require("../db");
 const { columnExists, tableExists } = require("../helpers/schema");
-const { normalizePreorder } = require("../helpers/preorder");
+// Encomenda só obriga o agendamento: a antecedência vem do "A partir de" da
+// loja (Negócio → Agendamento). preorder_lead_days fica sempre NULL.
+const normalizePreorder = (data = {}) => ({
+  preorderOnly: data.preorder_only === true,
+  preorderLeadDays: null,
+});
 const technicalSheetService = require("./technicalSheetService");
 const pagarmeService = require("./pagarmeService");
 const { assertIdsBelongToCompany } = require("../helpers/tenantOwnership");

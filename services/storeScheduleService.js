@@ -1,11 +1,14 @@
 const cron = require("node-cron");
 const pool = require("./../db");
 const { resolveOpenStatus } = require("../helpers/openStatus");
+const { DEFAULT_TIMEZONE } = require("../helpers/bookingSlots");
+const { columnExists } = require("../helpers/schema");
 
 // Encerra as exceções manuais de aberto/fechado (companies.manual_open) quando
 // o horário de funcionamento vira: loja fechada manualmente volta a seguir o
 // horário quando o expediente acaba; aberta manualmente, quando o horário abre.
 // Sem isso, a exceção valeria para sempre (o horário deixaria de ser a regra).
+// Horários avaliados no fuso de cada empresa (companies.timezone).
 const CRON_EXPRESSION = "* * * * *";
 
 let running = false;
@@ -14,8 +17,12 @@ const runOnce = async () => {
   if (running) return;
   running = true;
   try {
+    const hasUntil = await columnExists("companies", "manual_open_until");
+    const untilCol = hasUntil ? "manual_open_until" : "NULL::timestamptz AS manual_open_until";
     const companies = await pool.query(
-      "SELECT id, manual_open FROM companies WHERE manual_open IS NOT NULL",
+      `SELECT id, manual_open, ${untilCol}, COALESCE(timezone, $1) AS timezone
+         FROM companies WHERE manual_open IS NOT NULL`,
+      [DEFAULT_TIMEZONE],
     );
     if (companies.rows.length === 0) return;
     const ids = companies.rows.map((c) => c.id);
@@ -31,10 +38,17 @@ const runOnce = async () => {
     }
     const now = new Date();
     for (const company of companies.rows) {
-      const status = resolveOpenStatus(hoursByCompany.get(company.id) || [], company.manual_open, now);
+      const status = resolveOpenStatus(
+        hoursByCompany.get(company.id) || [],
+        company.manual_open,
+        now,
+        company.timezone,
+        company.manual_open_until,
+      );
       if (!status.manual_expired) continue;
       // `AND manual_open = $2`: não desfaz uma exceção nova feita no meio do ciclo.
-      await pool.query("UPDATE companies SET manual_open = NULL WHERE id = $1 AND manual_open = $2", [
+      const untilSet = hasUntil ? ", manual_open_until = NULL" : "";
+      await pool.query(`UPDATE companies SET manual_open = NULL${untilSet} WHERE id = $1 AND manual_open = $2`, [
         company.id,
         company.manual_open,
       ]);

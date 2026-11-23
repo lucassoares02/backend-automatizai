@@ -16,6 +16,14 @@ const { normalizePhone } = require("../helpers/phone");
 const { loadIncludedBenefits } = require("../helpers/subscriptionEntitlements");
 const { generateUniqueOrderTag } = require("../helpers/orderTag");
 const { columnExists, tableExists } = require("../helpers/schema");
+const { resolveOpenStatus } = require("../helpers/openStatus");
+const {
+  DEFAULT_TIMEZONE,
+  resolveTimezone,
+  localDate,
+  zonedTimeToUtc,
+  addDays: addCalendarDays,
+} = require("../helpers/bookingSlots");
 const { subscriptionFilter } = require("../helpers/subscriptionFilter");
 const { subscriptionsReleasedFor, publicSubscriptionPlan } = require("../helpers/subscriptionItem");
 const { assertIdsBelongToCompany } = require("../helpers/tenantOwnership");
@@ -24,10 +32,6 @@ const {
   hasStockControlSchema: _hasStockControlSchema,
   reserveStock: _reserveStock,
 } = require("../helpers/stockReservation");
-const {
-  inclusiveLeadDayOffset,
-  meetsInclusiveLeadDays,
-} = require("../helpers/preorder");
 
 const MAPS_KEY = process.env.GOOGLE_API_KEY;
 
@@ -92,11 +96,10 @@ const _listPublicSubscriptions = async (companyId, { pagarmeEnabled, hasImages }
 const _getPreorderRequirement = async (companyId, menuItemIds, promotionIds) => {
   if (!(await _hasPreorderSchema())) return null;
   const result = await pool.query(
-    `SELECT mi.id, mi.name, mi.preorder_lead_days
+    `SELECT mi.id, mi.name
      FROM menu_items mi
      WHERE mi.company_id = $1
        AND mi.preorder_only = true
-       AND mi.preorder_lead_days IS NOT NULL
        AND (
          mi.id = ANY($2::int[])
          OR EXISTS (
@@ -108,16 +111,15 @@ const _getPreorderRequirement = async (companyId, menuItemIds, promotionIds) => 
              AND p.id = ANY($3::int[])
          )
        )
-     ORDER BY mi.preorder_lead_days DESC, mi.id
+     ORDER BY mi.id
      LIMIT 1`,
     [companyId, menuItemIds, promotionIds],
   );
   const item = result.rows[0];
   if (!item) return null;
-  return {
-    itemName: item.name,
-    leadDays: Number(item.preorder_lead_days),
-  };
+  // Encomenda só obriga o agendamento; a antecedência é a da loja ("A partir
+  // de"), validada abaixo junto com a janela. preorder_lead_days não vale mais.
+  return { itemName: item.name };
 };
 
 const _collectStockRequirements = (items) => {
@@ -156,17 +158,6 @@ const _collectStockRequirements = (items) => {
   return requiredByItem;
 };
 
-
-// company_opening_hours.weekday segue a convenção do portal: 1=segunda … 7=domingo.
-// JS Date.getDay() usa 0=domingo … 6=sábado. Segunda–sábado coincidem (1–6); só o
-// DOMINGO diverge (getDay()=0 vs weekday=7). Este helper casa a linha do dia atual
-// de forma robusta às duas convenções (aceita domingo como 0 OU 7) — antes a loja
-// aparecia sempre FECHADA aos domingos.
-const _isTodayWeekday = (rowWeekday, jsDay) => {
-  const wd = Number(rowWeekday);
-  if (jsDay === 0) return wd === 0 || wd === 7; // domingo
-  return wd === jsDay; // segunda(1) … sábado(6)
-};
 
 const _buildAddressLine = (row) => {
   if (!row) return null;
@@ -223,8 +214,11 @@ const getCompanyPublicMenu = async (companyRef, customer = {}) => {
   const schedMinHoursCol = hasSchedMinHours
     ? "COALESCE(scheduling_min_hours, 0) AS scheduling_min_hours,"
     : "0 AS scheduling_min_hours,";
+  const hasManualUntil = await columnExists("companies", "manual_open_until");
+  const manualUntilCol = hasManualUntil ? "manual_open_until," : "NULL::timestamptz AS manual_open_until,";
   const companyRes = await pool.query(
-    `SELECT id, uuid, ${slugSelect} name, description, phone, status, manual_open,
+    `SELECT id, uuid, ${slugSelect} name, description, phone, status, manual_open, ${manualUntilCol}
+            COALESCE(timezone, '${DEFAULT_TIMEZONE}') AS timezone,
             logo_url, banner_url, brand_color,
             accepts_delivery, accepts_pickup, ${schedulingCol}
             ${estimatedPrepTimeCol}
@@ -276,19 +270,18 @@ const getCompanyPublicMenu = async (companyRef, customer = {}) => {
     [companyId],
   );
 
-  const now = new Date();
-  const weekday = now.getDay(); // 0=Sun…6=Sat
-  const currentMinutes = now.getHours() * 60 + now.getMinutes();
-  const todayHours = hoursRes.rows.find((h) => _isTodayWeekday(h.weekday, weekday));
-
-  let scheduleOpen = false;
-  if (todayHours && !todayHours.is_closed) {
-    const [oh, om] = String(todayHours.opens_at).split(":").map(Number);
-    const [ch, cm] = String(todayHours.closes_at).split(":").map(Number);
-    scheduleOpen = currentMinutes >= oh * 60 + om && currentMinutes <= ch * 60 + cm;
-  }
-  // Override manual (companies.manual_open): TRUE/FALSE forçam; NULL segue horário.
-  const isOpen = company.manual_open === true || company.manual_open === false ? company.manual_open : scheduleOpen;
+  // Mesma regra do header/dashboard: fuso da empresa, turnos que viram a
+  // madrugada e exceção manual que expira na virada do horário.
+  const openStatus = resolveOpenStatus(
+    hoursRes.rows,
+    company.manual_open,
+    new Date(),
+    company.timezone,
+    company.manual_open_until,
+  );
+  const isOpen = openStatus.is_open;
+  company.manual_open = openStatus.manual_open;
+  delete company.manual_open_until;
 
   // Selos do produto: só seleciona a coluna se ela já existir (a migration em
   // DB_CHANGES_NEEDED.md pode não ter sido aplicada). Sem ela, devolve array vazio.
@@ -539,6 +532,11 @@ const getCompanyPublicMenu = async (companyRef, customer = {}) => {
   return {
     company,
     is_open: isOpen,
+    // Próxima abertura/fechamento e fuso da loja: o cardápio calcula e exibe
+    // horários no fuso da empresa, não no do navegador.
+    next_change_at: openStatus.next_change_at,
+    timezone: openStatus.timezone,
+    utc_offset_minutes: openStatus.utc_offset_minutes,
     opening_hours: hoursRes.rows,
     categories: Array.from(categoriesMap.values()),
     uncategorized,
@@ -964,20 +962,6 @@ const createPublicOrder = async (data) => {
           { status: 400, code: "PREORDER_SCHEDULE_INVALID" },
         );
       }
-      if (
-        !meetsInclusiveLeadDays({
-          orderedAt: now,
-          scheduledAt: when,
-          leadDays: preorderRequirement.leadDays,
-        })
-      ) {
-        throw Object.assign(
-          new Error(
-            `"${preorderRequirement.itemName}" exige ${preorderRequirement.leadDays} dias de antecedência, contando hoje como o primeiro dia.`,
-          ),
-          { status: 400, code: "PREORDER_LEAD_TIME_NOT_MET" },
-        );
-      }
     }
     let minDays = 0;
     let maxDays = 7;
@@ -991,15 +975,14 @@ const createPublicOrder = async (data) => {
         maxDays = Number(w.rows[0].max);
       }
     }
-    const dayStart = (addDays) => {
-      const d = new Date();
-      d.setHours(0, 0, 0, 0);
-      d.setDate(d.getDate() + addDays);
-      return d;
-    };
-    const preorderMinDays = preorderRequirement
-      ? inclusiveLeadDayOffset(preorderRequirement.leadDays)
-      : 0;
+    // Início do dia local DA EMPRESA (não do servidor, que roda em UTC).
+    const tzRes = await pool.query("SELECT COALESCE(timezone, $2) AS timezone FROM companies WHERE id = $1", [
+      company_id,
+      DEFAULT_TIMEZONE,
+    ]);
+    const companyTz = resolveTimezone(tzRes.rows[0]?.timezone);
+    const todayLocal = localDate(new Date(), companyTz);
+    const dayStart = (offset) => zonedTimeToUtc(addCalendarDays(todayLocal, offset), 0, companyTz);
     let minHours = 0;
     if (await columnExists("companies", "scheduling_min_hours")) {
       const h = await pool.query(
@@ -1008,10 +991,13 @@ const createPublicOrder = async (data) => {
       );
       if (h.rows[0]) minHours = Math.max(0, Number(h.rows[0].min_hours) || 0);
     }
-    minDays = Math.max(minDays, preorderMinDays);
     // Antecedência em horas pode empurrar o último dia da janela.
     const minHoursDayOffset = minHours > 0
-      ? Math.round((new Date(Date.now() + minHours * 3600000).setHours(0, 0, 0, 0) - dayStart(0).getTime()) / 86400000)
+      ? Math.round(
+          (zonedTimeToUtc(localDate(Date.now() + minHours * 3600000, companyTz), 0, companyTz).getTime() -
+            dayStart(0).getTime()) /
+            86400000,
+        )
       : 0;
     maxDays = Math.max(maxDays, minDays, minHoursDayOffset);
     const lower = dayStart(minDays - 1); // tolerância de 1 dia
@@ -1966,26 +1952,22 @@ const findPublicOrdersByUserId = async (userId) => {
 // para ranking (pedidos/faturamento), tempo médio de preparo, taxa/pedido
 // mínimo e status aberto/fechado. Também devolve promoções ativas para a
 // vitrine. Sem autenticação — dados estritamente públicos.
-const _isOpenNow = (hours) => {
-  const now = new Date();
-  const weekday = now.getDay();
-  const currentMinutes = now.getHours() * 60 + now.getMinutes();
-  const today = hours.find((h) => _isTodayWeekday(h.weekday, weekday));
-  if (!today || today.is_closed) return false;
-  const [oh, om] = String(today.opens_at).split(":").map(Number);
-  const [ch, cm] = String(today.closes_at).split(":").map(Number);
-  if (![oh, om, ch, cm].every(Number.isFinite)) return false;
-  return currentMinutes >= oh * 60 + om && currentMinutes <= ch * 60 + cm;
-};
+// Vitrine: mesma regra do cardápio (horário no fuso da empresa + exceção manual).
+const _isOpenNow = (hours, company, now = new Date()) =>
+  resolveOpenStatus(hours, company.manual_open, now, company.timezone, company.manual_open_until).is_open;
 
 const listPublicRestaurants = async () => {
   const hasCompanySlug = await columnExists("companies", "slug");
   const slugSelect = hasCompanySlug ? "c.slug," : "NULL::text AS slug,";
+  const manualUntilSelect = (await columnExists("companies", "manual_open_until"))
+    ? "c.manual_open_until,"
+    : "NULL::timestamptz AS manual_open_until,";
   // Ranking: pedidos válidos (não cancelados/rejeitados) > faturamento > mais
   // recentes — melhor métrica disponível na estrutura atual.
   const restaurantsRes = await pool.query(
     `SELECT c.id, c.uuid, ${slugSelect} c.name, c.description, c.logo_url, c.banner_url, c.brand_color,
-            c.cuisine_type,
+            c.cuisine_type, c.manual_open, ${manualUntilSelect}
+            COALESCE(c.timezone, '${DEFAULT_TIMEZONE}') AS timezone,
             (SELECT COUNT(*)::int FROM orders o
               WHERE o.company_id = c.id AND o.status NOT IN (6, 7)) AS orders_count,
             (SELECT COALESCE(SUM(o.total), 0)::float FROM orders o
@@ -2025,7 +2007,9 @@ const listPublicRestaurants = async () => {
   }
 
   for (const r of restaurants) {
-    r.is_open = _isOpenNow(hoursByCompany.get(r.id) || []);
+    r.is_open = _isOpenNow(hoursByCompany.get(r.id) || [], r);
+    delete r.manual_open;
+    delete r.manual_open_until;
     r.min_price_order = toNumber(r.min_price_order);
     r.min_tax_delivery = toNumber(r.min_tax_delivery);
     r.revenue_total = toNumber(r.revenue_total) ?? 0;

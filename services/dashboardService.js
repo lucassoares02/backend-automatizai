@@ -342,7 +342,17 @@ const getDashboard = async (companyId) => {
     schedule_open: scheduleOpen,
     manual_open: manualOpen,
     next_change_at: nextChangeAt,
-  } = resolveOpenStatus(openingHoursResult.rows, company.manual_open);
+    manual_until: manualUntil,
+    today_hours: todayHours,
+    timezone: companyTimezone,
+    utc_offset_minutes: utcOffsetMinutes,
+  } = resolveOpenStatus(
+    openingHoursResult.rows,
+    company.manual_open,
+    new Date(),
+    company.timezone,
+    company.manual_open_until,
+  );
 
   const today = todayStatsResult.rows[0];
   const month = monthStatsResult.rows[0];
@@ -456,6 +466,10 @@ const getDashboard = async (companyId) => {
       schedule_open: scheduleOpen,
       manual_open: manualOpen ?? null,
       next_change_at: nextChangeAt,
+      manual_until: manualUntil,
+      today_hours: todayHours,
+      timezone: companyTimezone,
+      utc_offset_minutes: utcOffsetMinutes,
     },
     today: {
       orders: Number(today.orders) || 0,

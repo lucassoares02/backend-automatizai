@@ -19,7 +19,6 @@ const { generateUniqueOrderTag } = require("../helpers/orderTag");
 const { UUID_RE } = require("../helpers/companySlug");
 const slots = require("../helpers/bookingSlots");
 const { hasStockControlSchema, reserveStock } = require("../helpers/stockReservation");
-const { meetsInclusiveLeadDays } = require("../helpers/preorder");
 const { loadIncludedBenefits } = require("../helpers/subscriptionEntitlements");
 
 const DEFAULTS = { step: 15, notice: 60, maxDays: 30, cancelWindow: 24 };
@@ -469,7 +468,8 @@ const _parseStartsAt = (value) => {
 
 /**
  * Produtos que o cliente leva junto com o serviço. Preço, opções, disponibilidade
- * e encomenda (antecedência até o dia do atendimento) resolvidos no servidor —
+ * e disponibilidade resolvidos no servidor (encomenda não tem antecedência
+ * própria; o atendimento já é agendado) —
  * o payload só informa produto, quantidade, opções e observação.
  */
 /**
@@ -502,7 +502,7 @@ const _addOnBaseUnit = (price, campaign, discountPercent) => {
   return Number(unit.toFixed(2));
 };
 
-const _resolveAddOnProducts = async ({ companyId, products, startsAt, campaignPrices, relatedDiscounts = new Map() }) => {
+const _resolveAddOnProducts = async ({ companyId, products, campaignPrices, relatedDiscounts = new Map() }) => {
   if (products == null) return [];
   if (!Array.isArray(products)) throw _error(400, "Lista de produtos inválida.");
   if (products.length > MAX_ADDON_LINES) throw _error(400, "Produtos demais para um agendamento.");
@@ -519,16 +519,10 @@ const _resolveAddOnProducts = async ({ companyId, products, startsAt, campaignPr
     return { menuItemId, quantity, notes, options: Array.isArray(raw?.options) ? raw.options : [] };
   });
 
-  const [hasPreorder, hasItemType] = await Promise.all([
-    Promise.all([columnExists("menu_items", "preorder_only"), columnExists("menu_items", "preorder_lead_days")]).then(
-      (cols) => cols.every(Boolean),
-    ),
-    columnExists("menu_items", "item_type"),
-  ]);
+  const hasItemType = await columnExists("menu_items", "item_type");
   const ids = [...new Set(lines.map((l) => l.menuItemId))];
   const rows = await pool.query(
     `SELECT id, name, price
-            ${hasPreorder ? ", COALESCE(preorder_only, false) AS preorder_only, preorder_lead_days" : ""}
      FROM menu_items
      WHERE company_id = $1 AND id = ANY($2::int[])
        AND available = true AND deleted_at IS NULL
@@ -542,20 +536,6 @@ const _resolveAddOnProducts = async ({ companyId, products, startsAt, campaignPr
   for (const line of lines) {
     const product = byId.get(line.menuItemId);
     if (!product) throw _error(409, "Um dos produtos escolhidos não está mais disponível.");
-    if (
-      product.preorder_only === true &&
-      !meetsInclusiveLeadDays({
-        orderedAt: new Date(),
-        scheduledAt: startsAt,
-        leadDays: Number(product.preorder_lead_days || 1),
-      })
-    ) {
-      throw _error(
-        400,
-        `"${product.name}" é sob encomenda e não fica pronto até a data do atendimento.`,
-        "PREORDER_LEAD_TIME_NOT_MET",
-      );
-    }
     let selection;
     try {
       selection = await productOptionsService.validateSelections(line.menuItemId, line.options);
@@ -689,7 +669,6 @@ const createBookingOrder = async (data, options = {}) => {
   let addOns = await _resolveAddOnProducts({
     companyId,
     products: subscriptionMode ? null : data.products,
-    startsAt,
     campaignPrices: activeCampaignPrices,
     relatedDiscounts: subscriptionMode ? new Map() : await _loadRelatedDiscounts(serviceId),
   });

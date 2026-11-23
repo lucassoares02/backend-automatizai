@@ -1,5 +1,7 @@
 const pool = require("../db");
-const { resolveOpenStatus, scheduleOpenAt } = require("../helpers/openStatus");
+const { resolveOpenStatus, scheduleOpenAt, manualUntil } = require("../helpers/openStatus");
+const { DEFAULT_TIMEZONE } = require("../helpers/bookingSlots");
+const { columnExists } = require("../helpers/schema");
 
 // Lista TODAS as lojas (uso do admin do sistema no switcher do header).
 // A tabela `companies` usa a coluna `name` como nome da loja (não existe
@@ -111,15 +113,46 @@ const findOpeningHours = async (companyId) => {
   return result.rows;
 };
 
+// companies.manual_open_until (DB_CHANGES_NEEDED.md) é opcional: sem a coluna,
+// a exceção expira só pela regra "o horário chegou ao mesmo estado".
+const _hasManualUntil = () => columnExists("companies", "manual_open_until");
+
+const _findOpenState = async (companyId) => {
+  const untilCol = (await _hasManualUntil()) ? "manual_open_until" : "NULL::timestamptz AS manual_open_until";
+  const result = await pool.query(
+    `SELECT id, manual_open, ${untilCol}, COALESCE(timezone, $2) AS timezone FROM companies WHERE id = $1`,
+    [companyId, DEFAULT_TIMEZONE],
+  );
+  return result.rows[0] || null;
+};
+
+// Limpa a exceção manual vencida (sem desfazer uma nova feita no meio tempo).
+const clearManualOpen = async (companyId, previous) => {
+  const untilSet = (await _hasManualUntil()) ? ", manual_open_until = NULL" : "";
+  await pool.query(`UPDATE companies SET manual_open = NULL${untilSet} WHERE id = $1 AND manual_open = $2`, [
+    companyId,
+    previous,
+  ]);
+};
+
 // Exceção manual de aberto/fechado. `manualOpen`: true|false abre/fecha agora;
 // null segue o horário. Pedir o mesmo que o horário já diz não é exceção: grava
-// null (assim "reabrir" uma loja fechada manualmente volta ao horário).
+// null (assim "reabrir" uma loja fechada manualmente volta ao horário). A
+// exceção vale até o horário chegar ao mesmo estado (`manual_open_until`).
 const setOpenStatus = async (companyId, manualOpen) => {
+  const company = await _findOpenState(companyId);
+  if (!company) return null;
+  const hours = await findOpeningHours(companyId);
+  const now = new Date();
   let value = manualOpen;
-  if (value !== null && value === scheduleOpenAt(await findOpeningHours(companyId))) value = null;
+  if (value !== null && value === scheduleOpenAt(hours, now, company.timezone)) value = null;
+  const until = value === null ? null : manualUntil(hours, value, now, company.timezone);
+  const hasUntil = await _hasManualUntil();
   const result = await pool.query(
-    "UPDATE companies SET manual_open = $1 WHERE id = $2 RETURNING id, manual_open",
-    [value, companyId],
+    hasUntil
+      ? "UPDATE companies SET manual_open = $1, manual_open_until = $3 WHERE id = $2 RETURNING id, manual_open"
+      : "UPDATE companies SET manual_open = $1 WHERE id = $2 RETURNING id, manual_open",
+    hasUntil ? [value, companyId, until] : [value, companyId],
   );
   return result.rows[0] || null;
 };
@@ -127,20 +160,17 @@ const setOpenStatus = async (companyId, manualOpen) => {
 // Status atual (aberto/fechado) da loja: horários + exceção manual. Consulta
 // leve usada pelo header do portal (sino), sem carregar o dashboard inteiro.
 const getOpenStatus = async (companyId) => {
-  const [companyResult, hours] = await Promise.all([
-    pool.query("SELECT id, manual_open FROM companies WHERE id = $1", [companyId]),
-    findOpeningHours(companyId),
-  ]);
-  const company = companyResult.rows[0];
+  const [company, hours] = await Promise.all([_findOpenState(companyId), findOpeningHours(companyId)]);
   if (!company) return null;
-  const { manual_expired: expired, ...status } = resolveOpenStatus(hours, company.manual_open);
+  const { manual_expired: expired, ...status } = resolveOpenStatus(
+    hours,
+    company.manual_open,
+    new Date(),
+    company.timezone,
+    company.manual_open_until,
+  );
   // A exceção manual já terminou (o horário virou): limpa o campo.
-  if (expired) {
-    await pool.query("UPDATE companies SET manual_open = NULL WHERE id = $1 AND manual_open = $2", [
-      company.id,
-      company.manual_open,
-    ]);
-  }
+  if (expired) await clearManualOpen(company.id, company.manual_open);
   return { id: company.id, ...status };
 };
 

@@ -37,7 +37,9 @@ test("abertura da loja: domingo 0/7, fechado e virada da madrugada", () => {
   ];
   assert.deepEqual(companyDayIntervals(hours, 0), [{ start: 600, end: 840 }]);
   assert.deepEqual(companyDayIntervals(hours, 1), [{ start: 1080, end: 1440 }]);
-  assert.deepEqual(companyDayIntervals(hours, 2), []);
+  // Terça fechada, mas o turno de segunda (18h–02h) continua até as 02h.
+  assert.deepEqual(companyDayIntervals(hours, 2), [{ start: 0, end: 120 }]);
+  assert.deepEqual(companyDayIntervals(hours, 3), []);
   assert.equal(companyDayIntervals([], 1), null);
   assert.deepEqual(intersectIntervals([{ start: 0, end: 100 }], [{ start: 50, end: 200 }]), [{ start: 50, end: 100 }]);
 });
