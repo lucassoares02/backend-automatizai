@@ -261,6 +261,8 @@ router.get("/admin/stores", authMiddleware, requireSystemAdminUser, adminStores.
 router.get("/admin/stores/:companyId/users", authMiddleware, requireSystemAdminUser, adminStores.listStoreUsers);
 router.post("/admin/stores/:companyId/users", authMiddleware, requireSystemAdminUser, adminStores.linkUser);
 router.delete("/admin/stores/:companyId/users/:userId", authMiddleware, requireSystemAdminUser, adminStores.unlinkUser);
+// Exclusão completa da loja (body { confirm_name } com o nome exato da loja).
+router.delete("/admin/stores/:companyId", authMiddleware, requireSystemAdminUser, adminStores.deleteStore);
 router.post("/search-address", authMiddleware, connections.searchAddress);
 
 //additional_info

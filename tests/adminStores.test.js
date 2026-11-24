@@ -24,7 +24,7 @@ const user = ["FROM users", { rows: [{ id: 3, name: "Ana", email: "ana@x.com" }]
 
 test("todas as rotas /admin/stores exigem admin do sistema autenticado por usuário", () => {
   const layers = routes.stack.filter((l) => l.route?.path?.startsWith("/admin/stores"));
-  assert.equal(layers.length, 4);
+  assert.equal(layers.length, 5);
   for (const layer of layers) {
     const handles = layer.route.stack.map((s) => s.handle);
     assert.ok(handles.includes(requireSystemAdminUser), layer.route.path);

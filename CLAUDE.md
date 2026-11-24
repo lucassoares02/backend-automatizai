@@ -45,7 +45,7 @@ api/
 - Companies:
   `GET /companies` (auth), `PATCH /companies` (auth), `GET /companies/:company` (auth), `GET /providers/city/:company` (auth)
 - Account: `GET /account` (auth), `PATCH /account` (auth)
-- Admin lojas (só admin do sistema por JWT, `requireSystemAdminUser`): `GET /admin/stores`, `GET|POST /admin/stores/:companyId/users` (POST `{ email }` vincula usuário já cadastrado em `user_companies`, relation_type 0; 404 e-mail inexistente, 409 já vinculado), `DELETE /admin/stores/:companyId/users/:userId`
+- Admin lojas (só admin do sistema por JWT, `requireSystemAdminUser`): `GET /admin/stores`, `GET|POST /admin/stores/:companyId/users` (POST `{ email }` vincula usuário já cadastrado em `user_companies`, relation_type 0; 404 e-mail inexistente, 409 já vinculado), `DELETE /admin/stores/:companyId/users/:userId`, `DELETE /admin/stores/:companyId` (body `{ confirm_name }` = nome exato da loja; exclui a loja e tudo dela numa transação, como `DELETE_COMPANIES.sql`, + usuários exclusivos; depois cancela assinaturas Pagar.me e apaga instância Evolution/workflow n8n em best-effort)
 - Company opening hours (CRUD)
 - Menu categories (CRUD)
 - Menu items (CRUD + `GET /menu_items/company/:id`)

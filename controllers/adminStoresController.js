@@ -1,10 +1,12 @@
 const service = require("../services/adminStoresService");
+const deletionService = require("../services/adminCompanyDeletionService");
 
 // Gestão de lojas e vínculos de usuários. Somente admin do sistema autenticado
 // por usuário (rotas protegidas por requireSystemAdminUser).
 
 const STATUS_BY_CODE = {
   INVALID_EMAIL: 400,
+  NAME_MISMATCH: 400,
   STORE_NOT_FOUND: 404,
   USER_NOT_FOUND: 404,
   LINK_NOT_FOUND: 404,
@@ -63,4 +65,24 @@ const unlinkUser = async (req, res) => {
   }
 };
 
-module.exports = { listStores, listStoreUsers, linkUser, unlinkUser };
+// Exclui a loja e TUDO que pertence a ela. Exige o nome da loja digitado
+// (`confirm_name`) como confirmação, conferido também no servidor.
+const deleteStore = async (req, res) => {
+  const companyId = _parseId(req.params.companyId);
+  if (!companyId) return res.status(400).json({ success: false, error: "Loja inválida" });
+  try {
+    const result = await deletionService.deleteCompany(companyId, req.body?.confirm_name);
+    console.log(
+      `[admin-stores] Loja ${companyId} (${result.name}) excluída por ${req.user?.id}`,
+      { removed: result.removed, removed_users: result.removed_users },
+    );
+    if (result.external_failures.length) {
+      console.warn(`[admin-stores] Limpeza externa da loja ${companyId} com falhas:`, result.external_failures);
+    }
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    return _fail(res, error, "Falha ao excluir a loja");
+  }
+};
+
+module.exports = { listStores, listStoreUsers, linkUser, unlinkUser, deleteStore };
