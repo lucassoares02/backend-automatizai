@@ -3449,6 +3449,7 @@ module.exports = {
   requestWithdrawal,
   getPaymentsSummary,
   getFinancialDashboard,
+  getFeeProfile: _feeProfile,
   getSubscriptionFeeProfile: _subscriptionFeeProfile,
   createCardCharge,
   createPixCharge,

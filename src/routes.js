@@ -570,6 +570,7 @@ router.get("/pagarme/recipient/:companyId", authMiddleware, authorizeCompanyPara
 router.patch("/pagarme/transfer-settings", authMiddleware, authorizeCompanyBody(), pagarme.updateTransferSettings);
 router.get("/pagarme/payments/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.payments);
 router.get("/pagarme/financial-dashboard/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.financialDashboard);
+router.get("/pagarme/fee-profile", authMiddleware, pagarme.feeProfile);
 router.get("/pagarme/subscription-fee-profile", authMiddleware, pagarme.subscriptionFeeProfile);
 router.get("/pagarme/balance/:companyId", authMiddleware, authorizeCompanyParam("companyId"), pagarme.balance);
 router.post("/pagarme/withdraw", authMiddleware, authorizeCompanyBody(), pagarme.withdraw);

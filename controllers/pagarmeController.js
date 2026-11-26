@@ -180,6 +180,11 @@ const financialDashboard = async (req, res) => {
   }
 };
 
+// Taxas contratuais de Pix e cartão: não dependem de recebedor, para o
+// comerciante conhecer os custos antes de se cadastrar.
+const feeProfile = async (_req, res) =>
+  res.status(200).json(service.getFeeProfile());
+
 const subscriptionFeeProfile = async (_req, res) =>
   res.status(200).json(service.getSubscriptionFeeProfile());
 
@@ -366,4 +371,4 @@ const webhook = async (req, res) => {
   }
 };
 
-module.exports = { connect, kyc, status, recipient, updateTransferSettings, payments, financialDashboard, subscriptionFeeProfile, balance, withdraw, threeDsToken, payCard, payPix, listCards, deleteCard, webhook };
+module.exports = { connect, kyc, status, recipient, updateTransferSettings, payments, financialDashboard, feeProfile, subscriptionFeeProfile, balance, withdraw, threeDsToken, payCard, payPix, listCards, deleteCard, webhook };
